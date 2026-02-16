@@ -1,0 +1,44 @@
+{
+  "name": "claude-agent-kit",
+  "version": "0.1.0",
+  "description": "Bootstrap persistent agent infrastructure into any Claude Code project",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "agent-kit": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "claude",
+    "agent",
+    "cli",
+    "automation",
+    "claude-code"
+  ],
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "croner": "^8.0.0",
+    "express": "^4.18.0",
+    "picocolors": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0",
+    "vitest": "^2.0.0"
+  }
+}
