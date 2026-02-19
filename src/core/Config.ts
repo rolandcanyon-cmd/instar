@@ -134,6 +134,11 @@ export function loadConfig(projectDir?: string): AgentKitConfig {
       memoryMonitoring: true,
       healthCheckIntervalMs: 30000,
     },
+    authToken: fileConfig.authToken,
+    relationships: fileConfig.relationships || {
+      relationshipsDir: path.join(stateDir, 'relationships'),
+      maxRecentInteractions: 20,
+    },
   };
 }
 
@@ -146,6 +151,7 @@ export function ensureStateDir(stateDir: string): void {
     path.join(stateDir, 'state'),
     path.join(stateDir, 'state', 'sessions'),
     path.join(stateDir, 'state', 'jobs'),
+    path.join(stateDir, 'relationships'),
     path.join(stateDir, 'logs'),
   ];
 

@@ -1,0 +1,54 @@
+#!/bin/bash
+# telegram-reply.sh — Send a message back to a Telegram topic via agent-kit server.
+#
+# Usage:
+#   ./telegram-reply.sh TOPIC_ID "message text"
+#   echo "message text" | ./telegram-reply.sh TOPIC_ID
+#   cat <<'EOF' | ./telegram-reply.sh TOPIC_ID
+#   Multi-line message here
+#   EOF
+#
+# Reads AGENT_KIT_PORT from environment (default: 4040).
+
+TOPIC_ID="$1"
+shift
+
+if [ -z "$TOPIC_ID" ]; then
+  echo "Usage: telegram-reply.sh TOPIC_ID [message]" >&2
+  exit 1
+fi
+
+# Read message from args or stdin
+if [ $# -gt 0 ]; then
+  MSG="$*"
+else
+  MSG="$(cat)"
+fi
+
+if [ -z "$MSG" ]; then
+  echo "No message provided" >&2
+  exit 1
+fi
+
+PORT="${AGENT_KIT_PORT:-4040}"
+
+# Escape for JSON
+JSON_MSG=$(printf '%s' "$MSG" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null)
+if [ -z "$JSON_MSG" ]; then
+  # Fallback if python3 not available: basic escape
+  JSON_MSG="\"$(printf '%s' "$MSG" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g')\""
+fi
+
+RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:${PORT}/telegram/reply/${TOPIC_ID}" \
+  -H 'Content-Type: application/json' \
+  -d "{\"text\":${JSON_MSG}}")
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "200" ]; then
+  echo "Sent $(echo "$MSG" | wc -c | tr -d ' ') chars to topic $TOPIC_ID"
+else
+  echo "Failed (HTTP $HTTP_CODE): $BODY" >&2
+  exit 1
+fi

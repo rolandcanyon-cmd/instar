@@ -20,19 +20,34 @@
 
 import { Command } from 'commander';
 import { initProject } from './commands/init.js';
+import { runSetup } from './commands/setup.js';
+import { startServer, stopServer } from './commands/server.js';
+import { showStatus } from './commands/status.js';
+import { addUser, listUsers } from './commands/user.js';
+import { addJob, listJobs } from './commands/job.js';
 
 const program = new Command();
 
 program
   .name('agent-kit')
   .description('Bootstrap persistent agent infrastructure into any Claude Code project')
-  .version('0.1.0');
+  .version('0.1.0')
+  .option('--classic', 'Use the classic inquirer-based setup wizard instead of Claude')
+  .action((opts) => runSetup(opts)); // Default: run interactive setup when no subcommand given
 
-// ── Init ──────────────────────────────────────────────────────────
+// ── Setup (explicit alias) ────────────────────────────────────────
+
+program
+  .command('setup')
+  .description('Interactive setup wizard (same as running `agent-kit` with no args)')
+  .option('--classic', 'Use the classic inquirer-based setup wizard instead of Claude')
+  .action((opts) => runSetup(opts));
+
+// ── Init (non-interactive) ────────────────────────────────────────
 
 program
   .command('init')
-  .description('Initialize agent infrastructure in a project')
+  .description('Initialize with defaults (non-interactive, use flags to configure)')
   .option('-d, --dir <path>', 'Project directory (default: current directory)')
   .option('-n, --name <name>', 'Project name (default: directory name)')
   .option('--port <port>', 'Server port (default: 4040)', parseInt)
@@ -50,7 +65,7 @@ addCmd
   .option('--token <token>', 'Telegram bot token')
   .option('--chat-id <id>', 'Telegram forum chat ID')
   .action((_opts) => {
-    console.log('TODO: Add Telegram adapter');
+    console.log('TODO: Add Telegram adapter (scaffolding only — use programmatic API for now)');
   });
 
 addCmd
@@ -85,25 +100,22 @@ serverCmd
   .command('start')
   .description('Start the agent server')
   .option('--foreground', 'Run in foreground (default: background via tmux)')
-  .action((_opts) => {
-    console.log('TODO: Start server');
-  });
+  .option('-d, --dir <path>', 'Project directory')
+  .action(startServer);
 
 serverCmd
   .command('stop')
   .description('Stop the agent server')
-  .action(() => {
-    console.log('TODO: Stop server');
-  });
+  .option('-d, --dir <path>', 'Project directory')
+  .action(stopServer);
 
 // ── Status ────────────────────────────────────────────────────────
 
 program
   .command('status')
   .description('Show agent infrastructure status')
-  .action(() => {
-    console.log('TODO: Show status');
-  });
+  .option('-d, --dir <path>', 'Project directory')
+  .action(showStatus);
 
 // ── User ──────────────────────────────────────────────────────────
 
@@ -118,17 +130,15 @@ userCmd
   .requiredOption('--name <name>', 'User display name')
   .option('--telegram <topicId>', 'Telegram topic ID')
   .option('--email <email>', 'Email address')
+  .option('--slack <userId>', 'Slack user ID')
   .option('--permissions <perms>', 'Comma-separated permissions', (v: string) => v.split(','))
-  .action((_opts) => {
-    console.log('TODO: Add user');
-  });
+  .action(addUser);
 
 userCmd
   .command('list')
   .description('List all users')
-  .action(() => {
-    console.log('TODO: List users');
-  });
+  .option('-d, --dir <path>', 'Project directory')
+  .action(listUsers);
 
 // ── Job ───────────────────────────────────────────────────────────
 
@@ -142,17 +152,17 @@ jobCmd
   .requiredOption('--slug <slug>', 'Job identifier')
   .requiredOption('--name <name>', 'Job display name')
   .requiredOption('--schedule <cron>', 'Cron expression')
+  .option('--description <desc>', 'Job description')
   .option('--priority <priority>', 'Priority (critical|high|medium|low)', 'medium')
   .option('--model <model>', 'Model tier (opus|sonnet|haiku)', 'sonnet')
-  .action((_opts) => {
-    console.log('TODO: Add job');
-  });
+  .option('--type <type>', 'Execution type (skill|prompt|script)', 'prompt')
+  .option('--execute <value>', 'Execution value (skill name, prompt text, or script path)')
+  .action(addJob);
 
 jobCmd
   .command('list')
   .description('List all jobs')
-  .action(() => {
-    console.log('TODO: List jobs');
-  });
+  .option('-d, --dir <path>', 'Project directory')
+  .action(listJobs);
 
 program.parse();

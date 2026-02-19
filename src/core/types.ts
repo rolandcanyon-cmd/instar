@@ -66,6 +66,8 @@ export interface JobDefinition {
   execute: JobExecution;
   /** Tags for filtering/grouping */
   tags?: string[];
+  /** Telegram topic ID this job reports to (auto-created if not set) */
+  topicId?: number;
 }
 
 export type JobPriority = 'critical' | 'high' | 'medium' | 'low';
@@ -215,6 +217,53 @@ export interface ComponentHealth {
   lastCheck: string;
 }
 
+// ── Relationship Tracking ───────────────────────────────────────────
+
+export interface RelationshipRecord {
+  /** Unique identifier for this person */
+  id: string;
+  /** Display name */
+  name: string;
+  /** Known identifiers across platforms */
+  channels: UserChannel[];
+  /** When the agent first interacted with this person */
+  firstInteraction: string;
+  /** When the agent last interacted with this person */
+  lastInteraction: string;
+  /** Total number of interactions */
+  interactionCount: number;
+  /** Key topics discussed across conversations */
+  themes: string[];
+  /** Agent's notes about this person — observations, preferences, context */
+  notes: string;
+  /** Communication style preferences the agent has observed */
+  communicationStyle?: string;
+  /** How significant this relationship is (0-10, auto-derived from frequency and depth) */
+  significance: number;
+  /** Brief summary of the relationship arc */
+  arcSummary?: string;
+  /** Per-interaction log (last N interactions, kept compact) */
+  recentInteractions: InteractionSummary[];
+}
+
+export interface InteractionSummary {
+  /** When this interaction happened */
+  timestamp: string;
+  /** Which platform/channel */
+  channel: string;
+  /** Brief summary of what was discussed */
+  summary: string;
+  /** Topics touched on */
+  topics?: string[];
+}
+
+export interface RelationshipManagerConfig {
+  /** Directory to store relationship files */
+  relationshipsDir: string;
+  /** Maximum recent interactions to keep per relationship */
+  maxRecentInteractions: number;
+}
+
 // ── Activity Tracking ───────────────────────────────────────────────
 
 export interface ActivityEvent {
@@ -249,6 +298,10 @@ export interface AgentKitConfig {
   messaging: MessagingAdapterConfig[];
   /** Monitoring config */
   monitoring: MonitoringConfig;
+  /** Auth token for API access (generated during setup) */
+  authToken?: string;
+  /** Relationship tracking config */
+  relationships: RelationshipManagerConfig;
 }
 
 export interface MessagingAdapterConfig {

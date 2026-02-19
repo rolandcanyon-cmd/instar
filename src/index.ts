@@ -7,10 +7,25 @@
 // Core
 export { SessionManager } from './core/SessionManager.js';
 export { StateManager } from './core/StateManager.js';
+export { RelationshipManager } from './core/RelationshipManager.js';
 export { loadConfig, detectTmuxPath, detectClaudePath, ensureStateDir } from './core/Config.js';
 
 // Users
 export { UserManager } from './users/UserManager.js';
+
+// Scheduler
+export { JobScheduler } from './scheduler/JobScheduler.js';
+export { loadJobs, validateJob } from './scheduler/JobLoader.js';
+
+// Server
+export { AgentServer } from './server/AgentServer.js';
+export { createRoutes } from './server/routes.js';
+
+// Monitoring
+export { HealthChecker } from './monitoring/HealthChecker.js';
+
+// Messaging
+export { TelegramAdapter } from './messaging/TelegramAdapter.js';
 
 // Types
 export type {
@@ -37,4 +52,7 @@ export type {
   ActivityEvent,
   AgentKitConfig,
   MonitoringConfig,
+  RelationshipRecord,
+  RelationshipManagerConfig,
+  InteractionSummary,
 } from './core/types.js';
