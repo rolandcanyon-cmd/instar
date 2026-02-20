@@ -123,10 +123,17 @@ export class FeedbackManager {
     let succeeded = 0;
     for (const item of unforwarded) {
       try {
+        // Only send safe fields — same as submit(), never leak internal metadata
+        const payload = {
+          id: item.id,
+          type: item.type,
+          message: item.message,
+          submittedAt: item.submittedAt,
+        };
         const response = await fetch(this.config.webhookUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(item),
+          body: JSON.stringify(payload),
           signal: AbortSignal.timeout(10000),
         });
 
@@ -160,10 +167,15 @@ export class FeedbackManager {
   private saveFeedback(items: FeedbackItem[]): void {
     const dir = path.dirname(this.feedbackFile);
     fs.mkdirSync(dir, { recursive: true });
-    // Atomic write: write to .tmp then rename
-    const tmpPath = this.feedbackFile + '.tmp';
-    fs.writeFileSync(tmpPath, JSON.stringify(items, null, 2));
-    fs.renameSync(tmpPath, this.feedbackFile);
+    // Atomic write: unique temp filename prevents concurrent corruption
+    const tmpPath = `${this.feedbackFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(items, null, 2));
+      fs.renameSync(tmpPath, this.feedbackFile);
+    } catch (err) {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   private appendFeedback(item: FeedbackItem): void {

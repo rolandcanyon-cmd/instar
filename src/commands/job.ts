@@ -62,10 +62,15 @@ export async function addJob(options: JobAddOptions): Promise<void> {
   }
 
   jobs.push(newJob);
-  // Atomic write: tmp + rename to prevent corruption
-  const tmpPath = jobsFile + '.tmp';
-  fs.writeFileSync(tmpPath, JSON.stringify(jobs, null, 2));
-  fs.renameSync(tmpPath, jobsFile);
+  // Atomic write: unique temp filename prevents concurrent corruption
+  const tmpPath = `${jobsFile}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(jobs, null, 2));
+    fs.renameSync(tmpPath, jobsFile);
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
+  }
 
   console.log(pc.green(`Job "${options.name}" (${options.slug}) added.`));
   console.log(`  Schedule: ${options.schedule}`);

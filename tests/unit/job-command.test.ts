@@ -14,8 +14,8 @@ describe('Job command (source verification)', () => {
       path.join(process.cwd(), 'src/commands/job.ts'),
       'utf-8',
     );
-    // Should use tmp + rename pattern, NOT direct writeFileSync to jobsFile
-    expect(source).toContain("jobsFile + '.tmp'");
+    // Should use atomic write with unique temp filenames (pid + random)
+    expect(source).toContain('`${jobsFile}.${process.pid}');
     expect(source).toContain('fs.renameSync(tmpPath, jobsFile)');
   });
 
