@@ -94,6 +94,8 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(config.sessions.maxSessions).toBe(3);
     expect(config.scheduler.enabled).toBe(true); // Enabled by default for fresh
     expect(config.relationships.maxRecentInteractions).toBe(20);
+    expect(config.updates).toBeDefined();
+    expect(config.updates.autoApply).toBe(false); // Safe default
   });
 
   it('writes config.json with restrictive permissions (0o600)', () => {

@@ -172,6 +172,9 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
       relationshipsDir: path.join(stateDir, 'relationships'),
       maxRecentInteractions: 20,
     },
+    updates: {
+      autoApply: false,
+    },
   };
 
   const configFilePath = path.join(stateDir, 'config.json');
@@ -321,6 +324,9 @@ async function initExistingProject(options: InitOptions): Promise<void> {
     relationships: {
       relationshipsDir: path.join(stateDir, 'relationships'),
       maxRecentInteractions: 20,
+    },
+    updates: {
+      autoApply: false,
     },
   };
 
@@ -577,7 +583,7 @@ function getDefaultJobs(port: number): object[] {
       enabled: true,
       execute: {
         type: 'prompt',
-        value: `Check for instar updates: curl http://localhost:${port}/updates. If updateAvailable is false, do nothing. If updateAvailable is true: 1) Read the changeSummary field to understand what changed. 2) Notify the user conversationally via Telegram (if configured) — tell them what version is available, what changed (in plain language, not technical jargon), and ask if they'd like to apply it. 3) If the user approves (or if auto-updates are enabled in config), apply the update: curl -X POST http://localhost:${port}/updates/apply. 4) Report the result — whether it succeeded, what version is now installed, and whether a restart is needed.`,
+        value: `Check for instar updates: curl http://localhost:${port}/updates. If updateAvailable is false, do nothing. If updateAvailable is true: 1) Read the changeSummary field to understand what changed. 2) Check .instar/config.json for updates.autoApply — if true, apply automatically. If false (default): notify the user conversationally via Telegram (if configured) — tell them what version is available, what changed (in plain language, not technical jargon), and ask if they'd like to apply it. 3) When approved (or auto-apply is on), apply: curl -X POST http://localhost:${port}/updates/apply. 4) Report the result — whether it succeeded, what version is now installed, and whether a restart is needed.`,
       },
       tags: ['coherence', 'default'],
     },

@@ -15,6 +15,7 @@ describe('Package exports (src/index.ts)', () => {
     expect(mod.StateManager).toBeDefined();
     expect(mod.RelationshipManager).toBeDefined();
     expect(mod.FeedbackManager).toBeDefined();
+    expect(mod.DispatchManager).toBeDefined();
     expect(mod.UpdateChecker).toBeDefined();
 
     // Users
@@ -60,6 +61,7 @@ describe('Package exports (src/index.ts)', () => {
     expect(typeof mod.StateManager).toBe('function');
     expect(typeof mod.RelationshipManager).toBe('function');
     expect(typeof mod.FeedbackManager).toBe('function');
+    expect(typeof mod.DispatchManager).toBe('function');
     expect(typeof mod.UpdateChecker).toBe('function');
     expect(typeof mod.UserManager).toBe('function');
     expect(typeof mod.JobScheduler).toBe('function');

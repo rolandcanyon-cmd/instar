@@ -477,6 +477,12 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json(lastCheck);
   });
 
+  router.get('/updates/config', (_req, res) => {
+    res.json({
+      autoApply: ctx.config.updates?.autoApply ?? false,
+    });
+  });
+
   router.post('/updates/apply', async (_req, res) => {
     if (!ctx.updateChecker) {
       res.status(503).json({ error: 'Update checker not configured' });

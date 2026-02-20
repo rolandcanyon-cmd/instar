@@ -68,5 +68,6 @@ export type {
   UpdateInfo,
   UpdateResult,
   DispatchConfig,
+  UpdateConfig,
 } from './core/types.js';
 export type { Dispatch, DispatchCheckResult } from './core/DispatchManager.js';

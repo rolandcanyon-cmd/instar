@@ -378,6 +378,8 @@ export interface InstarConfig {
   feedback?: FeedbackConfig;
   /** Dispatch (intelligence broadcast) config */
   dispatches?: DispatchConfig;
+  /** Update configuration */
+  updates?: UpdateConfig;
   /** Request timeout in milliseconds (default: 30000) */
   requestTimeoutMs?: number;
   /** Instar version (from package.json) */
@@ -393,6 +395,11 @@ export interface DispatchConfig {
   dispatchFile: string;
   /** Instar version — sent in headers for version-specific filtering */
   version?: string;
+}
+
+export interface UpdateConfig {
+  /** Whether to auto-apply updates without user confirmation (default: false) */
+  autoApply: boolean;
 }
 
 export interface MessagingAdapterConfig {
