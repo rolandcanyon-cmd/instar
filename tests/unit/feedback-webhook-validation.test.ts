@@ -282,18 +282,18 @@ describe('FeedbackManager webhook HTTP error handling', () => {
     expect(capturedPayload).toBeDefined();
     const parsed = JSON.parse(capturedPayload!);
 
-    // Should include safe fields
-    expect(parsed.id).toBeTruthy();
+    // Should include identification fields for endpoint auth
+    expect(parsed.feedbackId).toBeTruthy();
     expect(parsed.type).toBe('bug');
     expect(parsed.title).toBe('Payload test');
     expect(parsed.description).toBe('Check payload');
     expect(parsed.submittedAt).toBeTruthy();
+    expect(parsed.agentName).toBe('test-agent');
+    expect(parsed.instarVersion).toBeTruthy();
+    expect(parsed.nodeVersion).toBeTruthy();
+    expect(parsed.os).toBe('darwin arm64');
 
-    // Should NOT include internal metadata
-    expect(parsed.agentName).toBeUndefined();
-    expect(parsed.instarVersion).toBeUndefined();
-    expect(parsed.nodeVersion).toBeUndefined();
-    expect(parsed.os).toBeUndefined();
+    // Should NOT include internal-only state
     expect(parsed.forwarded).toBeUndefined();
   });
 });

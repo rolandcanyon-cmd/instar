@@ -301,7 +301,10 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Set up feedback and update checking
     let feedback: FeedbackManager | undefined;
     if (config.feedback) {
-      feedback = new FeedbackManager(config.feedback);
+      feedback = new FeedbackManager({
+        ...config.feedback,
+        version: config.version,
+      });
       console.log(pc.green('  Feedback loop enabled'));
     }
     const updateChecker = new UpdateChecker(config.stateDir);

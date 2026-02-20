@@ -313,6 +313,8 @@ export interface FeedbackConfig {
   webhookUrl: string;
   /** Local feedback storage file */
   feedbackFile: string;
+  /** Instar version — sent in User-Agent and X-Instar-Version headers for endpoint auth */
+  version?: string;
 }
 
 export interface UpdateInfo {

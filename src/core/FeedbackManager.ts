@@ -7,6 +7,9 @@
  *
  * Part of the "Rising Tide" system — every user's feedback improves
  * the platform for everyone.
+ *
+ * Security: Sends proper identification headers (User-Agent, X-Instar-Version)
+ * so the receiving endpoint can verify requests come from real Instar agents.
  */
 
 import fs from 'node:fs';
@@ -20,6 +23,7 @@ const MAX_FEEDBACK_ITEMS = 1000;
 export class FeedbackManager {
   private config: FeedbackConfig;
   private feedbackFile: string;
+  private version: string;
 
   constructor(config: FeedbackConfig) {
     if (config.webhookUrl) {
@@ -27,6 +31,16 @@ export class FeedbackManager {
     }
     this.config = config;
     this.feedbackFile = config.feedbackFile;
+    this.version = config.version || '0.0.0';
+  }
+
+  /** Standard headers that identify this as a legitimate Instar agent. */
+  private get webhookHeaders(): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      'User-Agent': `instar/${this.version} (node/${process.version})`,
+      'X-Instar-Version': this.version,
+    };
   }
 
   /** Validate webhook URL is HTTPS and not pointing to internal addresses. */
@@ -62,17 +76,21 @@ export class FeedbackManager {
     // Forward to webhook if enabled (before persisting, so we know result)
     if (this.config.enabled && this.config.webhookUrl) {
       try {
-        // Only send safe fields to webhook — not full internal state
         const payload = {
-          id: feedback.id,
+          feedbackId: feedback.id,
           type: feedback.type,
           title: feedback.title,
           description: feedback.description,
+          agentName: feedback.agentName,
+          instarVersion: this.version,
+          nodeVersion: process.version,
+          os: feedback.os,
+          context: feedback.context,
           submittedAt: feedback.submittedAt,
         };
         const response = await fetch(this.config.webhookUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: this.webhookHeaders,
           body: JSON.stringify(payload),
           signal: AbortSignal.timeout(10000), // 10s timeout
         });
@@ -124,17 +142,21 @@ export class FeedbackManager {
     let succeeded = 0;
     for (const item of unforwarded) {
       try {
-        // Only send safe fields — same as submit(), never leak internal metadata
         const payload = {
-          id: item.id,
+          feedbackId: item.id,
           type: item.type,
           title: item.title,
           description: item.description,
+          agentName: item.agentName,
+          instarVersion: this.version,
+          nodeVersion: item.nodeVersion,
+          os: item.os,
+          context: item.context,
           submittedAt: item.submittedAt,
         };
         const response = await fetch(this.config.webhookUrl, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: this.webhookHeaders,
           body: JSON.stringify(payload),
           signal: AbortSignal.timeout(10000),
         });
