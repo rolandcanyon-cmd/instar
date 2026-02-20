@@ -1,5 +1,5 @@
 /**
- * Tests for CLI `add` subcommands — addTelegram, addQuota.
+ * Tests for CLI `add` subcommands — addTelegram, addQuota, addSentry.
  *
  * Validates config file mutation, atomic writes, and error handling.
  */
@@ -195,6 +195,92 @@ describe('CLI add commands', () => {
       expect(saved.monitoring.quotaTracking).toBe(true);
       expect(saved.monitoring.memoryMonitoring).toBe(true);
       expect(saved.monitoring.healthCheckIntervalMs).toBe(15000);
+    });
+  });
+
+  describe('addSentry logic', () => {
+    it('adds sentry config to monitoring section', () => {
+      const configPath = writeConfig();
+
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      if (!config.monitoring) config.monitoring = {};
+      config.monitoring.sentry = {
+        enabled: true,
+        dsn: 'https://key@o0.ingest.sentry.io/123',
+      };
+
+      const tmpPath = configPath + '.tmp';
+      fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
+      fs.renameSync(tmpPath, configPath);
+
+      const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(saved.monitoring.sentry.enabled).toBe(true);
+      expect(saved.monitoring.sentry.dsn).toBe('https://key@o0.ingest.sentry.io/123');
+    });
+
+    it('creates monitoring section if missing when adding sentry', () => {
+      const configPath = writeConfig();
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      delete config.monitoring;
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+      const config2 = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      if (!config2.monitoring) config2.monitoring = {};
+      config2.monitoring.sentry = {
+        enabled: true,
+        dsn: 'https://key@sentry.io/456',
+      };
+
+      const tmpPath = configPath + '.tmp';
+      fs.writeFileSync(tmpPath, JSON.stringify(config2, null, 2));
+      fs.renameSync(tmpPath, configPath);
+
+      const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(saved.monitoring.sentry.dsn).toBe('https://key@sentry.io/456');
+    });
+
+    it('preserves existing monitoring settings when adding sentry', () => {
+      const configPath = writeConfig({
+        monitoring: {
+          quotaTracking: true,
+          memoryMonitoring: true,
+          healthCheckIntervalMs: 15000,
+        },
+      });
+
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      config.monitoring.sentry = {
+        enabled: true,
+        dsn: 'https://key@sentry.io/789',
+      };
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+      const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(saved.monitoring.sentry.dsn).toBe('https://key@sentry.io/789');
+      expect(saved.monitoring.quotaTracking).toBe(true);
+      expect(saved.monitoring.memoryMonitoring).toBe(true);
+      expect(saved.monitoring.healthCheckIntervalMs).toBe(15000);
+    });
+
+    it('replaces existing sentry config', () => {
+      const configPath = writeConfig({
+        monitoring: {
+          sentry: { enabled: true, dsn: 'https://old@sentry.io/111' },
+        },
+      });
+
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      config.monitoring.sentry = {
+        enabled: true,
+        dsn: 'https://new@sentry.io/222',
+      };
+
+      const tmpPath = configPath + '.tmp';
+      fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
+      fs.renameSync(tmpPath, configPath);
+
+      const saved = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      expect(saved.monitoring.sentry.dsn).toBe('https://new@sentry.io/222');
     });
   });
 });

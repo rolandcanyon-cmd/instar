@@ -82,6 +82,47 @@ async function addTelegram(opts: { token?: string; chatId?: string }): Promise<v
 }
 
 /**
+ * Add Sentry error monitoring configuration.
+ */
+async function addSentry(opts: { dsn?: string }): Promise<void> {
+  const configPath = path.join(process.cwd(), '.instar', 'config.json');
+  if (!fs.existsSync(configPath)) {
+    console.log(pc.red('No .instar/config.json found. Run `instar init` first.'));
+    process.exit(1);
+  }
+
+  if (!opts.dsn) {
+    console.log(pc.yellow('The --dsn option is required.'));
+    console.log();
+    console.log('Usage:');
+    console.log(`  instar add sentry --dsn https://examplePublicKey@o0.ingest.sentry.io/0`);
+    console.log();
+    console.log('Get your DSN from https://sentry.io → Project Settings → Client Keys (DSN)');
+    process.exit(1);
+  }
+
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+  if (!config.monitoring) {
+    config.monitoring = {};
+  }
+
+  config.monitoring.sentry = {
+    enabled: true,
+    dsn: opts.dsn,
+  };
+
+  const tmpPath = configPath + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
+  fs.renameSync(tmpPath, configPath);
+
+  console.log(pc.green('Sentry error monitoring configured!'));
+  console.log(`  DSN: ${opts.dsn.slice(0, 30)}...`);
+  console.log();
+  console.log(`Restart the server to apply: ${pc.cyan('instar server stop && instar server start')}`);
+}
+
+/**
  * Enable quota tracking in the project config.
  */
 async function addQuota(opts: { stateFile?: string }): Promise<void> {
@@ -171,9 +212,7 @@ addCmd
   .command('sentry')
   .description('Add Sentry error monitoring')
   .option('--dsn <dsn>', 'Sentry DSN')
-  .action((_opts) => {
-    console.log('TODO: Add Sentry integration');
-  });
+  .action((opts) => addSentry(opts));
 
 addCmd
   .command('quota')

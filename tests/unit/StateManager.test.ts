@@ -139,5 +139,98 @@ describe('StateManager', () => {
     it('returns null for missing keys', () => {
       expect(state.get('missing')).toBeNull();
     });
+
+    it('overwrites existing values', () => {
+      state.set('overwrite-test', { version: 1 });
+      state.set('overwrite-test', { version: 2 });
+      const value = state.get<{ version: number }>('overwrite-test');
+      expect(value).toEqual({ version: 2 });
+    });
+  });
+
+  describe('Path Traversal Prevention', () => {
+    it('rejects session IDs with path traversal characters', () => {
+      expect(() => state.getSession('../etc/passwd')).toThrow('Invalid sessionId');
+      expect(() => state.getSession('../../root')).toThrow('Invalid sessionId');
+    });
+
+    it('rejects session IDs with dots', () => {
+      expect(() => state.getSession('test.session')).toThrow('Invalid sessionId');
+    });
+
+    it('rejects session IDs with slashes', () => {
+      expect(() => state.getSession('test/session')).toThrow('Invalid sessionId');
+    });
+
+    it('rejects job slugs with path traversal', () => {
+      expect(() => state.getJobState('../etc/passwd')).toThrow('Invalid job slug');
+    });
+
+    it('rejects state keys with special characters', () => {
+      expect(() => state.get('../../../etc/shadow')).toThrow('Invalid state key');
+    });
+
+    it('allows valid session IDs with hyphens and underscores', () => {
+      // Should not throw
+      expect(state.getSession('valid-session_123')).toBeNull();
+    });
+
+    it('allows valid job slugs', () => {
+      expect(state.getJobState('health-check')).toBeNull();
+      expect(state.getJobState('email_monitor')).toBeNull();
+    });
+  });
+
+  describe('Corrupted File Handling', () => {
+    it('returns null for corrupted session files', () => {
+      const filePath = path.join(tmpDir, 'state', 'sessions', 'corrupt.json');
+      fs.writeFileSync(filePath, 'not valid json{{{');
+      expect(state.getSession('corrupt')).toBeNull();
+    });
+
+    it('returns null for corrupted job state files', () => {
+      const filePath = path.join(tmpDir, 'state', 'jobs', 'broken.json');
+      fs.writeFileSync(filePath, '{invalid');
+      expect(state.getJobState('broken')).toBeNull();
+    });
+
+    it('skips corrupted files when listing sessions', () => {
+      // Write one valid and one corrupt session
+      const valid: Session = {
+        id: 'valid-1',
+        name: 'valid',
+        status: 'running',
+        tmuxSession: 'test-valid',
+        startedAt: new Date().toISOString(),
+      };
+      state.saveSession(valid);
+
+      const corruptPath = path.join(tmpDir, 'state', 'sessions', 'corrupt.json');
+      fs.writeFileSync(corruptPath, 'broken json!!!');
+
+      const sessions = state.listSessions();
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].id).toBe('valid-1');
+    });
+
+    it('returns null for corrupted generic state files', () => {
+      const filePath = path.join(tmpDir, 'state', 'bad-data.json');
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, ']]not json[[');
+      expect(state.get('bad-data')).toBeNull();
+    });
+  });
+
+  describe('Empty Directory Handling', () => {
+    it('returns empty list when sessions dir does not exist', () => {
+      // Remove the sessions directory
+      fs.rmSync(path.join(tmpDir, 'state', 'sessions'), { recursive: true, force: true });
+      expect(state.listSessions()).toEqual([]);
+    });
+
+    it('returns empty events when logs dir does not exist', () => {
+      fs.rmSync(path.join(tmpDir, 'logs'), { recursive: true, force: true });
+      expect(state.queryEvents({})).toEqual([]);
+    });
   });
 });
