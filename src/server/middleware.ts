@@ -57,6 +57,33 @@ export function authMiddleware(authToken?: string) {
   };
 }
 
+/**
+ * Simple in-memory rate limiter using a sliding window.
+ * No external dependencies. Suitable for a local management API.
+ */
+export function rateLimiter(windowMs: number = 60_000, maxRequests: number = 10) {
+  const requests: number[] = [];
+
+  return (_req: Request, res: Response, next: NextFunction): void => {
+    const now = Date.now();
+    // Remove expired entries
+    while (requests.length > 0 && requests[0] <= now - windowMs) {
+      requests.shift();
+    }
+
+    if (requests.length >= maxRequests) {
+      res.status(429).json({
+        error: `Rate limit exceeded. Max ${maxRequests} requests per ${windowMs / 1000}s.`,
+        retryAfterMs: requests[0] + windowMs - now,
+      });
+      return;
+    }
+
+    requests.push(now);
+    next();
+  };
+}
+
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
   const message = err instanceof Error ? err.message : String(err);
   console.error(`[server] Error: ${message}`);

@@ -147,7 +147,9 @@ describe('Security', () => {
         'utf-8'
       );
       // The spawn route should be async
-      expect(routesSource).toContain("router.post('/sessions/spawn', async");
+      expect(routesSource).toContain("router.post('/sessions/spawn',");
+      // Rate limiter is applied as middleware before the async handler
+      expect(routesSource).toContain("spawnLimiter, async");
       // Should use await, not .then/.catch
       expect(routesSource).toContain('await ctx.sessionManager.spawnSession');
     });

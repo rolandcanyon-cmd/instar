@@ -11,6 +11,7 @@ import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
 import type { JobScheduler } from '../scheduler/JobScheduler.js';
 import type { AgentKitConfig } from '../core/types.js';
+import { rateLimiter } from './middleware.js';
 import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
 import type { RelationshipManager } from '../core/RelationshipManager.js';
 import type { FeedbackManager } from '../core/FeedbackManager.js';
@@ -126,7 +127,10 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ ok: true });
   });
 
-  router.post('/sessions/spawn', async (req, res) => {
+  // Rate limit session spawning — each session is a real Claude Code process.
+  // Default: 10 spawns per 60 seconds, which is generous for normal use.
+  const spawnLimiter = rateLimiter(60_000, 10);
+  router.post('/sessions/spawn', spawnLimiter, async (req, res) => {
     const { name, prompt, model, jobSlug } = req.body;
 
     if (!name || !prompt) {

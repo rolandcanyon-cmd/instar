@@ -191,7 +191,32 @@ instar server stop
 instar status                    # Health check
 ```
 
-Key endpoints: `/health` · `/status` · `/sessions` · `/sessions/spawn` · `/sessions/tmux` · `/jobs` · `/jobs/:slug/trigger` · `/relationships` · `/feedback` · `/updates` · `/events` · `/quota` · `/telegram/reply/:topicId`
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check (public, no auth) |
+| GET | `/status` | Running sessions + scheduler status |
+| GET | `/sessions` | List all sessions (filter by `?status=`) |
+| GET | `/sessions/tmux` | List all tmux sessions |
+| GET | `/sessions/:name/output` | Capture session output (`?lines=100`) |
+| POST | `/sessions/:name/input` | Send text to a session |
+| POST | `/sessions/spawn` | Spawn a new session (rate limited) |
+| DELETE | `/sessions/:id` | Kill a session |
+| GET | `/jobs` | List jobs + queue |
+| POST | `/jobs/:slug/trigger` | Manually trigger a job |
+| GET | `/relationships` | List relationships (`?sort=significance\|recent\|name`) |
+| GET | `/relationships/stale` | Stale relationships (`?days=14`) |
+| GET | `/relationships/:id` | Get single relationship |
+| GET | `/relationships/:id/context` | Get relationship context (XML) |
+| POST | `/feedback` | Submit feedback |
+| GET | `/feedback` | List feedback |
+| POST | `/feedback/retry` | Retry un-forwarded feedback |
+| GET | `/updates` | Check for updates |
+| GET | `/updates/last` | Last update check result |
+| GET | `/events` | Query events (`?limit=50&since=24&type=`) |
+| GET | `/quota` | Quota usage + recommendation |
+| POST | `/telegram/reply/:topicId` | Send message to a topic |
 
 ### Identity That Survives Context Death
 
