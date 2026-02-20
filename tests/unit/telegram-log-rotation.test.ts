@@ -2,7 +2,8 @@
  * Tests for TelegramAdapter message log rotation.
  *
  * Verifies that the JSONL message log is automatically rotated
- * when it exceeds 10,000 lines, keeping only the last 5,000.
+ * when it exceeds 100,000 lines, keeping only the last 75,000.
+ * Limits are intentionally high — message history is core agent memory.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -34,14 +35,14 @@ describe('TelegramAdapter — log rotation', () => {
     });
   }
 
-  it('source file implements maybeRotateLog with 10k threshold', () => {
+  it('source file implements maybeRotateLog with 100k threshold', () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'src/messaging/TelegramAdapter.ts'),
       'utf-8',
     );
     expect(source).toContain('maybeRotateLog');
-    expect(source).toContain('10_000');
-    expect(source).toContain('5_000');
+    expect(source).toContain('100_000');
+    expect(source).toContain('75_000');
   });
 
   it('uses atomic write (tmp + rename) for rotation', () => {
@@ -57,12 +58,12 @@ describe('TelegramAdapter — log rotation', () => {
     expect(rotationSection).toContain('renameSync(tmpPath');
   });
 
-  it('rotation only triggers when file exceeds 2MB', () => {
+  it('rotation only triggers when file exceeds 20MB', () => {
     const source = fs.readFileSync(
       path.join(process.cwd(), 'src/messaging/TelegramAdapter.ts'),
       'utf-8',
     );
     // Should check file size before counting lines
-    expect(source).toContain('2 * 1024 * 1024');
+    expect(source).toContain('20 * 1024 * 1024');
   });
 });

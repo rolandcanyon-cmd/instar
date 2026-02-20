@@ -222,9 +222,8 @@ export class TelegramAdapter implements MessagingAdapter {
   getTopicHistory(topicId: number, limit: number = 20): LogEntry[] {
     if (!fs.existsSync(this.messageLogPath)) return [];
 
-    // Read the last portion of the file to avoid loading everything into memory.
-    // With log rotation capping at 5,000 lines, this is a bounded operation,
-    // but we still optimize by reading only what we need for most cases.
+    // Read the file to find matching entries.
+    // Log rotation caps at 75,000 lines, so this is bounded.
     const content = fs.readFileSync(this.messageLogPath, 'utf-8');
     const lines = content.split('\n').filter(Boolean);
 
@@ -245,24 +244,28 @@ export class TelegramAdapter implements MessagingAdapter {
   private appendToLog(entry: LogEntry): void {
     try {
       fs.appendFileSync(this.messageLogPath, JSON.stringify(entry) + '\n');
-      // Rotate log if it exceeds 10,000 lines to prevent unbounded growth
+      // Rotate log if it exceeds 100,000 lines to prevent unbounded growth.
+      // Limit is intentionally high — message history is core memory for the agent.
+      // On a dedicated machine, text-only JSONL can safely grow to tens of MB.
       this.maybeRotateLog();
     } catch (err) {
       console.error(`[telegram] Failed to append to message log: ${err}`);
     }
   }
 
-  /** Keep only the last 5,000 lines when log exceeds 10,000 lines. */
+  /** Keep only the last 75,000 lines when log exceeds 100,000 lines.
+   *  High limits because message history is core agent memory.
+   *  At ~200 bytes/line average, 100k lines ≈ 20MB — fine for a dedicated machine. */
   private maybeRotateLog(): void {
     try {
       const stat = fs.statSync(this.messageLogPath);
-      // Only check rotation when file exceeds ~2MB (rough proxy for 10k lines)
-      if (stat.size < 2 * 1024 * 1024) return;
+      // Only check rotation when file exceeds ~20MB
+      if (stat.size < 20 * 1024 * 1024) return;
 
       const content = fs.readFileSync(this.messageLogPath, 'utf-8');
       const lines = content.split('\n').filter(Boolean);
-      if (lines.length > 10_000) {
-        const kept = lines.slice(-5_000);
+      if (lines.length > 100_000) {
+        const kept = lines.slice(-75_000);
         const tmpPath = `${this.messageLogPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
         try {
           fs.writeFileSync(tmpPath, kept.join('\n') + '\n');

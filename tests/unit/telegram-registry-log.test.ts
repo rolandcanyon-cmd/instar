@@ -133,47 +133,41 @@ describe('TelegramAdapter registry and message log', () => {
   });
 
   describe('log rotation', () => {
-    it('rotates log when exceeding 10,000 lines and 2MB', async () => {
+    it('does not rotate log when under 20MB threshold', async () => {
       const logPath = path.join(tmpDir, 'telegram-messages.jsonl');
 
-      // Generate 10,500 lines, each ~200 bytes to exceed 2MB threshold
+      // Generate 10,000 lines — well under the 20MB/100k-line threshold.
+      // Message history is core agent memory, so rotation limits are intentionally high.
       const lines: string[] = [];
-      for (let i = 0; i < 10_500; i++) {
+      for (let i = 0; i < 10_000; i++) {
         lines.push(JSON.stringify({
           messageId: i,
           topicId: 42,
-          text: `Test message with padding to reach size threshold ${i} ${'x'.repeat(80)}`,
+          text: `Test message ${i} ${'x'.repeat(80)}`,
           fromUser: true,
-          timestamp: `2026-01-${String(Math.floor(i / 500) + 1).padStart(2, '0')}T00:00:00Z`,
+          timestamp: `2026-01-01T00:00:00Z`,
           sessionName: `sess-${i}`,
         }));
       }
       fs.writeFileSync(logPath, lines.join('\n') + '\n');
 
-      // Verify file is large enough to trigger rotation
-      const sizeBefore = fs.statSync(logPath).size;
-      expect(sizeBefore).toBeGreaterThan(2 * 1024 * 1024);
+      const lineCountBefore = lines.length;
 
-      // Trigger rotation by sending a message (calls logMessage → maybeRotateLog)
+      // Send a message to trigger maybeRotateLog check
       const mockFetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ ok: true, result: { message_id: 99999 } }),
       });
       vi.stubGlobal('fetch', mockFetch);
 
-      await adapter.sendToTopic(42, 'trigger rotation');
+      await adapter.sendToTopic(42, 'should not trigger rotation');
 
       vi.unstubAllGlobals();
 
-      // After rotation, file should have ~5,001 lines (5,000 kept + 1 new outbound)
+      // File should still have all lines + the new outbound message
       const content = fs.readFileSync(logPath, 'utf-8');
       const remaining = content.split('\n').filter(Boolean);
-      expect(remaining.length).toBeLessThanOrEqual(5_010);
-      expect(remaining.length).toBeGreaterThanOrEqual(5_000);
-
-      // The kept lines should be the most recent (highest messageId values)
-      const firstKept = JSON.parse(remaining[0]);
-      expect(firstKept.messageId).toBeGreaterThan(5_000);
+      expect(remaining.length).toBe(lineCountBefore + 1);
     });
 
     it('does not rotate when log is under 2MB', async () => {
