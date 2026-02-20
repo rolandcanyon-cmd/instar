@@ -140,6 +140,47 @@ describe('Security', () => {
     });
   });
 
+  describe('No execSync anywhere in source', () => {
+    it('zero execSync calls across all source files', () => {
+      const srcDir = path.join(process.cwd(), 'src');
+      const tsFiles = fs.readdirSync(srcDir, { recursive: true, withFileTypes: false }) as string[];
+      for (const file of tsFiles) {
+        if (!String(file).endsWith('.ts')) continue;
+        const content = fs.readFileSync(path.join(srcDir, String(file)), 'utf-8');
+        const calls = (content.match(/\bexecSync\(/g) || []).length;
+        expect(calls, `execSync found in ${file}`).toBe(0);
+      }
+    });
+  });
+
+  describe('Shell quoting in tmux command', () => {
+    it('server.ts uses proper shell escaping for tmux new-session', () => {
+      const serverSource = fs.readFileSync(
+        path.join(process.cwd(), 'src/commands/server.ts'),
+        'utf-8'
+      );
+      // Should escape single quotes properly
+      expect(serverSource).toContain("replace(/'/g");
+      // Should NOT have naive template literal quoting
+      expect(serverSource).not.toContain("`node '${cliPath}'");
+    });
+  });
+
+  describe('Merge operations respect caps', () => {
+    it('mergeRelationships respects MAX_CHANNELS cap', () => {
+      const rmSource = fs.readFileSync(
+        path.join(process.cwd(), 'src/core/RelationshipManager.ts'),
+        'utf-8'
+      );
+      const mergeSection = rmSource.slice(
+        rmSource.indexOf('mergeRelationships('),
+        rmSource.indexOf('// Take the earlier first interaction')
+      );
+      expect(mergeSection).toContain('MAX_CHANNELS');
+      expect(mergeSection).toContain('>= 20'); // themes cap
+    });
+  });
+
   describe('Async route handler', () => {
     it('spawn route uses async/await', () => {
       const routesSource = fs.readFileSync(
