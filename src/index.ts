@@ -22,6 +22,7 @@ export { loadJobs, validateJob } from './scheduler/JobLoader.js';
 // Server
 export { AgentServer } from './server/AgentServer.js';
 export { createRoutes } from './server/routes.js';
+export { corsMiddleware, authMiddleware, rateLimiter, errorHandler } from './server/middleware.js';
 
 // Monitoring
 export { HealthChecker } from './monitoring/HealthChecker.js';
