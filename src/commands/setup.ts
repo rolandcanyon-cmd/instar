@@ -199,7 +199,7 @@ async function runClassicSetup(): Promise<void> {
 
   console.log();
   const addUser = await confirm({
-    message: 'Add a user now? (you can add more later with `instar user add`)',
+    message: 'Add a user now? (you can always ask your agent to add more later)',
     default: true,
   });
 
@@ -227,7 +227,7 @@ async function runClassicSetup(): Promise<void> {
   const jobs: JobDefinition[] = [];
   if (enableScheduler) {
     const addJob = await confirm({
-      message: 'Add a job now? (you can add more later with `instar job add`)',
+      message: 'Add a job now? (you can always ask your agent to create jobs later)',
       default: true,
     });
 
@@ -388,13 +388,11 @@ async function runClassicSetup(): Promise<void> {
     await startServer({ foreground: false });
   } else {
     console.log();
-    console.log('  Start later with:');
+    console.log('  When you\'re ready, start the server with:');
     console.log(`    ${pc.cyan('instar server start')}`);
     console.log();
-    console.log('  Other commands:');
-    console.log(`    ${pc.cyan('instar status')}        — check everything`);
-    console.log(`    ${pc.cyan('instar user add')}      — add more users`);
-    console.log(`    ${pc.cyan('instar job add')}       — add scheduled jobs`);
+    console.log('  Once running, your agent can handle everything else —');
+    console.log('  just ask it to add jobs, users, or configure new integrations.');
   }
 
   console.log();

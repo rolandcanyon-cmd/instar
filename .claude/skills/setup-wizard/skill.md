@@ -334,16 +334,14 @@ Show what was created, organized by category:
 - `.instar/jobs.json` — scheduled jobs
 
 **Next steps:**
-```bash
-instar server start   # Start the agent server
-instar status         # Check everything
-instar job add        # Add scheduled jobs
-instar user add       # Add more users
-```
 
-Explain what happens next in practical terms: "Once the server is running, your agent will [run scheduled jobs / listen for Telegram messages / etc]. You can interact with it through [channels configured]."
+The only command the user needs to know is `instar server start`. Once the server is running, the agent handles everything else — the user just talks to it. Frame next steps that way:
+
+"Once the server is running, your agent will [run scheduled jobs / listen for Telegram messages / etc]. If you need to add more jobs, users, or integrations later, just ask your agent — it can configure itself."
 
 Offer to start the server.
+
+**Important:** Do NOT present a list of CLI commands for the user to memorize. The whole point of Instar is that the agent is autonomous. After `instar server start`, the user talks to their agent, not to the CLI.
 
 ## Tone
 
