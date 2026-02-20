@@ -125,9 +125,9 @@ export class UserManager {
   private persistUsers(): void {
     const dir = path.dirname(this.usersFile);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      this.usersFile,
-      JSON.stringify(Array.from(this.users.values()), null, 2)
-    );
+    // Atomic write: write to .tmp then rename
+    const tmpPath = this.usersFile + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(Array.from(this.users.values()), null, 2));
+    fs.renameSync(tmpPath, this.usersFile);
   }
 }

@@ -47,7 +47,7 @@ program
   .command('init [project-name]')
   .description('Initialize agent infrastructure (fresh project or existing)')
   .option('-d, --dir <path>', 'Project directory (default: current directory)')
-  .option('--port <port>', 'Server port (default: 4040)', parseInt)
+  .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
   .action((projectName, opts) => {
     // If a project name is given, it's a fresh install
     // Otherwise, augment the current directory
@@ -100,7 +100,7 @@ program
   .option('--title <title>', 'Short title')
   .option('--description <desc>', 'Detailed description')
   .option('-d, --dir <path>', 'Project directory')
-  .option('--port <port>', 'Server port (default: 4040)', parseInt)
+  .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
   .action(async (opts) => {
     const port = opts.port || 4040;
     const title = opts.title || 'CLI feedback submission';

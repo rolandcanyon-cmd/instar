@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+const { renameSync } = fs;
 import type { FeedbackItem, FeedbackConfig } from './types.js';
 
 export class FeedbackManager {
@@ -129,7 +130,10 @@ export class FeedbackManager {
   private saveFeedback(items: FeedbackItem[]): void {
     const dir = path.dirname(this.feedbackFile);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(this.feedbackFile, JSON.stringify(items, null, 2));
+    // Atomic write: write to .tmp then rename
+    const tmpPath = this.feedbackFile + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(items, null, 2));
+    renameSync(tmpPath, this.feedbackFile);
   }
 
   private appendFeedback(item: FeedbackItem): void {
