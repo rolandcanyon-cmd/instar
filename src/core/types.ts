@@ -395,6 +395,8 @@ export interface DispatchConfig {
   dispatchFile: string;
   /** Instar version — sent in headers for version-specific filtering */
   version?: string;
+  /** Whether to auto-apply safe dispatches (lesson, strategy types with non-critical priority) */
+  autoApply?: boolean;
 }
 
 export interface UpdateConfig {

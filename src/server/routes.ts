@@ -506,7 +506,10 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     try {
-      const result = await ctx.dispatches.check();
+      // Use checkAndAutoApply when autoApply is configured
+      const result = ctx.config.dispatches?.autoApply
+        ? await ctx.dispatches.checkAndAutoApply()
+        : await ctx.dispatches.check();
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -537,12 +540,65 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const success = ctx.dispatches.markApplied(req.params.id);
+    const success = ctx.dispatches.applyToContext(req.params.id);
     if (success) {
-      res.json({ applied: true });
+      res.json({ applied: true, contextFile: ctx.dispatches.getContextFilePath() });
     } else {
       res.status(404).json({ error: 'Dispatch not found' });
     }
+  });
+
+  router.post('/dispatches/:id/evaluate', (req, res) => {
+    if (!ctx.dispatches) {
+      res.status(503).json({ error: 'Dispatch system not configured' });
+      return;
+    }
+
+    const { decision, reason } = req.body as { decision?: string; reason?: string };
+    const validDecisions = ['accepted', 'rejected', 'deferred'];
+
+    if (!decision || !validDecisions.includes(decision)) {
+      res.status(400).json({ error: `"decision" must be one of: ${validDecisions.join(', ')}` });
+      return;
+    }
+    if (!reason || typeof reason !== 'string' || reason.length < 1) {
+      res.status(400).json({ error: '"reason" must be a non-empty string' });
+      return;
+    }
+    if (reason.length > 2000) {
+      res.status(400).json({ error: '"reason" must be under 2000 characters' });
+      return;
+    }
+
+    const success = ctx.dispatches.evaluate(
+      req.params.id,
+      decision as 'accepted' | 'rejected' | 'deferred',
+      reason,
+    );
+
+    if (!success) {
+      res.status(404).json({ error: 'Dispatch not found' });
+      return;
+    }
+
+    // If accepted, also apply to context file
+    if (decision === 'accepted') {
+      ctx.dispatches.applyToContext(req.params.id);
+    }
+
+    res.json({ evaluated: true, decision });
+  });
+
+  router.get('/dispatches/applied', (_req, res) => {
+    if (!ctx.dispatches) {
+      res.json({ context: '', contextFile: '' });
+      return;
+    }
+
+    res.json({
+      context: ctx.dispatches.readContextFile(),
+      contextFile: ctx.dispatches.getContextFilePath(),
+    });
   });
 
   // ── Quota ──────────────────────────────────────────────────────

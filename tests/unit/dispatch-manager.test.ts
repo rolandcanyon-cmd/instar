@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { DispatchManager } from '../../src/core/DispatchManager.js';
-import type { Dispatch } from '../../src/core/DispatchManager.js';
+import type { Dispatch, EvaluationDecision } from '../../src/core/DispatchManager.js';
 
 describe('DispatchManager URL validation', () => {
   it('rejects HTTP URLs', () => {
@@ -503,5 +503,501 @@ describe('DispatchManager polling', () => {
     // Second check — should include since parameter
     await manager.check();
     expect(capturedUrl).toContain('since=');
+  });
+});
+
+// ── Phase 2: Evaluation and intelligent application ──────────────
+
+describe('DispatchManager evaluation', () => {
+  let tmpDir: string;
+  let dispatchFile: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-dispatch-eval-'));
+    dispatchFile = path.join(tmpDir, 'dispatches.json');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function seedDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
+    return {
+      dispatchId: 'dsp-eval1',
+      type: 'strategy',
+      title: 'Test Strategy',
+      content: 'Try approach X.',
+      priority: 'normal',
+      createdAt: '2026-01-01T00:00:00Z',
+      receivedAt: '2026-01-01T01:00:00Z',
+      applied: false,
+      ...overrides,
+    };
+  }
+
+  function createManager(overrides: Record<string, unknown> = {}) {
+    return new DispatchManager({
+      enabled: false,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      ...overrides,
+    });
+  }
+
+  it('records accepted evaluation and marks applied', () => {
+    fs.writeFileSync(dispatchFile, JSON.stringify([seedDispatch()]));
+    const manager = createManager();
+
+    const result = manager.evaluate('dsp-eval1', 'accepted', 'Aligns with my values');
+    expect(result).toBe(true);
+
+    const dispatch = manager.get('dsp-eval1');
+    expect(dispatch?.applied).toBe(true);
+    expect(dispatch?.evaluation?.decision).toBe('accepted');
+    expect(dispatch?.evaluation?.reason).toBe('Aligns with my values');
+    expect(dispatch?.evaluation?.auto).toBe(false);
+    expect(dispatch?.evaluation?.evaluatedAt).toBeTruthy();
+  });
+
+  it('records rejected evaluation without marking applied', () => {
+    fs.writeFileSync(dispatchFile, JSON.stringify([seedDispatch()]));
+    const manager = createManager();
+
+    manager.evaluate('dsp-eval1', 'rejected', 'Contradicts my identity');
+
+    const dispatch = manager.get('dsp-eval1');
+    expect(dispatch?.applied).toBe(false);
+    expect(dispatch?.evaluation?.decision).toBe('rejected');
+  });
+
+  it('records deferred evaluation without marking applied', () => {
+    fs.writeFileSync(dispatchFile, JSON.stringify([seedDispatch()]));
+    const manager = createManager();
+
+    manager.evaluate('dsp-eval1', 'deferred', 'Need to discuss with user');
+
+    const dispatch = manager.get('dsp-eval1');
+    expect(dispatch?.applied).toBe(false);
+    expect(dispatch?.evaluation?.decision).toBe('deferred');
+  });
+
+  it('returns false for non-existent dispatch', () => {
+    const manager = createManager();
+    expect(manager.evaluate('dsp-nonexistent', 'accepted', 'test')).toBe(false);
+  });
+
+  it('persists evaluation to disk', () => {
+    fs.writeFileSync(dispatchFile, JSON.stringify([seedDispatch()]));
+
+    const manager1 = createManager();
+    manager1.evaluate('dsp-eval1', 'accepted', 'Good guidance');
+
+    const manager2 = createManager();
+    expect(manager2.get('dsp-eval1')?.evaluation?.decision).toBe('accepted');
+  });
+});
+
+describe('DispatchManager context file', () => {
+  let tmpDir: string;
+  let dispatchFile: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-dispatch-ctx2-'));
+    dispatchFile = path.join(tmpDir, 'dispatches.json');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function createManager(overrides: Record<string, unknown> = {}) {
+    return new DispatchManager({
+      enabled: false,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      ...overrides,
+    });
+  }
+
+  it('applyToContext marks dispatch as applied and writes context file', () => {
+    const dispatches: Dispatch[] = [{
+      dispatchId: 'dsp-ctx-test',
+      type: 'strategy',
+      title: 'Context File Test',
+      content: 'Write this to the context file.',
+      priority: 'normal',
+      createdAt: '2026-01-01T00:00:00Z',
+      receivedAt: '2026-01-01T01:00:00Z',
+      applied: false,
+    }];
+    fs.writeFileSync(dispatchFile, JSON.stringify(dispatches));
+
+    const manager = createManager();
+    const result = manager.applyToContext('dsp-ctx-test');
+    expect(result).toBe(true);
+
+    // Verify context file was created
+    const contextContent = manager.readContextFile();
+    expect(contextContent).toContain('Context File Test');
+    expect(contextContent).toContain('Write this to the context file.');
+    expect(contextContent).toContain('Strategy Dispatches');
+  });
+
+  it('returns false for non-existent dispatch', () => {
+    const manager = createManager();
+    expect(manager.applyToContext('dsp-nonexistent')).toBe(false);
+  });
+
+  it('context file groups dispatches by type', () => {
+    const dispatches: Dispatch[] = [
+      {
+        dispatchId: 'dsp-lesson1',
+        type: 'lesson',
+        title: 'Lesson One',
+        content: 'Learned something.',
+        priority: 'normal',
+        createdAt: '2026-01-01T00:00:00Z',
+        receivedAt: '2026-01-01T01:00:00Z',
+        applied: true,
+      },
+      {
+        dispatchId: 'dsp-strategy1',
+        type: 'strategy',
+        title: 'Strategy One',
+        content: 'Try this approach.',
+        priority: 'normal',
+        createdAt: '2026-01-02T00:00:00Z',
+        receivedAt: '2026-01-02T01:00:00Z',
+        applied: true,
+      },
+      {
+        dispatchId: 'dsp-security1',
+        type: 'security',
+        title: 'Security Alert',
+        content: 'Watch for pattern X.',
+        priority: 'high',
+        createdAt: '2026-01-03T00:00:00Z',
+        receivedAt: '2026-01-03T01:00:00Z',
+        applied: true,
+      },
+    ];
+    fs.writeFileSync(dispatchFile, JSON.stringify(dispatches));
+
+    const manager = createManager();
+    // Trigger rebuild by applying one more
+    manager.applyToContext('dsp-lesson1');
+
+    const content = manager.readContextFile();
+    // Security should come first, then strategy, then lesson (by type order)
+    const securityPos = content.indexOf('Security Dispatches');
+    const strategyPos = content.indexOf('Strategy Dispatches');
+    const lessonPos = content.indexOf('Lesson Dispatches');
+    expect(securityPos).toBeLessThan(strategyPos);
+    expect(strategyPos).toBeLessThan(lessonPos);
+  });
+
+  it('context file is removed when all dispatches are unapplied', () => {
+    // No applied dispatches
+    fs.writeFileSync(dispatchFile, JSON.stringify([]));
+    const manager = createManager();
+
+    // Create a context file manually to test cleanup
+    const ctxPath = manager.getContextFilePath();
+    fs.mkdirSync(path.dirname(ctxPath), { recursive: true });
+    fs.writeFileSync(ctxPath, 'old content');
+
+    // Apply a dispatch that doesn't exist — returns false, no rebuild
+    manager.applyToContext('dsp-nonexistent');
+
+    // readContextFile should still return old content (no rebuild triggered)
+    expect(manager.readContextFile()).toBe('old content');
+  });
+
+  it('readContextFile returns empty when file does not exist', () => {
+    const manager = createManager();
+    expect(manager.readContextFile()).toBe('');
+  });
+
+  it('getContextFilePath returns path relative to dispatch file', () => {
+    const manager = createManager();
+    const ctxPath = manager.getContextFilePath();
+    expect(ctxPath).toContain('dispatch-context.md');
+    expect(ctxPath).toContain(tmpDir);
+  });
+});
+
+describe('DispatchManager auto-apply', () => {
+  let tmpDir: string;
+  let dispatchFile: string;
+  let originalFetch: typeof global.fetch;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-dispatch-auto-'));
+    dispatchFile = path.join(tmpDir, 'dispatches.json');
+    originalFetch = global.fetch;
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function mockFetchDispatches(dispatches: Array<Record<string, unknown>>) {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        dispatches,
+        count: dispatches.length,
+        asOf: new Date().toISOString(),
+      }),
+    });
+  }
+
+  it('auto-applies lesson dispatches when enabled', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-auto1',
+      type: 'lesson',
+      title: 'Auto Lesson',
+      content: 'This should auto-apply.',
+      priority: 'normal',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.newCount).toBe(1);
+    expect(result.autoApplied).toBe(1);
+
+    const dispatch = manager.get('dsp-auto1');
+    expect(dispatch?.applied).toBe(true);
+    expect(dispatch?.evaluation?.auto).toBe(true);
+    expect(dispatch?.evaluation?.decision).toBe('accepted');
+  });
+
+  it('auto-applies strategy dispatches when enabled', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-auto2',
+      type: 'strategy',
+      title: 'Auto Strategy',
+      content: 'Try this.',
+      priority: 'high',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.autoApplied).toBe(1);
+  });
+
+  it('does NOT auto-apply security dispatches', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-security',
+      type: 'security',
+      title: 'Security Dispatch',
+      content: 'New injection pattern.',
+      priority: 'high',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.autoApplied).toBe(0);
+    expect(manager.get('dsp-security')?.applied).toBe(false);
+  });
+
+  it('does NOT auto-apply behavioral dispatches', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-behavioral',
+      type: 'behavioral',
+      title: 'Behavioral Change',
+      content: 'Change how you behave.',
+      priority: 'normal',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.autoApplied).toBe(0);
+  });
+
+  it('does NOT auto-apply configuration dispatches', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-config',
+      type: 'configuration',
+      title: 'Config Change',
+      content: 'Change timeout to 60s.',
+      priority: 'normal',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.autoApplied).toBe(0);
+  });
+
+  it('does NOT auto-apply critical priority dispatches even if type is safe', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-critical-lesson',
+      type: 'lesson',
+      title: 'Critical Lesson',
+      content: 'Urgent insight.',
+      priority: 'critical',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.autoApplied).toBe(0);
+  });
+
+  it('skips auto-apply when config disabled', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-skip',
+      type: 'lesson',
+      title: 'Should Not Auto-Apply',
+      content: 'Because autoApply is false.',
+      priority: 'normal',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: false,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.autoApplied).toBeUndefined();
+    expect(manager.get('dsp-skip')?.applied).toBe(false);
+  });
+
+  it('writes context file on auto-apply', async () => {
+    mockFetchDispatches([{
+      dispatchId: 'dsp-ctx-auto',
+      type: 'lesson',
+      title: 'Auto Context',
+      content: 'Should appear in context file.',
+      priority: 'normal',
+      createdAt: '2026-02-20T00:00:00Z',
+    }]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    await manager.checkAndAutoApply();
+
+    const contextContent = manager.readContextFile();
+    expect(contextContent).toContain('Auto Context');
+    expect(contextContent).toContain('Should appear in context file.');
+  });
+
+  it('isSafeForAutoApply correctly classifies dispatches', () => {
+    const manager = new DispatchManager({
+      enabled: false,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+    });
+
+    const base: Dispatch = {
+      dispatchId: 'dsp-test',
+      type: 'lesson',
+      title: 'Test',
+      content: 'Test',
+      priority: 'normal',
+      createdAt: '2026-01-01T00:00:00Z',
+      receivedAt: '2026-01-01T01:00:00Z',
+      applied: false,
+    };
+
+    // Safe types + safe priorities
+    expect(manager.isSafeForAutoApply({ ...base, type: 'lesson', priority: 'normal' })).toBe(true);
+    expect(manager.isSafeForAutoApply({ ...base, type: 'lesson', priority: 'low' })).toBe(true);
+    expect(manager.isSafeForAutoApply({ ...base, type: 'lesson', priority: 'high' })).toBe(true);
+    expect(manager.isSafeForAutoApply({ ...base, type: 'strategy', priority: 'normal' })).toBe(true);
+
+    // Unsafe types
+    expect(manager.isSafeForAutoApply({ ...base, type: 'security', priority: 'normal' })).toBe(false);
+    expect(manager.isSafeForAutoApply({ ...base, type: 'behavioral', priority: 'normal' })).toBe(false);
+    expect(manager.isSafeForAutoApply({ ...base, type: 'configuration', priority: 'normal' })).toBe(false);
+
+    // Critical priority blocks even safe types
+    expect(manager.isSafeForAutoApply({ ...base, type: 'lesson', priority: 'critical' })).toBe(false);
+  });
+
+  it('handles mixed dispatches — auto-applies safe, leaves unsafe', async () => {
+    mockFetchDispatches([
+      {
+        dispatchId: 'dsp-safe',
+        type: 'lesson',
+        title: 'Safe Lesson',
+        content: 'Auto-apply me.',
+        priority: 'normal',
+        createdAt: '2026-02-20T00:00:00Z',
+      },
+      {
+        dispatchId: 'dsp-unsafe',
+        type: 'security',
+        title: 'Security Alert',
+        content: 'Do not auto-apply.',
+        priority: 'high',
+        createdAt: '2026-02-20T00:00:00Z',
+      },
+    ]);
+
+    const manager = new DispatchManager({
+      enabled: true,
+      dispatchUrl: 'https://example.com/dispatches',
+      dispatchFile,
+      autoApply: true,
+    });
+
+    const result = await manager.checkAndAutoApply();
+    expect(result.newCount).toBe(2);
+    expect(result.autoApplied).toBe(1);
+
+    expect(manager.get('dsp-safe')?.applied).toBe(true);
+    expect(manager.get('dsp-unsafe')?.applied).toBe(false);
+    expect(manager.pending()).toHaveLength(1);
   });
 });

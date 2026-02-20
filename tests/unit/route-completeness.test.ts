@@ -11,7 +11,7 @@ describe('Route completeness and safety', () => {
     'utf-8'
   );
 
-  it('all 31 endpoint routes are defined', () => {
+  it('all 33 endpoint routes are defined', () => {
     const expectedRoutes = [
       "router.get('/health'",
       "router.get('/status'",
@@ -42,6 +42,8 @@ describe('Route completeness and safety', () => {
       "router.get('/dispatches/pending'",
       "router.get('/dispatches/context'",
       "router.post('/dispatches/:id/apply'",
+      "router.post('/dispatches/:id/evaluate'",
+      "router.get('/dispatches/applied'",
       "router.get('/quota'",
       "router.get('/events'",
     ];
@@ -91,6 +93,15 @@ describe('Route completeness and safety', () => {
     const topicsIdx = routesSource.indexOf("'/telegram/topics'");
     const topicMsgIdx = routesSource.indexOf("'/telegram/topics/:topicId/messages'");
     expect(topicsIdx).toBeLessThan(topicMsgIdx);
+
+    // /dispatches/pending must come before /dispatches/:id
+    const pendingIdx = routesSource.indexOf("'/dispatches/pending'");
+    const dispatchIdIdx = routesSource.indexOf("'/dispatches/:id/apply'");
+    expect(pendingIdx).toBeLessThan(dispatchIdIdx);
+
+    // /dispatches/applied must come before /dispatches/:id
+    const appliedIdx = routesSource.indexOf("'/dispatches/applied'");
+    expect(appliedIdx).toBeGreaterThan(-1);
   });
 
   it('DELETE /sessions/:id validates session ID format', () => {
