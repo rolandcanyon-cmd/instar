@@ -47,6 +47,8 @@ interface InitOptions {
   name?: string;
   port?: number;
   interactive?: boolean;
+  /** Skip prerequisite checks (for testing). When true, uses provided or default paths. */
+  skipPrereqs?: boolean;
 }
 
 /**
@@ -87,9 +89,19 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   console.log();
 
   // Check and install prerequisites
-  const prereqs = await ensurePrerequisites();
-  if (!prereqs.allMet) {
-    process.exit(1);
+  let tmuxPath: string;
+  let claudePath: string;
+
+  if (options.skipPrereqs) {
+    tmuxPath = detectTmuxPath() || '/usr/bin/tmux';
+    claudePath = detectClaudePath() || '/usr/bin/claude';
+  } else {
+    const prereqs = await ensurePrerequisites();
+    if (!prereqs.allMet) {
+      process.exit(1);
+    }
+    tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
+    claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
   }
 
   // Check if directory already exists
@@ -106,8 +118,6 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   fs.mkdirSync(projectDir, { recursive: true });
 
   const port = options.port || 4040;
-  const tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
-  const claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
 
   // Generate identity (non-interactive for init, interactive for setup)
   const identity = defaultIdentity(projectName);
@@ -258,13 +268,20 @@ async function initExistingProject(options: InitOptions): Promise<void> {
   console.log();
 
   // Check and install prerequisites
-  const prereqs = await ensurePrerequisites();
-  if (!prereqs.allMet) {
-    process.exit(1);
-  }
+  let tmuxPath: string;
+  let claudePath: string;
 
-  const tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
-  const claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
+  if (options.skipPrereqs) {
+    tmuxPath = detectTmuxPath() || '/usr/bin/tmux';
+    claudePath = detectClaudePath() || '/usr/bin/claude';
+  } else {
+    const prereqs = await ensurePrerequisites();
+    if (!prereqs.allMet) {
+      process.exit(1);
+    }
+    tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
+    claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
+  }
 
   // Create state directory
   const stateDir = path.join(projectDir, '.instar');

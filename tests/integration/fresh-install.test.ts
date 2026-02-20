@@ -27,7 +27,7 @@ describe('Fresh install: instar init <project-name>', () => {
     process.chdir(testBase);
 
     try {
-      await initProject({ name: projectName, port: 4444 });
+      await initProject({ name: projectName, port: 4444, skipPrereqs: true });
     } finally {
       process.chdir(originalCwd);
     }
@@ -179,7 +179,7 @@ describe('Existing project: instar init (no project name)', () => {
     // Create a minimal existing project
     fs.writeFileSync(path.join(testDir, 'index.ts'), '// existing code');
 
-    await initProject({ dir: testDir, port: 5555 });
+    await initProject({ dir: testDir, port: 5555, skipPrereqs: true });
 
     // Verify .instar was created
     expect(fs.existsSync(path.join(testDir, '.instar', 'config.json'))).toBe(true);
@@ -201,7 +201,7 @@ describe('Existing project: instar init (no project name)', () => {
     const existingContent = '# My Project\n\nThis is my project.\n';
     fs.writeFileSync(path.join(anotherDir, 'CLAUDE.md'), existingContent);
 
-    await initProject({ dir: anotherDir });
+    await initProject({ dir: anotherDir, skipPrereqs: true });
 
     const result = fs.readFileSync(path.join(anotherDir, 'CLAUDE.md'), 'utf-8');
     expect(result).toContain('# My Project');
@@ -216,7 +216,7 @@ describe('Existing project: instar init (no project name)', () => {
     const existingContent = '# My Project\n\n## Agent Infrastructure\n\nAlready here.\n';
     fs.writeFileSync(path.join(anotherDir, 'CLAUDE.md'), existingContent);
 
-    await initProject({ dir: anotherDir });
+    await initProject({ dir: anotherDir, skipPrereqs: true });
 
     const result = fs.readFileSync(path.join(anotherDir, 'CLAUDE.md'), 'utf-8');
     // Should only have one instance of Agent Infrastructure
