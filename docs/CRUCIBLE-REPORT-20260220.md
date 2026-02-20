@@ -4,9 +4,9 @@
 **Duration**: 8-hour autonomous session (AUT-1655-wo)
 **Starting Version**: 0.1.10
 **Ending Version**: 0.1.11
-**Commits**: 55+
-**Files Changed**: 105+ (8,900+ lines added, 560+ removed)
-**Tests**: 350 -> 699 (unit) + 38 (integration) + 9 (e2e) = 746 total
+**Commits**: 58+
+**Files Changed**: 107+ (9,100+ lines added, 560+ removed)
+**Tests**: 350 -> 721 (unit) + 38 (integration) + 9 (e2e) = 768 total
 **TypeScript**: Compiles cleanly with `--strict`
 **Package Size**: 98.2 kB (60 files)
 
@@ -78,7 +78,7 @@ Comprehensive production-readiness review of Instar v0.1.10 across 53 iterations
 ### 4. Test Coverage (HIGH)
 
 **Before**: 350 tests across ~40 test files
-**After**: 699 tests across 76 test files + 38 integration + 9 e2e
+**After**: 721 tests across 78 test files + 38 integration + 9 e2e
 
 New test areas added:
 - Route validation edge cases (26 tests)
@@ -102,6 +102,8 @@ New test areas added:
 - Telegram API edge cases: token redaction, retry cap, timeouts (16 tests)
 - State manager edge cases: atomic cleanup, validation, overwrite (12 tests)
 - Config error handling: corrupted/truncated JSON, permissions (3 tests)
+- QuotaTracker invalid input handling: NaN, Infinity, negative, >100 clamping, updateState rejection (13 tests)
+- HealthChecker edge cases: invalid intervals, multiple stops, timestamp format, session errors (9 tests)
 - Plus integration tests for fresh-install (17), server-full (14), scheduler (1), session-lifecycle (6), and e2e lifecycle (9)
 
 ### 5. Error Handling
@@ -296,11 +298,11 @@ The `instar feedback` CLI command used `fetch()` without a timeout. If the serve
 
 | Suite | Count | Status |
 |-------|-------|--------|
-| Unit | 699 | All passing |
+| Unit | 721 | All passing |
 | Integration | 38 | All passing |
 | E2E | 9 | All passing |
-| **Total** | **746** | **All passing** |
+| **Total** | **768** | **All passing** |
 
 ---
 
-*Report generated during AUT-1655-wo crucible session. 58+ commits, 105+ files changed. Every source file individually reviewed. All 746 tests passing.*
+*Report generated during AUT-1655-wo crucible session. 58+ commits, 107+ files changed. Every source file individually reviewed. All 768 tests passing.*
