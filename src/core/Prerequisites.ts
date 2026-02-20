@@ -1,13 +1,14 @@
 /**
- * Prerequisite detection and installation guidance.
+ * Prerequisite detection and auto-installation.
  *
  * Checks for required software (tmux, Claude CLI, Node.js)
- * and provides clear installation instructions when something is missing.
+ * and offers to install missing dependencies automatically.
  */
 
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import pc from 'picocolors';
+import { confirm } from '@inquirer/prompts';
 import { detectTmuxPath, detectClaudePath } from './Config.js';
 
 export interface PrerequisiteResult {
@@ -16,6 +17,10 @@ export interface PrerequisiteResult {
   path?: string;
   version?: string;
   installHint: string;
+  /** Whether this prerequisite can be auto-installed. */
+  canAutoInstall: boolean;
+  /** The command to run to auto-install this prerequisite. */
+  installCommand?: string;
 }
 
 export interface PrerequisiteCheck {
@@ -87,28 +92,47 @@ function getNodeVersion(): { version: string; major: number } {
 }
 
 /**
- * Build install hint for tmux based on platform.
+ * Build install hint and command for tmux based on platform.
  */
-function tmuxInstallHint(): string {
+function tmuxInstallInfo(): { hint: string; canAutoInstall: boolean; command?: string } {
   const platform = detectPlatform();
   switch (platform) {
     case 'macos-arm':
     case 'macos-intel':
-      return hasHomebrew()
-        ? 'Install with: brew install tmux'
-        : 'Install Homebrew first (https://brew.sh), then: brew install tmux';
+      if (hasHomebrew()) {
+        return {
+          hint: 'Install with: brew install tmux',
+          canAutoInstall: true,
+          command: 'brew install tmux',
+        };
+      }
+      return {
+        hint: 'Install Homebrew first (https://brew.sh), then: brew install tmux',
+        canAutoInstall: false,
+      };
     case 'linux':
-      return 'Install with: sudo apt install tmux (Debian/Ubuntu) or sudo yum install tmux (RHEL/CentOS)';
+      return {
+        hint: 'Install with: sudo apt install tmux (Debian/Ubuntu) or sudo yum install tmux (RHEL/CentOS)',
+        canAutoInstall: true,
+        command: 'sudo apt install -y tmux',
+      };
     default:
-      return 'Install tmux: https://github.com/tmux/tmux/wiki/Installing';
+      return {
+        hint: 'Install tmux: https://github.com/tmux/tmux/wiki/Installing',
+        canAutoInstall: false,
+      };
   }
 }
 
 /**
- * Build install hint for Claude CLI based on platform.
+ * Build install hint and command for Claude CLI.
  */
-function claudeInstallHint(): string {
-  return 'Install Claude Code: npm install -g @anthropic-ai/claude-code\n  Docs: https://docs.anthropic.com/en/docs/claude-code';
+function claudeInstallInfo(): { hint: string; canAutoInstall: boolean; command: string } {
+  return {
+    hint: 'Install Claude Code: npm install -g @anthropic-ai/claude-code',
+    canAutoInstall: true,
+    command: 'npm install -g @anthropic-ai/claude-code',
+  };
 }
 
 /**
@@ -126,26 +150,33 @@ export function checkPrerequisites(): PrerequisiteCheck {
     installHint: node.major < 18
       ? `Node.js 18+ required (found ${node.version}). Update: https://nodejs.org`
       : '',
+    canAutoInstall: false,
   });
 
   // 2. tmux
   const tmuxPath = detectTmuxPath();
+  const tmuxInfo = tmuxInstallInfo();
   results.push({
     name: 'tmux',
     found: !!tmuxPath,
     path: tmuxPath || undefined,
     version: tmuxPath ? getTmuxVersion(tmuxPath) : undefined,
-    installHint: tmuxInstallHint(),
+    installHint: tmuxInfo.hint,
+    canAutoInstall: tmuxInfo.canAutoInstall,
+    installCommand: tmuxInfo.command,
   });
 
   // 3. Claude CLI
   const claudePath = detectClaudePath();
+  const claudeInfo = claudeInstallInfo();
   results.push({
     name: 'Claude CLI',
     found: !!claudePath,
     path: claudePath || undefined,
     version: claudePath ? getClaudeVersion(claudePath) : undefined,
-    installHint: claudeInstallHint(),
+    installHint: claudeInfo.hint,
+    canAutoInstall: claudeInfo.canAutoInstall,
+    installCommand: claudeInfo.command,
   });
 
   const missing = results.filter(r => !r.found);
@@ -155,6 +186,26 @@ export function checkPrerequisites(): PrerequisiteCheck {
     results,
     missing,
   };
+}
+
+/**
+ * Attempt to install a missing prerequisite.
+ * Returns true if installation succeeded.
+ */
+function installPrerequisite(result: PrerequisiteResult): boolean {
+  if (!result.installCommand) return false;
+
+  try {
+    console.log(pc.dim(`  Running: ${result.installCommand}`));
+    execSync(result.installCommand, {
+      encoding: 'utf-8',
+      stdio: 'inherit',
+      timeout: 120000, // 2 min timeout
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -184,4 +235,68 @@ export function printPrerequisiteCheck(check: PrerequisiteCheck): boolean {
   }
 
   return check.allMet;
+}
+
+/**
+ * Interactive prerequisite check that offers to install missing dependencies.
+ * Returns a fresh PrerequisiteCheck after any installations.
+ */
+export async function ensurePrerequisites(): Promise<PrerequisiteCheck> {
+  let check = checkPrerequisites();
+
+  console.log(pc.bold('  Checking prerequisites...'));
+  console.log();
+
+  for (const result of check.results) {
+    if (result.found) {
+      const versionStr = result.version ? ` (${result.version})` : '';
+      const pathStr = result.path ? pc.dim(` ${result.path}`) : '';
+      console.log(`  ${pc.green('✓')} ${result.name}${versionStr}${pathStr}`);
+    }
+  }
+
+  if (check.allMet) {
+    console.log();
+    return check;
+  }
+
+  // Handle missing prerequisites
+  for (const missing of check.missing) {
+    console.log();
+    console.log(`  ${pc.red('✗')} ${missing.name} — not found`);
+
+    if (missing.canAutoInstall && missing.installCommand) {
+      const install = await confirm({
+        message: `Install ${missing.name}? (${pc.dim(missing.installCommand)})`,
+        default: true,
+      });
+
+      if (install) {
+        const success = installPrerequisite(missing);
+        if (success) {
+          console.log(`  ${pc.green('✓')} ${missing.name} installed successfully`);
+        } else {
+          console.log(`  ${pc.red('✗')} Failed to install ${missing.name}`);
+          console.log(`    Try manually: ${missing.installHint}`);
+        }
+      } else {
+        console.log(`    ${missing.installHint}`);
+      }
+    } else {
+      console.log(`    ${missing.installHint}`);
+    }
+  }
+
+  // Re-check after installations
+  check = checkPrerequisites();
+  console.log();
+
+  if (!check.allMet) {
+    const stillMissing = check.missing.map(r => r.name).join(', ');
+    console.log(pc.red(`  Still missing: ${stillMissing}`));
+    console.log(pc.dim('  Install the missing prerequisites and run instar again.'));
+    console.log();
+  }
+
+  return check;
 }

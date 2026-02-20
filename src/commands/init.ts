@@ -32,7 +32,7 @@ import path from 'node:path';
 import pc from 'picocolors';
 import { randomUUID } from 'node:crypto';
 import { detectTmuxPath, detectClaudePath, ensureStateDir } from '../core/Config.js';
-import { checkPrerequisites, printPrerequisiteCheck } from '../core/Prerequisites.js';
+import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { defaultIdentity } from '../scaffold/bootstrap.js';
 import {
   generateAgentMd,
@@ -75,9 +75,9 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   console.log(pc.dim(`  Directory: ${projectDir}`));
   console.log();
 
-  // Check prerequisites
-  const prereqs = checkPrerequisites();
-  if (!printPrerequisiteCheck(prereqs)) {
+  // Check and install prerequisites
+  const prereqs = await ensurePrerequisites();
+  if (!prereqs.allMet) {
     process.exit(1);
   }
 
@@ -246,9 +246,9 @@ async function initExistingProject(options: InitOptions): Promise<void> {
   console.log(pc.bold(`\nInitializing instar in: ${pc.cyan(projectDir)}`));
   console.log();
 
-  // Check prerequisites
-  const prereqs = checkPrerequisites();
-  if (!printPrerequisiteCheck(prereqs)) {
+  // Check and install prerequisites
+  const prereqs = await ensurePrerequisites();
+  if (!prereqs.allMet) {
     process.exit(1);
   }
 

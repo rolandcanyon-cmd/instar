@@ -22,6 +22,7 @@ import pc from 'picocolors';
 import { input, confirm, select, number } from '@inquirer/prompts';
 import { Cron } from 'croner';
 import { detectTmuxPath, detectClaudePath, ensureStateDir } from '../core/Config.js';
+import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { UserManager } from '../users/UserManager.js';
 import { validateJob } from '../scheduler/JobLoader.js';
 import type { AgentKitConfig, JobDefinition, UserProfile, UserChannel } from '../core/types.js';
@@ -36,13 +37,23 @@ export async function runSetup(opts?: { classic?: boolean }): Promise<void> {
     return runClassicSetup();
   }
 
-  // Check for Claude CLI
+  // Check and install prerequisites
+  console.log();
+  const prereqs = await ensurePrerequisites();
+
+  // Check for Claude CLI (may have been just installed)
   const claudePath = detectClaudePath();
   if (!claudePath) {
     console.log();
     console.log(pc.yellow('  Claude CLI not found — falling back to classic setup wizard.'));
     console.log(pc.dim('  Install Claude Code for the conversational experience:'));
-    console.log(pc.dim('  https://docs.anthropic.com/en/docs/claude-code'));
+    console.log(pc.dim('  npm install -g @anthropic-ai/claude-code'));
+    console.log();
+    return runClassicSetup();
+  }
+
+  if (!prereqs.allMet) {
+    console.log(pc.yellow('  Some prerequisites are still missing. Falling back to classic setup.'));
     console.log();
     return runClassicSetup();
   }
@@ -123,25 +134,16 @@ async function runClassicSetup(): Promise<void> {
   console.log(pc.dim('  Persistent agent infrastructure for any Claude Code project'));
   console.log();
 
-  // ── Step 0: Check prerequisites ──────────────────────────────────
+  // ── Step 0: Check and install prerequisites ─────────────────────
 
-  const tmuxPath = detectTmuxPath();
-  const claudePath = detectClaudePath();
-
-  if (!tmuxPath) {
-    console.log(pc.red('  tmux is required but not installed.'));
-    console.log('  Install: brew install tmux (macOS) or apt install tmux (Linux)');
+  const prereqs = await ensurePrerequisites();
+  if (!prereqs.allMet) {
     process.exit(1);
   }
-  console.log(`  ${pc.green('✓')} tmux found: ${pc.dim(tmuxPath)}`);
 
-  if (!claudePath) {
-    console.log(pc.red('  Claude CLI is required but not installed.'));
-    console.log('  Install: https://docs.anthropic.com/en/docs/claude-code');
-    process.exit(1);
-  }
-  console.log(`  ${pc.green('✓')} Claude CLI found: ${pc.dim(claudePath)}`);
-  console.log();
+  const tmuxPath = prereqs.results.find(r => r.name === 'tmux')!.path!;
+  // Use a scoped name to avoid shadowing the outer runSetup's claudePath
+  const claudePath = prereqs.results.find(r => r.name === 'Claude CLI')!.path!;
 
   // ── Step 1: Project ──────────────────────────────────────────────
 
@@ -349,6 +351,31 @@ async function runClassicSetup(): Promise<void> {
   console.log(`    ${pc.cyan('.instar/users.json')}   — user profiles`);
   console.log();
 
+  // Check if instar is globally installed (needed for server commands)
+  const isGloballyInstalled = isInstarGlobal();
+  if (!isGloballyInstalled) {
+    console.log(pc.dim('  Tip: instar is not installed globally. For persistent server'));
+    console.log(pc.dim('  commands (start, stop, status), install it globally:'));
+    console.log();
+
+    const installGlobal = await confirm({
+      message: 'Install instar globally? (npm install -g instar)',
+      default: true,
+    });
+
+    if (installGlobal) {
+      try {
+        console.log(pc.dim('  Running: npm install -g instar'));
+        execSync('npm install -g instar', { encoding: 'utf-8', stdio: 'inherit' });
+        console.log(`  ${pc.green('✓')} instar installed globally`);
+      } catch {
+        console.log(pc.yellow('  Could not install globally. You can run it later:'));
+        console.log(`    ${pc.cyan('npm install -g instar')}`);
+      }
+    }
+    console.log();
+  }
+
   // Offer to start server
   const startNow = await confirm({
     message: 'Start the agent server now?',
@@ -371,6 +398,22 @@ async function runClassicSetup(): Promise<void> {
   }
 
   console.log();
+}
+
+/**
+ * Check if instar is installed globally (vs running via npx).
+ */
+function isInstarGlobal(): boolean {
+  try {
+    const result = execSync('which instar 2>/dev/null || where instar 2>/dev/null', {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+    }).trim();
+    // npx creates a temp binary — check if it's a real global install
+    return !!result && !result.includes('.npm/_npx');
+  } catch {
+    return false;
+  }
 }
 
 // ── Prompt Helpers ───────────────────────────────────────────────
