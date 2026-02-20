@@ -4,9 +4,9 @@
 **Duration**: 8-hour autonomous session (AUT-1655-wo)
 **Starting Version**: 0.1.10
 **Ending Version**: 0.1.11
-**Commits**: 65+
+**Commits**: 66+
 **Files Changed**: 115+ (9,500+ lines added, 570+ removed)
-**Tests**: 350 -> 740 (unit) + 38 (integration) + 9 (e2e) = 787 total
+**Tests**: 350 -> 741 (unit) + 38 (integration) + 9 (e2e) = 788 total
 **TypeScript**: Compiles cleanly with `--strict`
 **Package Size**: 98.7 kB (60 files)
 
@@ -315,17 +315,25 @@ The `instar feedback` CLI command used `fetch()` without a timeout. If the serve
 **Fix**: Added `MAX_CHANNELS` check on channel merge and 20-theme cap (matching `recordInteraction` behavior).
 **Tests**: 1 new regression test verifying merge caps.
 
+### CLI Add Commands JSON Parse Error Handling (FIXED — Reliability)
+
+The 4 `add*` functions in `cli.ts` (addTelegram, addSentry, addEmail, addQuota) each read `config.json` directly via `JSON.parse(fs.readFileSync(...))` — bypassing `loadConfig()` which already had proper error handling. A corrupted config would produce a raw `SyntaxError` stack trace.
+
+**Impact**: Users running `instar add telegram`, `instar add email`, `instar add sentry`, or `instar add quota` with a corrupted config file would see an unhelpful crash.
+**Fix**: Added try-catch with descriptive error message to all 4 functions, matching the pattern used in `loadConfig()`.
+**Tests**: 1 new source-analysis test verifying all `JSON.parse(fs.readFileSync(configPath` calls have corresponding error handling messages.
+
 ---
 
 ## Final Test Counts
 
 | Suite | Count | Status |
 |-------|-------|--------|
-| Unit | 740 | All passing |
+| Unit | 741 | All passing |
 | Integration | 38 | All passing |
 | E2E | 9 | All passing |
-| **Total** | **787** | **All passing** |
+| **Total** | **788** | **All passing** |
 
 ---
 
-*Report generated during AUT-1655-wo crucible session. 65+ commits, 115+ files changed. Every source file individually reviewed. All 787 tests passing.*
+*Report generated during AUT-1655-wo crucible session. 66+ commits, 115+ files changed. Every source file individually reviewed. All 788 tests passing.*
