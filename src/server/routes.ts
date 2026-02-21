@@ -218,6 +218,68 @@ export function createRoutes(ctx: RouteContext): Router {
     });
   });
 
+  // ── CI Health ─────────────────────────────────────────────────────
+  //
+  // On-demand CI status check. Detects GitHub repo from git remote and
+  // queries GitHub Actions for recent failures. Agents can use this to
+  // check CI health without waiting for the next self-diagnosis cycle.
+
+  router.get('/ci', (_req, res) => {
+    const projectDir = ctx.config.projectDir;
+
+    // Detect GitHub repo from git remote
+    let repo: string | null = null;
+    try {
+      const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
+        cwd: projectDir,
+        encoding: 'utf-8',
+        timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      // Extract owner/repo from SSH or HTTPS URL
+      const match = remoteUrl.match(/github\.com[:/](.+?)(?:\.git)?$/);
+      if (match) repo = match[1];
+    } catch {
+      // Not a git repo or no remote
+    }
+
+    if (!repo) {
+      res.json({ status: 'unknown', message: 'No GitHub repo detected', runs: [] });
+      return;
+    }
+
+    // Query recent CI runs
+    try {
+      const result = execFileSync('gh', [
+        'run', 'list', '--repo', repo, '--limit', '5',
+        '--json', 'databaseId,conclusion,status,headBranch,name,createdAt',
+      ], {
+        encoding: 'utf-8',
+        timeout: 15000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+
+      const runs = JSON.parse(result);
+      const failures = runs.filter((r: any) => r.conclusion === 'failure');
+      const inProgress = runs.filter((r: any) => r.status === 'in_progress');
+
+      res.json({
+        repo,
+        status: failures.length > 0 ? 'failing' : inProgress.length > 0 ? 'in_progress' : 'passing',
+        failureCount: failures.length,
+        inProgressCount: inProgress.length,
+        runs,
+      });
+    } catch (err) {
+      res.json({
+        repo,
+        status: 'error',
+        message: err instanceof Error ? err.message : 'gh CLI failed',
+        runs: [],
+      });
+    }
+  });
+
   // ── Sessions ────────────────────────────────────────────────────
 
   // Literal routes BEFORE parameterized routes to avoid capture

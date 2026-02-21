@@ -707,11 +707,14 @@ function getDefaultJobs(port: number): object[] {
 6. **Logs**: Check .instar/logs/server.log for recent errors: tail -50 .instar/logs/server.log | grep -i error
 7. **Settings coherence**: Are hooks in .claude/settings.json pointing to files that exist?
 8. **Design friction**: During your recent work, did anything feel unnecessarily difficult, confusing, or broken? Did you work around any issues?
+9. **CI health**: Check if the project has a GitHub repo and if CI is passing. Run: REPO=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]//;s/.git$//'); if [ -n "$REPO" ]; then FAILURES=$(gh run list --repo "$REPO" --status failure --limit 3 --json databaseId,conclusion,headBranch,name,createdAt 2>/dev/null); if echo "$FAILURES" | python3 -c "import sys,json; runs=json.load(sys.stdin); exit(0 if runs else 1)" 2>/dev/null; then echo "CI FAILURES DETECTED in $REPO"; echo "$FAILURES"; echo ""; echo "FIX THESE NOW: Read the failure logs with 'gh run view RUN_ID --repo $REPO --log-failed', diagnose the issue, fix it, run tests locally, commit and push."; fi; fi
 
 For EACH issue found, submit feedback immediately:
 curl -s -X POST http://localhost:${port}/feedback -H 'Content-Type: application/json' -d '{"type":"bug","title":"TITLE","description":"FULL_CONTEXT"}'
 
 For improvements (not bugs), use type "improvement" instead.
+
+IMPORTANT for CI failures: Don't just report them as feedback — FIX THEM. Read the logs, diagnose the root cause, apply the fix, run tests locally to verify, then commit and push. Only submit feedback if the fix is beyond your capability (e.g., requires credentials or external service changes). CI health is your responsibility as the agent running this project.
 
 If everything looks healthy, exit silently. Only report issues.`,
       },
