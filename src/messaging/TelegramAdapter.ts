@@ -651,6 +651,8 @@ export class TelegramAdapter implements MessagingAdapter {
 
       try {
         const success = await this.onInterruptSession(sessionName);
+        // Clear stall tracking — user is actively intervening
+        this.clearStallForTopic(topicId);
         if (success) {
           await this.sendToTopic(topicId, `Sent Escape to "${sessionName}" \u2014 it should resume processing.`).catch(() => {});
         } else {
@@ -675,6 +677,8 @@ export class TelegramAdapter implements MessagingAdapter {
         return true;
       }
 
+      // Clear stall tracking — user is actively intervening
+      this.clearStallForTopic(topicId);
       await this.sendToTopic(topicId, `Restarting "${sessionName}"...`).catch(() => {});
       try {
         await this.onRestartSession(sessionName, topicId);

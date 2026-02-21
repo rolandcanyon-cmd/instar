@@ -898,7 +898,11 @@ Types: \`bug\`, \`feature\`, \`improvement\`, \`question\`
     additions.push(`
 ## Telegram Relay
 
-When user input starts with \`[telegram:N]\`, the message came from a user via Telegram topic N. After responding, relay the response back:
+When user input starts with \`[telegram:N]\` (e.g., \`[telegram:26] hello\`), the message came from a user via Telegram topic N.
+
+**IMMEDIATE ACKNOWLEDGMENT (MANDATORY):** When you receive a Telegram message, your FIRST action — before reading files, searching code, or doing any work — must be sending a brief acknowledgment back. This confirms the message was received and you haven't stalled. Examples: "Got it, looking into this now." / "On it — checking the scheduler." / "Received, working on the sync." Then do the work, then send the full response.
+
+**Response relay:** After completing your work, relay your response back:
 
 \`\`\`bash
 cat <<'EOF' | .claude/scripts/telegram-reply.sh N
@@ -906,7 +910,7 @@ Your response text here
 EOF
 \`\`\`
 
-Strip the \`[telegram:N]\` prefix before interpreting the message. Only relay conversational text — not tool output.
+Strip the \`[telegram:N]\` prefix before interpreting the message. Respond naturally, then relay. Only relay your conversational text — not tool output or internal reasoning.
 `);
   }
 

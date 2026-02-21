@@ -158,7 +158,11 @@ This returns your full capability matrix: scripts, hooks, Telegram status, jobs,
       const section = `
 ## Telegram Relay
 
-When user input starts with \`[telegram:N]\` (e.g., \`[telegram:26] hello\`), the message came from a user via Telegram topic N. **After responding**, relay your response back:
+When user input starts with \`[telegram:N]\` (e.g., \`[telegram:26] hello\`), the message came from a user via Telegram topic N.
+
+**IMMEDIATE ACKNOWLEDGMENT (MANDATORY):** When you receive a Telegram message, your FIRST action — before reading files, searching code, or doing any work — must be sending a brief acknowledgment back. This confirms the message was received and you haven't stalled. Examples: "Got it, looking into this now." / "On it — checking the scheduler." / "Received, working on the sync." Then do the work, then send the full response.
+
+**Response relay:** After completing your work, relay your response back:
 
 \`\`\`bash
 cat <<'EOF' | .claude/scripts/telegram-reply.sh N
@@ -171,6 +175,21 @@ Strip the \`[telegram:N]\` prefix before interpreting the message. Respond natur
       content += '\n' + section;
       patched = true;
       result.upgraded.push('CLAUDE.md: added Telegram Relay section');
+    }
+
+    // Upgrade existing Telegram Relay sections to include mandatory acknowledgment
+    if (this.config.hasTelegram && content.includes('Telegram Relay') && !content.includes('IMMEDIATE ACKNOWLEDGMENT')) {
+      const ackBlock = `\n**IMMEDIATE ACKNOWLEDGMENT (MANDATORY):** When you receive a Telegram message, your FIRST action — before reading files, searching code, or doing any work — must be sending a brief acknowledgment back. This confirms the message was received and you haven't stalled. Examples: "Got it, looking into this now." / "On it — checking the scheduler." / "Received, working on the sync." Then do the work, then send the full response.\n`;
+      // Insert after the first line of the Telegram Relay section
+      const relayIdx = content.indexOf('## Telegram Relay');
+      if (relayIdx >= 0) {
+        const nextNewline = content.indexOf('\n\n', relayIdx + 18);
+        if (nextNewline >= 0) {
+          content = content.slice(0, nextNewline + 1) + ackBlock + content.slice(nextNewline + 1);
+          patched = true;
+          result.upgraded.push('CLAUDE.md: added mandatory acknowledgment to Telegram Relay');
+        }
+      }
     }
 
     if (patched) {

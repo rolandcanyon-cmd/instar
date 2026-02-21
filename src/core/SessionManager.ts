@@ -171,10 +171,33 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Check if a session is still running by checking tmux (sync version).
+   * Check if a session is still running by checking tmux AND verifying
+   * that the Claude process is running inside (not a zombie tmux pane).
    */
   isSessionAlive(tmuxSession: string): boolean {
-    return this.tmuxSessionExists(tmuxSession);
+    if (!this.tmuxSessionExists(tmuxSession)) return false;
+
+    // Verify Claude process is running inside the tmux session
+    try {
+      const paneCmd = execFileSync(
+        this.config.tmuxPath,
+        ['display-message', '-t', `=${tmuxSession}:`, '-p', '#{pane_current_command}'],
+        { encoding: 'utf-8', timeout: 5000 }
+      ).trim();
+      // Claude Code runs as 'claude' or 'node' process
+      if (paneCmd && (paneCmd.includes('claude') || paneCmd.includes('node'))) {
+        return true;
+      }
+      // If pane command is bash/zsh/sh, Claude may have exited — session is dead
+      if (paneCmd === 'bash' || paneCmd === 'zsh' || paneCmd === 'sh') {
+        return false;
+      }
+      // For any other command, assume alive (could be a Claude subprocess)
+      return true;
+    } catch {
+      // If we can't check, fall back to tmux session existence
+      return true;
+    }
   }
 
   /**

@@ -215,10 +215,13 @@ function wireTelegramRouting(
       if (sessionManager.isSessionAlive(targetSession)) {
         console.log(`[telegram→session] Injecting into ${targetSession}: "${text.slice(0, 80)}"`);
         sessionManager.injectTelegramMessage(targetSession, topicId, text);
+        // Delivery confirmation — let the user know the message reached the session
+        telegram.sendToTopic(topicId, `✓ Delivered`).catch(() => {});
         // Track for stall detection
         telegram.trackMessageInjection(topicId, targetSession, text);
       } else {
         // Session died — respawn with thread history
+        telegram.sendToTopic(topicId, `🔄 Session restarting — message queued.`).catch(() => {});
         respawnSessionForTopic(sessionManager, telegram, targetSession, topicId, text).catch(err => {
           console.error(`[telegram→session] Respawn failed:`, err);
         });
