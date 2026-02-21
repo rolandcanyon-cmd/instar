@@ -415,6 +415,132 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ topicId, messages });
   });
 
+  // ── Message Log Search ──────────────────────────────────────────
+
+  router.get('/telegram/search', (req, res) => {
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    const query = req.query.q as string | undefined;
+    const topicId = req.query.topicId ? parseInt(req.query.topicId as string, 10) : undefined;
+    const since = req.query.since ? new Date(req.query.since as string) : undefined;
+    const rawLimit = parseInt(req.query.limit as string, 10) || 50;
+    const limit = Math.min(Math.max(rawLimit, 1), 500);
+
+    if (topicId !== undefined && isNaN(topicId)) {
+      res.status(400).json({ error: 'topicId must be a number' });
+      return;
+    }
+    if (since !== undefined && isNaN(since.getTime())) {
+      res.status(400).json({ error: 'since must be a valid ISO date' });
+      return;
+    }
+
+    const results = ctx.telegram.searchLog({ query, topicId, since, limit });
+    res.json({ results, count: results.length });
+  });
+
+  router.get('/telegram/log-stats', (req, res) => {
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    res.json(ctx.telegram.getLogStats());
+  });
+
+  // ── Attention Queue ─────────────────────────────────────────────
+
+  router.post('/attention', async (req, res) => {
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    const { id, title, summary, category, priority, description, sourceContext } = req.body;
+    if (!id || typeof id !== 'string' || id.length > 200) {
+      res.status(400).json({ error: '"id" must be a string under 200 characters' });
+      return;
+    }
+    if (!title || typeof title !== 'string' || title.length > 500) {
+      res.status(400).json({ error: '"title" must be a string under 500 characters' });
+      return;
+    }
+    if (!summary || typeof summary !== 'string' || summary.length > 2000) {
+      res.status(400).json({ error: '"summary" must be a string under 2000 characters' });
+      return;
+    }
+    if (priority !== undefined && !['URGENT', 'HIGH', 'NORMAL', 'LOW'].includes(priority)) {
+      res.status(400).json({ error: '"priority" must be one of: URGENT, HIGH, NORMAL, LOW' });
+      return;
+    }
+
+    try {
+      const item = await ctx.telegram.createAttentionItem({
+        id,
+        title,
+        summary,
+        category: category || 'general',
+        priority: priority || 'NORMAL',
+        description: description || undefined,
+        sourceContext: sourceContext || undefined,
+      });
+      res.status(201).json(item);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/attention', (req, res) => {
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    const status = req.query.status as string | undefined;
+    const items = ctx.telegram.getAttentionItems(status);
+    res.json({ items, count: items.length });
+  });
+
+  router.get('/attention/:id', (req, res) => {
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    const item = ctx.telegram.getAttentionItem(req.params.id);
+    if (!item) {
+      res.status(404).json({ error: 'Attention item not found' });
+      return;
+    }
+    res.json(item);
+  });
+
+  router.patch('/attention/:id', async (req, res) => {
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    const { status } = req.body;
+    const validStatuses = ['OPEN', 'ACKNOWLEDGED', 'DONE', 'WONT_DO'];
+    if (!status || !validStatuses.includes(status)) {
+      res.status(400).json({ error: `"status" must be one of: ${validStatuses.join(', ')}` });
+      return;
+    }
+
+    const success = await ctx.telegram.updateAttentionStatus(req.params.id, status);
+    if (!success) {
+      res.status(404).json({ error: 'Attention item not found' });
+      return;
+    }
+
+    const item = ctx.telegram.getAttentionItem(req.params.id);
+    res.json(item);
+  });
+
   // ── Relationships ─────────────────────────────────────────────────
 
   router.get('/relationships', (req, res) => {
@@ -816,6 +942,54 @@ export function createRoutes(ctx: RouteContext): Router {
     const events = ctx.state.queryEvents({ since, type, limit });
 
     res.json(events);
+  });
+
+  // ── Internal: Lifeline Telegram Forward ─────────────────────────
+  // Receives messages from the Telegram Lifeline process and injects
+  // them into the appropriate session, just like TelegramAdapter would.
+
+  router.post('/internal/telegram-forward', (req, res) => {
+    const { topicId, text, fromUserId, fromUsername, fromFirstName, messageId } = req.body;
+
+    if (!topicId || !text) {
+      res.status(400).json({ error: 'topicId and text required' });
+      return;
+    }
+
+    // Build a Message object and fire the onTopicMessage callback
+    if (ctx.telegram?.onTopicMessage) {
+      const message = {
+        id: `tg-${messageId || Date.now()}`,
+        userId: String(fromUserId || 'unknown'),
+        content: text,
+        channel: { type: 'telegram', identifier: String(topicId) },
+        receivedAt: new Date().toISOString(),
+        metadata: {
+          telegramUserId: fromUserId,
+          username: fromUsername,
+          firstName: fromFirstName,
+          messageThreadId: topicId,
+          viaLifeline: true,
+        },
+      };
+
+      try {
+        ctx.telegram.onTopicMessage(message);
+        res.json({ ok: true, forwarded: true });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    } else if (ctx.sessionManager) {
+      // No telegram adapter with routing — inject directly into any mapped session
+      ctx.sessionManager.injectTelegramMessage(
+        `${ctx.config.projectName}-interface`,
+        topicId,
+        text,
+      );
+      res.json({ ok: true, forwarded: true, method: 'direct-inject' });
+    } else {
+      res.status(503).json({ error: 'No message routing available' });
+    }
   });
 
   return router;

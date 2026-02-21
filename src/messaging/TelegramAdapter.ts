@@ -75,6 +75,34 @@ interface LogEntry {
   sessionName: string | null;
 }
 
+export interface AttentionItem {
+  id: string;
+  title: string;
+  summary: string;
+  description?: string;
+  category: string;
+  priority: 'URGENT' | 'HIGH' | 'NORMAL' | 'LOW';
+  status: 'OPEN' | 'ACKNOWLEDGED' | 'IN_PROGRESS' | 'DONE' | 'WONT_DO';
+  sourceContext?: string;
+  createdAt: string;
+  updatedAt: string;
+  topicId?: number;
+}
+
+const PRIORITY_EMOJI: Record<string, string> = {
+  URGENT: '\ud83d\udd34',  // 🔴
+  HIGH: '\ud83d\udfe0',     // 🟠
+  NORMAL: '\ud83d\udd35',   // 🔵
+  LOW: '\u26aa',             // ⚪
+};
+
+const PRIORITY_COLOR: Record<string, number> = {
+  URGENT: 16478047,   // red
+  HIGH: 16749490,     // orange
+  NORMAL: 7322096,    // blue
+  LOW: 13338331,      // purple
+};
+
 /** Tracks a pending message for stall detection */
 interface PendingMessage {
   topicId: number;
@@ -104,6 +132,12 @@ export class TelegramAdapter implements MessagingAdapter {
   private offsetPath: string;
   private stateDir: string;
 
+  // Attention queue (persisted to disk)
+  private attentionItemToTopic: Map<string, number> = new Map();
+  private attentionTopicToItem: Map<number, string> = new Map();
+  private attentionItems: Map<string, AttentionItem> = new Map();
+  private attentionFilePath: string;
+
   // Stall detection
   private pendingMessages: Map<string, PendingMessage> = new Map(); // key = topicId-timestamp
   private stallCheckInterval: ReturnType<typeof setInterval> | null = null;
@@ -118,14 +152,19 @@ export class TelegramAdapter implements MessagingAdapter {
   public onIsSessionAlive: ((tmuxSession: string) => boolean) | null = null;
   public onIsSessionActive: ((tmuxSession: string) => Promise<boolean>) | null = null;
 
+  // Attention queue callbacks
+  public onAttentionStatusChange: ((itemId: string, status: string) => Promise<void>) | null = null;
+
   constructor(config: TelegramConfig, stateDir: string) {
     this.config = config;
     this.stateDir = stateDir;
     this.registryPath = path.join(stateDir, 'topic-session-registry.json');
     this.messageLogPath = path.join(stateDir, 'telegram-messages.jsonl');
     this.offsetPath = path.join(stateDir, 'telegram-poll-offset.json');
+    this.attentionFilePath = path.join(stateDir, 'state', 'attention-items.json');
     this.loadRegistry();
     this.loadOffset();
+    this.loadAttentionItems();
   }
 
   async start(): Promise<void> {
@@ -551,6 +590,12 @@ export class TelegramAdapter implements MessagingAdapter {
   private async handleCommand(text: string, topicId: number, userId: number): Promise<boolean> {
     const cmd = text.trim().toLowerCase();
 
+    // Attention topic commands — intercept before general commands
+    if (this.isAttentionTopic(topicId)) {
+      const handled = await this.handleAttentionCommand(topicId, text);
+      if (handled) return true;
+    }
+
     // /sessions — list all sessions with claim status
     if (cmd === '/sessions' || cmd.startsWith('/sessions ')) {
       const filterUnclaimed = cmd.includes('unclaimed');
@@ -708,6 +753,55 @@ export class TelegramAdapter implements MessagingAdapter {
   // ── Message Log ────────────────────────────────────────────
 
   /**
+   * Search the message log with flexible filters.
+   * Supports text query, topicId filter, date range, and pagination.
+   */
+  searchLog(opts: {
+    query?: string;
+    topicId?: number;
+    since?: Date;
+    limit?: number;
+  } = {}): LogEntry[] {
+    if (!fs.existsSync(this.messageLogPath)) return [];
+
+    const limit = Math.min(opts.limit ?? 50, 500);
+    const queryLower = opts.query?.toLowerCase();
+    const sinceMs = opts.since?.getTime();
+
+    const content = fs.readFileSync(this.messageLogPath, 'utf-8');
+    const lines = content.split('\n').filter(Boolean);
+
+    // Scan from end for efficiency (most queries want recent messages)
+    const matches: LogEntry[] = [];
+    for (let i = lines.length - 1; i >= 0 && matches.length < limit; i--) {
+      try {
+        const entry: LogEntry = JSON.parse(lines[i]);
+
+        if (opts.topicId !== undefined && entry.topicId !== opts.topicId) continue;
+        if (sinceMs && new Date(entry.timestamp).getTime() < sinceMs) continue;
+        if (queryLower && !entry.text.toLowerCase().includes(queryLower)) continue;
+
+        matches.unshift(entry); // Maintain chronological order
+      } catch { /* skip malformed */ }
+    }
+
+    return matches;
+  }
+
+  /**
+   * Get message log statistics.
+   */
+  getLogStats(): { totalMessages: number; logSizeBytes: number; logPath: string } {
+    if (!fs.existsSync(this.messageLogPath)) {
+      return { totalMessages: 0, logSizeBytes: 0, logPath: this.messageLogPath };
+    }
+    const stat = fs.statSync(this.messageLogPath);
+    const content = fs.readFileSync(this.messageLogPath, 'utf-8');
+    const lineCount = content.split('\n').filter(Boolean).length;
+    return { totalMessages: lineCount, logSizeBytes: stat.size, logPath: this.messageLogPath };
+  }
+
+  /**
    * Get recent messages for a topic (for thread history on respawn).
    */
   getTopicHistory(topicId: number, limit: number = 20): LogEntry[] {
@@ -770,6 +864,197 @@ export class TelegramAdapter implements MessagingAdapter {
     } catch {
       // Non-critical — don't fail on rotation errors
     }
+  }
+
+  // ── Attention Queue ────────────────────────────────────────
+
+  /**
+   * Create an attention item and its Telegram topic.
+   */
+  async createAttentionItem(item: Omit<AttentionItem, 'createdAt' | 'updatedAt' | 'status' | 'topicId'>): Promise<AttentionItem> {
+    // Check for existing
+    if (this.attentionItems.has(item.id)) {
+      return this.attentionItems.get(item.id)!;
+    }
+
+    const now = new Date().toISOString();
+    const attention: AttentionItem = {
+      ...item,
+      status: 'OPEN',
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // Create Telegram topic
+    try {
+      const emoji = PRIORITY_EMOJI[item.priority] || PRIORITY_EMOJI.NORMAL;
+      const color = PRIORITY_COLOR[item.priority] || PRIORITY_COLOR.NORMAL;
+      const topicTitle = `${emoji} ${item.title}`.slice(0, 128);
+
+      const result = await this.apiCall(
+        'createForumTopic',
+        { chat_id: this.config.chatId, name: topicTitle, icon_color: color },
+      ) as { message_thread_id: number };
+
+      const topicId = result.message_thread_id;
+      attention.topicId = topicId;
+
+      // Register mappings
+      this.attentionItemToTopic.set(item.id, topicId);
+      this.attentionTopicToItem.set(topicId, item.id);
+      this.topicToName.set(topicId, item.title);
+      this.saveRegistry();
+
+      // Post details as first message
+      const detail = [
+        `<b>${this.escapeHtml(item.category)}</b> | Priority: ${item.priority}`,
+        ``,
+        this.escapeHtml(item.summary),
+        item.description ? `\n${this.escapeHtml(item.description.slice(0, 1000))}` : '',
+        item.sourceContext ? `\n<i>Source: ${this.escapeHtml(item.sourceContext)}</i>` : '',
+        ``,
+        `Commands: /ack, /done, /wontdo, /reopen`,
+      ].filter(Boolean).join('\n');
+
+      // Send as HTML by calling API directly
+      const sendParams: Record<string, unknown> = {
+        chat_id: this.config.chatId,
+        text: detail,
+        parse_mode: 'HTML',
+      };
+      if (topicId > 1) sendParams.message_thread_id = topicId;
+      await this.apiCall('sendMessage', sendParams);
+    } catch (err) {
+      console.error(`[telegram] Failed to create attention topic for "${item.title}": ${err}`);
+    }
+
+    this.attentionItems.set(item.id, attention);
+    this.saveAttentionItems();
+    return attention;
+  }
+
+  /**
+   * Update attention item status. Called by /ack, /done, /wontdo, /reopen commands.
+   */
+  async updateAttentionStatus(itemId: string, status: AttentionItem['status']): Promise<boolean> {
+    const item = this.attentionItems.get(itemId);
+    if (!item) return false;
+
+    item.status = status;
+    item.updatedAt = new Date().toISOString();
+    this.saveAttentionItems();
+
+    const topicId = this.attentionItemToTopic.get(itemId);
+    if (topicId) {
+      const labels: Record<string, string> = {
+        'ACKNOWLEDGED': '\ud83d\udc40 Acknowledged',
+        'IN_PROGRESS': '\ud83d\udd28 In Progress',
+        'DONE': '\u2705 Done',
+        'WONT_DO': '\u23ed Won\'t Do',
+        'OPEN': '\ud83d\udccb Reopened',
+      };
+      await this.sendToTopic(topicId, `Status \u2192 ${labels[status] || status}`).catch(() => {});
+
+      // Auto-close/reopen topic
+      try {
+        if (status === 'DONE' || status === 'WONT_DO') {
+          await this.apiCall('closeForumTopic', { chat_id: this.config.chatId, message_thread_id: topicId });
+        } else if (status === 'OPEN') {
+          await this.apiCall('reopenForumTopic', { chat_id: this.config.chatId, message_thread_id: topicId });
+        }
+      } catch { /* topic operations may fail if already in desired state */ }
+    }
+
+    // Fire callback for external integrations
+    if (this.onAttentionStatusChange) {
+      await this.onAttentionStatusChange(itemId, status).catch(err => {
+        console.error(`[telegram] Attention status callback failed: ${err}`);
+      });
+    }
+
+    return true;
+  }
+
+  /**
+   * Get all attention items, optionally filtered by status.
+   */
+  getAttentionItems(status?: string): AttentionItem[] {
+    const items = Array.from(this.attentionItems.values());
+    if (status) return items.filter(i => i.status === status);
+    return items;
+  }
+
+  /**
+   * Get a specific attention item.
+   */
+  getAttentionItem(itemId: string): AttentionItem | undefined {
+    return this.attentionItems.get(itemId);
+  }
+
+  /**
+   * Check if a topic is an attention topic.
+   */
+  isAttentionTopic(topicId: number): boolean {
+    return this.attentionTopicToItem.has(topicId);
+  }
+
+  /**
+   * Handle commands in attention topics (/ack, /done, /wontdo, /reopen).
+   * Returns true if handled, false if not an attention command.
+   */
+  async handleAttentionCommand(topicId: number, text: string): Promise<boolean> {
+    const itemId = this.attentionTopicToItem.get(topicId);
+    if (!itemId) return false;
+
+    const cmd = text.trim().toLowerCase();
+    const statusMap: Record<string, AttentionItem['status']> = {
+      '/ack': 'ACKNOWLEDGED',
+      '/acknowledge': 'ACKNOWLEDGED',
+      '/done': 'DONE',
+      '/wontdo': 'WONT_DO',
+      '/reopen': 'OPEN',
+    };
+
+    if (cmd in statusMap) {
+      await this.updateAttentionStatus(itemId, statusMap[cmd]);
+      return true;
+    }
+
+    return false;
+  }
+
+  private loadAttentionItems(): void {
+    try {
+      if (!fs.existsSync(this.attentionFilePath)) return;
+      const data = JSON.parse(fs.readFileSync(this.attentionFilePath, 'utf-8'));
+      if (data.items) {
+        for (const item of data.items) {
+          this.attentionItems.set(item.id, item);
+          if (item.topicId) {
+            this.attentionItemToTopic.set(item.id, item.topicId);
+            this.attentionTopicToItem.set(item.topicId, item.id);
+          }
+        }
+        console.log(`[telegram] Loaded ${this.attentionItems.size} attention items`);
+      }
+    } catch { /* file doesn't exist yet */ }
+  }
+
+  private saveAttentionItems(): void {
+    try {
+      const dir = path.dirname(this.attentionFilePath);
+      fs.mkdirSync(dir, { recursive: true });
+      const data = { items: Array.from(this.attentionItems.values()) };
+      const tmpPath = `${this.attentionFilePath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+      fs.renameSync(tmpPath, this.attentionFilePath);
+    } catch (err) {
+      console.error(`[telegram] Failed to save attention items: ${err}`);
+    }
+  }
+
+  private escapeHtml(text: string): string {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // ── Registry Persistence ───────────────────────────────────
