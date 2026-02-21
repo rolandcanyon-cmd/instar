@@ -1,0 +1,457 @@
+/**
+ * Telegram Lifeline — minimal persistent process that owns the Telegram connection.
+ *
+ * Architecture:
+ *   Lifeline (this process)
+ *     ├── Telegram Bot polling (always running)
+ *     ├── Message queue (persisted to disk)
+ *     └── Server Supervisor (manages full Instar server as child)
+ *
+ * The lifeline is intentionally minimal — it only handles:
+ *   1. Telegram message polling
+ *   2. Forwarding messages to the server
+ *   3. Queuing messages when server is down
+ *   4. Replaying queued messages when server recovers
+ *   5. Responding to /lifeline commands directly
+ *   6. Supervising the server process
+ *
+ * This ensures the user always has a communication channel even when
+ * the full server crashes, runs out of memory, or gets stuck.
+ */
+
+import fs from 'node:fs';
+import path from 'node:path';
+import pc from 'picocolors';
+import { loadConfig, ensureStateDir } from '../core/Config.js';
+import { registerPort, unregisterPort, startHeartbeat } from '../core/PortRegistry.js';
+import { MessageQueue, type QueuedMessage } from './MessageQueue.js';
+import { ServerSupervisor } from './ServerSupervisor.js';
+
+interface LifelineConfig {
+  token: string;
+  chatId: string;
+  pollIntervalMs?: number;
+}
+
+interface TelegramUpdate {
+  update_id: number;
+  message?: {
+    message_id: number;
+    from: { id: number; first_name: string; username?: string };
+    chat: { id: number };
+    message_thread_id?: number;
+    text?: string;
+    date: number;
+  };
+}
+
+export class TelegramLifeline {
+  private config: LifelineConfig;
+  private projectConfig: ReturnType<typeof loadConfig>;
+  private queue: MessageQueue;
+  private supervisor: ServerSupervisor;
+  private polling = false;
+  private lastUpdateId = 0;
+  private pollTimeout: ReturnType<typeof setTimeout> | null = null;
+  private offsetPath: string;
+  private stopHeartbeat: (() => void) | null = null;
+  private replayInterval: ReturnType<typeof setInterval> | null = null;
+
+  constructor(projectDir?: string) {
+    this.projectConfig = loadConfig(projectDir);
+    ensureStateDir(this.projectConfig.stateDir);
+
+    // Find Telegram config
+    const telegramConfig = this.projectConfig.messaging.find(
+      m => m.type === 'telegram' && m.enabled
+    );
+    if (!telegramConfig) {
+      throw new Error('No Telegram messaging configured. Add it with: instar add telegram');
+    }
+
+    this.config = telegramConfig.config as unknown as LifelineConfig;
+    this.queue = new MessageQueue(this.projectConfig.stateDir);
+    this.offsetPath = path.join(this.projectConfig.stateDir, 'lifeline-poll-offset.json');
+
+    this.supervisor = new ServerSupervisor({
+      projectDir: this.projectConfig.projectDir,
+      projectName: this.projectConfig.projectName,
+      port: this.projectConfig.port,
+    });
+
+    // Wire supervisor events
+    this.supervisor.on('serverUp', () => {
+      console.log('[Lifeline] Server is up — replaying queued messages');
+      this.replayQueue();
+    });
+
+    this.supervisor.on('serverDown', (reason: string) => {
+      console.log(`[Lifeline] Server went down: ${reason}`);
+      this.notifyServerDown(reason);
+    });
+
+    this.supervisor.on('serverRestarting', (attempt: number) => {
+      console.log(`[Lifeline] Server restarting (attempt ${attempt})`);
+    });
+
+    this.loadOffset();
+  }
+
+  /**
+   * Start the lifeline — begins Telegram polling and server supervision.
+   */
+  async start(): Promise<void> {
+    console.log(pc.bold(`Starting Telegram Lifeline for ${pc.cyan(this.projectConfig.projectName)}`));
+    console.log(`  Port: ${this.projectConfig.port}`);
+    console.log(`  State: ${this.projectConfig.stateDir}`);
+    console.log();
+
+    // Register in port registry (lifeline owns the port claim)
+    try {
+      registerPort(
+        `${this.projectConfig.projectName}-lifeline`,
+        this.projectConfig.port + 1000, // Lifeline uses port + 1000 to avoid conflict
+        this.projectConfig.projectDir,
+      );
+    } catch { /* non-critical */ }
+    this.stopHeartbeat = startHeartbeat(`${this.projectConfig.projectName}-lifeline`);
+
+    // Start server supervisor
+    const serverStarted = await this.supervisor.start();
+    if (serverStarted) {
+      console.log(pc.green('  Server supervisor active'));
+    } else {
+      console.log(pc.yellow('  Server failed to start — lifeline will keep trying'));
+    }
+
+    // Start Telegram polling
+    this.polling = true;
+    this.poll();
+    console.log(pc.green('  Telegram polling active'));
+
+    // Start periodic queue replay (in case server comes back between health checks)
+    this.replayInterval = setInterval(() => {
+      if (this.supervisor.healthy && this.queue.length > 0) {
+        this.replayQueue();
+      }
+    }, 15_000);
+
+    // Replay any messages queued from previous lifeline runs
+    if (this.queue.length > 0) {
+      console.log(`  ${this.queue.length} queued messages from previous run`);
+      if (this.supervisor.healthy) {
+        setTimeout(() => this.replayQueue(), 5000); // Wait for server to fully start
+      }
+    }
+
+    // Graceful shutdown
+    const shutdown = async () => {
+      console.log('\nLifeline shutting down...');
+      this.polling = false;
+      if (this.pollTimeout) clearTimeout(this.pollTimeout);
+      if (this.replayInterval) clearInterval(this.replayInterval);
+      if (this.stopHeartbeat) this.stopHeartbeat();
+      unregisterPort(`${this.projectConfig.projectName}-lifeline`);
+      await this.supervisor.stop();
+      process.exit(0);
+    };
+
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+  }
+
+  // ── Telegram Polling ──────────────────────────────────────
+
+  private async poll(): Promise<void> {
+    if (!this.polling) return;
+
+    try {
+      const updates = await this.getUpdates();
+      for (const update of updates) {
+        await this.processUpdate(update);
+        this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);
+      }
+      if (updates.length > 0) this.saveOffset();
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes('401') || errMsg.includes('Unauthorized')) {
+        console.error('[Lifeline] FATAL: Bot token invalid. Stopping.');
+        this.polling = false;
+        return;
+      }
+      // Non-fatal error — continue polling
+      if (!errMsg.includes('abort')) {
+        console.error(`[Lifeline] Poll error: ${errMsg}`);
+      }
+    }
+
+    const interval = this.config.pollIntervalMs ?? 2000;
+    this.pollTimeout = setTimeout(() => this.poll(), interval);
+  }
+
+  private async processUpdate(update: TelegramUpdate): Promise<void> {
+    const msg = update.message;
+    if (!msg || !msg.text) return;
+
+    const topicId = msg.message_thread_id ?? 1;
+    const text = msg.text;
+
+    // Handle lifeline-specific commands directly (bypass server)
+    if (text.startsWith('/lifeline')) {
+      await this.handleLifelineCommand(text, topicId);
+      return;
+    }
+
+    // Forward to server if healthy
+    if (this.supervisor.healthy) {
+      const forwarded = await this.forwardToServer(topicId, text, msg);
+      if (forwarded) return;
+    }
+
+    // Server is down — queue the message
+    this.queue.enqueue({
+      id: `tg-${msg.message_id}`,
+      topicId,
+      text,
+      fromUserId: msg.from.id,
+      fromUsername: msg.from.username,
+      fromFirstName: msg.from.first_name,
+      timestamp: new Date(msg.date * 1000).toISOString(),
+    });
+
+    // Notify user that message is queued
+    await this.sendToTopic(topicId,
+      `Server is temporarily down. Your message has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
+    );
+  }
+
+  /**
+   * Forward a message to the Instar server's Telegram webhook.
+   */
+  private async forwardToServer(
+    topicId: number,
+    text: string,
+    rawMsg: NonNullable<TelegramUpdate['message']>,
+  ): Promise<boolean> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${this.projectConfig.port}/internal/telegram-forward`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              topicId,
+              text,
+              fromUserId: rawMsg.from.id,
+              fromUsername: rawMsg.from.username,
+              fromFirstName: rawMsg.from.first_name,
+              messageId: rawMsg.message_id,
+              timestamp: new Date(rawMsg.date * 1000).toISOString(),
+            }),
+            signal: controller.signal,
+          }
+        );
+        return response.ok;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  // ── Lifeline Commands ─────────────────────────────────────
+
+  private async handleLifelineCommand(text: string, topicId: number): Promise<void> {
+    const cmd = text.trim().toLowerCase();
+
+    if (cmd === '/lifeline' || cmd === '/lifeline status') {
+      const status = this.supervisor.getStatus();
+      const queueSize = this.queue.length;
+      const lines = [
+        `Lifeline Status:`,
+        `  Server: ${status.healthy ? '● healthy' : status.running ? '○ unhealthy' : '✗ down'}`,
+        `  Restart attempts: ${status.restartAttempts}`,
+        `  Queued messages: ${queueSize}`,
+        `  Last healthy: ${status.lastHealthy ? new Date(status.lastHealthy).toISOString().slice(11, 19) : 'never'}`,
+      ];
+      await this.sendToTopic(topicId, lines.join('\n'));
+      return;
+    }
+
+    if (cmd === '/lifeline restart') {
+      await this.sendToTopic(topicId, 'Restarting server...');
+      await this.supervisor.stop();
+      const started = await this.supervisor.start();
+      await this.sendToTopic(topicId, started ? 'Server restarted.' : 'Server failed to restart.');
+      return;
+    }
+
+    if (cmd === '/lifeline queue') {
+      const messages = this.queue.peek();
+      if (messages.length === 0) {
+        await this.sendToTopic(topicId, 'No queued messages.');
+        return;
+      }
+      const lines = messages.map((m, i) =>
+        `${i + 1}. [${m.fromFirstName}] ${m.text.slice(0, 60)}${m.text.length > 60 ? '...' : ''}`
+      );
+      await this.sendToTopic(topicId, `Queued messages (${messages.length}):\n${lines.join('\n')}`);
+      return;
+    }
+
+    if (cmd === '/lifeline help') {
+      const lines = [
+        'Lifeline Commands:',
+        '  /lifeline — Show status',
+        '  /lifeline restart — Restart the server',
+        '  /lifeline queue — Show queued messages',
+        '  /lifeline help — Show this help',
+        '',
+        'The lifeline keeps your Telegram connection alive even when the server is down.',
+        'Messages sent while the server is down are queued and replayed on recovery.',
+      ];
+      await this.sendToTopic(topicId, lines.join('\n'));
+      return;
+    }
+
+    await this.sendToTopic(topicId, 'Unknown lifeline command. Try /lifeline help');
+  }
+
+  // ── Queue Replay ──────────────────────────────────────────
+
+  private async replayQueue(): Promise<void> {
+    const messages = this.queue.drain();
+    if (messages.length === 0) return;
+
+    console.log(`[Lifeline] Replaying ${messages.length} queued messages`);
+    let replayed = 0;
+    let failed = 0;
+
+    for (const msg of messages) {
+      const forwarded = await this.forwardToServer(msg.topicId, msg.text, {
+        message_id: parseInt(msg.id.replace('tg-', ''), 10) || 0,
+        from: {
+          id: msg.fromUserId,
+          first_name: msg.fromFirstName,
+          username: msg.fromUsername,
+        },
+        chat: { id: parseInt(this.config.chatId, 10) },
+        message_thread_id: msg.topicId,
+        text: msg.text,
+        date: Math.floor(new Date(msg.timestamp).getTime() / 1000),
+      });
+
+      if (forwarded) {
+        replayed++;
+      } else {
+        // Re-queue failed messages
+        this.queue.enqueue(msg);
+        failed++;
+      }
+
+      // Small delay between messages to avoid overwhelming the server
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    if (replayed > 0 || failed > 0) {
+      console.log(`[Lifeline] Replay complete: ${replayed} delivered, ${failed} re-queued`);
+    }
+  }
+
+  // ── Notifications ─────────────────────────────────────────
+
+  private async notifyServerDown(reason: string): Promise<void> {
+    // Send to General topic (1) — since we don't know which topic the user is watching
+    await this.sendToTopic(1,
+      `Server went down: ${reason}\n\nYour messages will be queued until recovery. Use /lifeline status to check.`
+    ).catch(() => {});
+  }
+
+  // ── Telegram API ──────────────────────────────────────────
+
+  private async sendToTopic(topicId: number, text: string): Promise<void> {
+    const params: Record<string, unknown> = {
+      chat_id: this.config.chatId,
+      text,
+    };
+    if (topicId > 1) {
+      params.message_thread_id = topicId;
+    }
+
+    try {
+      await this.apiCall('sendMessage', { ...params, parse_mode: 'Markdown' });
+    } catch {
+      // Retry without Markdown parse mode
+      try {
+        await this.apiCall('sendMessage', params);
+      } catch (err) {
+        console.error(`[Lifeline] Failed to send to topic ${topicId}: ${err}`);
+      }
+    }
+  }
+
+  private async getUpdates(): Promise<TelegramUpdate[]> {
+    const result = await this.apiCall('getUpdates', {
+      offset: this.lastUpdateId + 1,
+      timeout: 30,
+      allowed_updates: ['message'],
+    });
+    return (result as TelegramUpdate[]) ?? [];
+  }
+
+  private async apiCall(method: string, params: Record<string, unknown>): Promise<unknown> {
+    const url = `https://api.telegram.org/bot${this.config.token}/${method}`;
+    const timeoutMs = method === 'getUpdates' ? 60_000 : 15_000;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(params),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Telegram API error (${response.status}): ${text}`);
+    }
+
+    const data = await response.json() as { ok: boolean; result: unknown };
+    if (!data.ok) {
+      throw new Error(`Telegram API returned not ok: ${JSON.stringify(data)}`);
+    }
+
+    return data.result;
+  }
+
+  // ── Offset Persistence ────────────────────────────────────
+
+  private loadOffset(): void {
+    try {
+      if (fs.existsSync(this.offsetPath)) {
+        const data = JSON.parse(fs.readFileSync(this.offsetPath, 'utf-8'));
+        if (typeof data.lastUpdateId === 'number' && data.lastUpdateId > 0) {
+          this.lastUpdateId = data.lastUpdateId;
+        }
+      }
+    } catch { /* start from 0 */ }
+  }
+
+  private saveOffset(): void {
+    try {
+      const tmpPath = `${this.offsetPath}.${process.pid}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify({ lastUpdateId: this.lastUpdateId }));
+      fs.renameSync(tmpPath, this.offsetPath);
+    } catch { /* non-critical */ }
+  }
+}

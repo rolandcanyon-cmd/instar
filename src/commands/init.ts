@@ -33,6 +33,7 @@ import pc from 'picocolors';
 import { randomUUID } from 'node:crypto';
 import { detectTmuxPath, detectClaudePath, ensureStateDir } from '../core/Config.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
+import { allocatePort } from '../core/PortRegistry.js';
 import { defaultIdentity } from '../scaffold/bootstrap.js';
 import {
   generateAgentMd,
@@ -117,7 +118,18 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   // Create project directory
   fs.mkdirSync(projectDir, { recursive: true });
 
-  const port = options.port || 4040;
+  // Auto-allocate a port if not explicitly specified (multi-instance support)
+  let port: number;
+  if (options.port) {
+    port = options.port;
+  } else {
+    try {
+      port = allocatePort(projectName);
+      console.log(`  ${pc.green('✓')} Auto-allocated port ${port} (from ~/.instar/port-registry.json)`);
+    } catch {
+      port = 4040; // Fallback to default
+    }
+  }
 
   // Generate identity (non-interactive for init, interactive for setup)
   const identity = defaultIdentity(projectName);
@@ -271,7 +283,18 @@ node_modules/
 async function initExistingProject(options: InitOptions): Promise<void> {
   const projectDir = path.resolve(options.dir || process.cwd());
   const projectName = options.name || path.basename(projectDir);
-  const port = options.port || 4040;
+
+  // Auto-allocate a port if not explicitly specified (multi-instance support)
+  let port: number;
+  if (options.port) {
+    port = options.port;
+  } else {
+    try {
+      port = allocatePort(projectName);
+    } catch {
+      port = 4040;
+    }
+  }
 
   console.log(pc.bold(`\nInitializing instar in: ${pc.cyan(projectDir)}`));
   console.log();

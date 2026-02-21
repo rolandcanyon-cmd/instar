@@ -2,36 +2,109 @@
 # Session start hook — injects identity context when a new Claude session begins.
 # This is how the agent maintains continuity: every session starts with self-knowledge.
 #
-# Installed by instar during setup. Runs as a Claude Code PreToolUse hook.
+# DESIGN: This hook differentiates between session phases:
+# - First tool use: Full identity injection (AGENT.md content)
+# - Subsequent uses: Lightweight pointer only
+# - Server health check on first run
+#
+# Structure > Willpower: Identity content is OUTPUT, not just pointed to.
+#
+# Installed by instar during setup. Runs as a Claude Code PostToolUse hook.
 
 INSTAR_DIR="${CLAUDE_PROJECT_DIR:-.}/.instar"
+STATE_DIR="$INSTAR_DIR/state"
+MARKER_FILE="$STATE_DIR/.session-started"
 
-# Build identity context
-CONTEXT=""
+# Ensure state directory exists
+mkdir -p "$STATE_DIR" 2>/dev/null
 
-# Core identity
-if [ -f "$INSTAR_DIR/AGENT.md" ]; then
-  CONTEXT="${CONTEXT}Your identity file is at .instar/AGENT.md — read it if you need to remember who you are.\n"
-fi
+# Check if this is the first tool use in this session
+# The marker file is cleaned up when the process exits or on next session
+if [ ! -f "$MARKER_FILE" ]; then
+  # First tool use — full identity injection
+  echo "$PPID" > "$MARKER_FILE"
 
-# User context
-if [ -f "$INSTAR_DIR/USER.md" ]; then
-  CONTEXT="${CONTEXT}Your user context is at .instar/USER.md — read it to know who you're working with.\n"
-fi
+  echo "=== SESSION START — IDENTITY LOADED ==="
+  echo ""
 
-# Memory
-if [ -f "$INSTAR_DIR/MEMORY.md" ]; then
-  CONTEXT="${CONTEXT}Your persistent memory is at .instar/MEMORY.md — check it for past learnings.\n"
-fi
-
-# Relationships
-if [ -d "$INSTAR_DIR/relationships" ]; then
-  REL_COUNT=$(ls -1 "$INSTAR_DIR/relationships"/*.json 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$REL_COUNT" -gt "0" ]; then
-    CONTEXT="${CONTEXT}You have ${REL_COUNT} tracked relationships in .instar/relationships/.\n"
+  # Inject AGENT.md content directly (Structure > Willpower)
+  if [ -f "$INSTAR_DIR/AGENT.md" ]; then
+    echo "--- YOUR IDENTITY ---"
+    cat "$INSTAR_DIR/AGENT.md"
+    echo ""
+    echo "--- END IDENTITY ---"
+    echo ""
   fi
-fi
 
-if [ -n "$CONTEXT" ]; then
-  echo "$CONTEXT"
+  # Inject USER.md content directly
+  if [ -f "$INSTAR_DIR/USER.md" ]; then
+    echo "--- YOUR USER ---"
+    cat "$INSTAR_DIR/USER.md"
+    echo ""
+    echo "--- END USER ---"
+    echo ""
+  fi
+
+  # Inject MEMORY.md if it has substantial content
+  if [ -f "$INSTAR_DIR/MEMORY.md" ]; then
+    MEMORY_LINES=$(wc -l < "$INSTAR_DIR/MEMORY.md" | tr -d ' ')
+    if [ "$MEMORY_LINES" -gt "15" ]; then
+      echo "--- YOUR MEMORY ---"
+      cat "$INSTAR_DIR/MEMORY.md"
+      echo ""
+      echo "--- END MEMORY ---"
+      echo ""
+    else
+      echo "Memory at .instar/MEMORY.md (minimal — grow it as you learn)."
+      echo ""
+    fi
+  fi
+
+  # Active dispatch context (behavioral lessons from Dawn)
+  if [ -f "$STATE_DIR/dispatch-context.md" ]; then
+    DISPATCH_LINES=$(wc -l < "$STATE_DIR/dispatch-context.md" | tr -d ' ')
+    if [ "$DISPATCH_LINES" -gt "2" ]; then
+      echo "--- ACTIVE DISPATCHES ---"
+      cat "$STATE_DIR/dispatch-context.md"
+      echo ""
+      echo "--- END DISPATCHES ---"
+      echo ""
+    fi
+  fi
+
+  # Relationships count
+  if [ -d "$INSTAR_DIR/relationships" ]; then
+    REL_COUNT=$(ls -1 "$INSTAR_DIR/relationships"/*.json 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$REL_COUNT" -gt "0" ]; then
+      echo "You have ${REL_COUNT} tracked relationships in .instar/relationships/."
+      echo ""
+    fi
+  fi
+
+  # Server health check
+  CONFIG_FILE="$INSTAR_DIR/config.json"
+  if [ -f "$CONFIG_FILE" ]; then
+    PORT=$(grep -o '"port":[0-9]*' "$CONFIG_FILE" | head -1 | cut -d':' -f2)
+    if [ -n "$PORT" ]; then
+      HEALTH=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:${PORT}/health" 2>/dev/null)
+      if [ "$HEALTH" = "200" ]; then
+        echo "Server running on port ${PORT}. Check capabilities: curl http://localhost:${PORT}/capabilities"
+      else
+        echo "WARNING: Server on port ${PORT} is not responding. Run: instar server start"
+      fi
+    fi
+  fi
+
+  echo ""
+  echo "=== IDENTITY LOADED — You are grounded. ==="
+
+else
+  # Subsequent tool use — check if this is still the same session
+  STORED_PID=$(cat "$MARKER_FILE" 2>/dev/null)
+  if [ "$STORED_PID" != "$PPID" ]; then
+    # Different parent PID — this is a new session, re-inject
+    echo "$PPID" > "$MARKER_FILE"
+    echo "New session detected. Read .instar/AGENT.md and .instar/MEMORY.md for full context."
+  fi
+  # Otherwise: same session, no output needed (keep it quiet)
 fi

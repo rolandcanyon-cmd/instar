@@ -22,11 +22,16 @@ import { RelationshipManager } from '../core/RelationshipManager.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
 import { DispatchManager } from '../core/DispatchManager.js';
 import { UpdateChecker } from '../core/UpdateChecker.js';
+import { registerPort, unregisterPort, startHeartbeat } from '../core/PortRegistry.js';
+import { TelegraphService } from '../publishing/TelegraphService.js';
 import type { Message } from '../core/types.js';
 
 interface StartOptions {
   foreground?: boolean;
   dir?: string;
+  /** When false, skip Telegram polling (used when lifeline owns the Telegram connection).
+   *  Commander maps --no-telegram to telegram: false. */
+  telegram?: boolean;
 }
 
 /**
@@ -339,6 +344,16 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Clean up stale Telegram temp files on startup
     cleanupTelegramTempFiles();
 
+    // Register this instance in the port registry (multi-instance support)
+    try {
+      registerPort(config.projectName, config.port, config.projectDir);
+      console.log(pc.green(`  Registered port ${config.port} for "${config.projectName}"`));
+    } catch (err) {
+      console.log(pc.red(`  Port conflict: ${err instanceof Error ? err.message : err}`));
+      process.exit(1);
+    }
+    const stopHeartbeat = startHeartbeat(config.projectName);
+
     // Warn if no auth token configured — server allows unauthenticated access
     if (!config.authToken) {
       console.log(pc.yellow(pc.bold('  ⚠ WARNING: No auth token configured — all API endpoints are unauthenticated!')));
@@ -361,10 +376,14 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Scheduler started'));
     }
 
-    // Set up Telegram if configured
+    // Set up Telegram if configured (skip if lifeline owns the connection)
     let telegram: TelegramAdapter | undefined;
     const telegramConfig = config.messaging.find(m => m.type === 'telegram' && m.enabled);
-    if (telegramConfig) {
+    const skipTelegram = options.telegram === false; // --no-telegram sets telegram: false
+    if (skipTelegram && telegramConfig) {
+      console.log(pc.dim('  Telegram polling skipped (--no-telegram flag)'));
+    }
+    if (telegramConfig && !skipTelegram) {
       telegram = new TelegramAdapter(telegramConfig.config as any, config.stateDir);
       await telegram.start();
       console.log(pc.green('  Telegram connected'));
@@ -430,12 +449,27 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }).catch(() => { /* ignore startup check failures */ });
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker });
+    // Set up Telegraph publishing (auto-enabled when config exists or Telegram is configured)
+    let publisher: TelegraphService | undefined;
+    const pubConfig = config.publishing;
+    if (pubConfig?.enabled !== false) {
+      publisher = new TelegraphService({
+        stateDir: config.stateDir,
+        shortName: pubConfig?.shortName || config.projectName,
+        authorName: pubConfig?.authorName,
+        authorUrl: pubConfig?.authorUrl,
+      });
+      console.log(pc.green(`  Publishing enabled (Telegraph)`));
+    }
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker, publisher });
     await server.start();
 
     // Graceful shutdown
     const shutdown = async () => {
       console.log('\nShutting down...');
+      stopHeartbeat();
+      unregisterPort(config.projectName);
       scheduler?.stop();
       if (telegram) await telegram.stop();
       sessionManager.stopMonitoring();

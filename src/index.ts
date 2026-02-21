@@ -38,6 +38,10 @@ export { SleepWakeDetector } from './core/SleepWakeDetector.js';
 export { TelegramAdapter } from './messaging/TelegramAdapter.js';
 export type { TelegramConfig } from './messaging/TelegramAdapter.js';
 
+// Publishing
+export { TelegraphService, markdownToNodes, parseInline } from './publishing/TelegraphService.js';
+export type { TelegraphConfig, TelegraphNode, TelegraphElement, TelegraphPage, PublishedPage } from './publishing/TelegraphService.js';
+
 // Types
 export type {
   Session,
@@ -72,5 +76,6 @@ export type {
   UpdateResult,
   DispatchConfig,
   UpdateConfig,
+  PublishingConfig,
 } from './core/types.js';
 export type { Dispatch, DispatchCheckResult, DispatchEvaluation, EvaluationDecision, DispatchFeedback, DispatchStats } from './core/DispatchManager.js';

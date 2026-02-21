@@ -17,6 +17,7 @@ import type { FeedbackManager } from '../core/FeedbackManager.js';
 import type { DispatchManager } from '../core/DispatchManager.js';
 import type { UpdateChecker } from '../core/UpdateChecker.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
+import type { TelegraphService } from '../publishing/TelegraphService.js';
 import { createRoutes } from './routes.js';
 import { corsMiddleware, authMiddleware, requestTimeout, errorHandler } from './middleware.js';
 
@@ -37,6 +38,7 @@ export class AgentServer {
     dispatches?: DispatchManager;
     updateChecker?: UpdateChecker;
     quotaTracker?: QuotaTracker;
+    publisher?: TelegraphService;
   }) {
     this.config = options.config;
     this.startTime = new Date();
@@ -60,6 +62,7 @@ export class AgentServer {
       dispatches: options.dispatches ?? null,
       updateChecker: options.updateChecker ?? null,
       quotaTracker: options.quotaTracker ?? null,
+      publisher: options.publisher ?? null,
       startTime: this.startTime,
     });
     this.app.use(routes);

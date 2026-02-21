@@ -21,6 +21,7 @@ import type { FeedbackManager } from '../core/FeedbackManager.js';
 import type { DispatchManager } from '../core/DispatchManager.js';
 import type { UpdateChecker } from '../core/UpdateChecker.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
+import type { TelegraphService } from '../publishing/TelegraphService.js';
 
 export interface RouteContext {
   config: InstarConfig;
@@ -33,6 +34,7 @@ export interface RouteContext {
   dispatches: DispatchManager | null;
   updateChecker: UpdateChecker | null;
   quotaTracker: QuotaTracker | null;
+  publisher: TelegraphService | null;
   startTime: Date;
 }
 
@@ -189,6 +191,10 @@ export function createRoutes(ctx: RouteContext): Router {
       },
       feedback: {
         enabled: !!ctx.config.feedback?.enabled,
+      },
+      publishing: {
+        enabled: !!ctx.publisher,
+        pageCount: ctx.publisher?.listPages().length ?? 0,
       },
       users: {
         count: userCount,
@@ -926,6 +932,82 @@ export function createRoutes(ctx: RouteContext): Router {
       ...(state ?? {}),
       recommendation: ctx.quotaTracker.getRecommendation(),
     });
+  });
+
+  // ── Publishing (Telegraph) ──────────────────────────────────────
+
+  router.post('/publish', async (req, res) => {
+    if (!ctx.publisher) {
+      res.status(503).json({ error: 'Publishing not configured' });
+      return;
+    }
+
+    const { title, markdown } = req.body;
+    if (!title || typeof title !== 'string' || title.length > 256) {
+      res.status(400).json({ error: '"title" must be a string under 256 characters' });
+      return;
+    }
+    if (!markdown || typeof markdown !== 'string') {
+      res.status(400).json({ error: '"markdown" must be a non-empty string' });
+      return;
+    }
+    if (markdown.length > 100_000) {
+      res.status(400).json({ error: '"markdown" must be under 100KB' });
+      return;
+    }
+
+    try {
+      const page = await ctx.publisher.publishPage(title, markdown);
+      res.status(201).json({
+        ...page,
+        warning: 'This page is PUBLIC. Anyone with the URL can view it.',
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/published', (_req, res) => {
+    if (!ctx.publisher) {
+      res.json({ pages: [] });
+      return;
+    }
+
+    res.json({ pages: ctx.publisher.listPages() });
+  });
+
+  router.put('/publish/:path', async (req, res) => {
+    if (!ctx.publisher) {
+      res.status(503).json({ error: 'Publishing not configured' });
+      return;
+    }
+
+    const pagePath = req.params.path;
+    if (!pagePath || pagePath.length > 256) {
+      res.status(400).json({ error: 'Invalid page path' });
+      return;
+    }
+
+    const { title, markdown } = req.body;
+    if (!title || typeof title !== 'string' || title.length > 256) {
+      res.status(400).json({ error: '"title" must be a string under 256 characters' });
+      return;
+    }
+    if (!markdown || typeof markdown !== 'string') {
+      res.status(400).json({ error: '"markdown" must be a non-empty string' });
+      return;
+    }
+    if (markdown.length > 100_000) {
+      res.status(400).json({ error: '"markdown" must be under 100KB' });
+      return;
+    }
+
+    try {
+      const page = await ctx.publisher.editPage(pagePath, title, markdown);
+      res.json(page);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   // ── Events ──────────────────────────────────────────────────────

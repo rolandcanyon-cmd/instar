@@ -27,6 +27,7 @@ import { addUser, listUsers } from './commands/user.js';
 import { addJob, listJobs } from './commands/job.js';
 import pc from 'picocolors';
 import { getInstarVersion } from './core/Config.js';
+import { listInstances } from './core/PortRegistry.js';
 
 /**
  * Add or update Telegram configuration in the project config.
@@ -380,6 +381,7 @@ serverCmd
   .command('start')
   .description('Start the agent server')
   .option('--foreground', 'Run in foreground (default: background via tmux)')
+  .option('--no-telegram', 'Skip Telegram polling (use when lifeline manages Telegram)')
   .option('-d, --dir <path>', 'Project directory')
   .action(startServer);
 
@@ -444,5 +446,108 @@ jobCmd
   .description('List all jobs')
   .option('-d, --dir <path>', 'Project directory')
   .action(listJobs);
+
+// ── Lifeline ──────────────────────────────────────────────────────
+
+const lifelineCmd = program
+  .command('lifeline')
+  .description('Manage the Telegram lifeline (persistent Telegram connection)');
+
+lifelineCmd
+  .command('start')
+  .description('Start the Telegram lifeline (owns Telegram polling, supervises server)')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { TelegramLifeline } = await import('./lifeline/TelegramLifeline.js');
+    try {
+      const lifeline = new TelegramLifeline(opts.dir);
+      await lifeline.start();
+    } catch (err) {
+      console.error(pc.red(`Failed to start lifeline: ${err instanceof Error ? err.message : err}`));
+      process.exit(1);
+    }
+  });
+
+lifelineCmd
+  .command('stop')
+  .description('Stop the Telegram lifeline')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    // The lifeline runs in a tmux session — kill it
+    const { loadConfig, detectTmuxPath } = await import('./core/Config.js');
+    const config = loadConfig(opts.dir);
+    const tmuxPath = detectTmuxPath();
+    const sessionName = `${config.projectName}-lifeline`;
+
+    if (!tmuxPath) {
+      console.log(pc.red('tmux not found'));
+      process.exit(1);
+    }
+
+    try {
+      const { execFileSync } = await import('node:child_process');
+      execFileSync(tmuxPath, ['has-session', '-t', `=${sessionName}`], { stdio: 'ignore' });
+      execFileSync(tmuxPath, ['send-keys', '-t', `=${sessionName}:`, 'C-c'], { stdio: 'ignore' });
+      // Wait briefly for graceful shutdown
+      await new Promise(r => setTimeout(r, 3000));
+      try {
+        execFileSync(tmuxPath, ['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' });
+      } catch { /* already dead */ }
+      console.log(pc.green(`Lifeline stopped (session: ${sessionName})`));
+    } catch {
+      console.log(pc.yellow(`No lifeline running (no tmux session: ${sessionName})`));
+    }
+  });
+
+lifelineCmd
+  .command('status')
+  .description('Check lifeline status')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { loadConfig, detectTmuxPath } = await import('./core/Config.js');
+    const config = loadConfig(opts.dir);
+    const tmuxPath = detectTmuxPath();
+    const sessionName = `${config.projectName}-lifeline`;
+
+    if (!tmuxPath) {
+      console.log(pc.red('tmux not found'));
+      process.exit(1);
+    }
+
+    try {
+      const { execFileSync } = await import('node:child_process');
+      execFileSync(tmuxPath, ['has-session', '-t', `=${sessionName}`], { stdio: 'ignore' });
+      console.log(pc.green(`Lifeline is running (tmux session: ${sessionName})`));
+      console.log(`  Attach: tmux attach -t '=${sessionName}'`);
+    } catch {
+      console.log(pc.yellow('Lifeline is not running'));
+      console.log(`  Start: instar lifeline start`);
+    }
+  });
+
+// ── Instances ─────────────────────────────────────────────────────
+
+program
+  .command('instances')
+  .description('List all Instar instances running on this machine')
+  .action(async () => {
+    const instances = listInstances();
+    if (instances.length === 0) {
+      console.log(pc.dim('No Instar instances registered.'));
+      console.log(pc.dim('Start a server with: instar server start'));
+      return;
+    }
+
+    console.log(pc.bold(`\n  Instar Instances (${instances.length})\n`));
+    for (const entry of instances) {
+      const age = Math.round((Date.now() - new Date(entry.registeredAt).getTime()) / 60000);
+      const heartbeatAge = Math.round((Date.now() - new Date(entry.lastHeartbeat).getTime()) / 60000);
+      const alive = heartbeatAge < 3 ? pc.green('●') : pc.yellow('○');
+      console.log(`  ${alive} ${pc.bold(entry.projectName)}`);
+      console.log(`    Port: ${pc.cyan(String(entry.port))}  PID: ${entry.pid}  Up: ${age}m  Heartbeat: ${heartbeatAge}m ago`);
+      console.log(`    Dir:  ${pc.dim(entry.projectDir)}`);
+      console.log();
+    }
+  });
 
 program.parse();
