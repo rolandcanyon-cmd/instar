@@ -7,8 +7,9 @@
  * Ported from Dawn's dawn-server equivalent for general Instar use.
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
@@ -59,11 +60,7 @@ export class AccountSwitcher {
       '.dawn-server/account-registry.json'
     );
     // Get the macOS username for Keychain access
-    try {
-      this.keychainAccount = execSync('whoami', { encoding: 'utf-8' }).trim();
-    } catch {
-      this.keychainAccount = 'justin';
-    }
+    this.keychainAccount = os.userInfo().username;
   }
 
   /**
@@ -224,9 +221,10 @@ export class AccountSwitcher {
   }
 
   private readFromKeychain(): any {
-    const result = execSync(
-      `security find-generic-password -s "${KEYCHAIN_SERVICE}" -w 2>/dev/null`,
-      { encoding: 'utf-8', timeout: 10000 }
+    const result = execFileSync(
+      'security',
+      ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
+      { encoding: 'utf-8', timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] }
     );
     return JSON.parse(result.trim());
   }
@@ -234,10 +232,13 @@ export class AccountSwitcher {
   private writeToKeychain(data: any): void {
     const jsonStr = JSON.stringify(data);
     const hexStr = Buffer.from(jsonStr).toString('hex');
-    execSync(
-      `security -i <<< 'add-generic-password -U -a "${this.keychainAccount}" -s "${KEYCHAIN_SERVICE}" -X "${hexStr}"'`,
-      { timeout: 10000, shell: '/bin/bash' }
-    );
+    // Use execFileSync with stdin input instead of shell heredoc
+    execFileSync('security', ['-i'], {
+      input: `add-generic-password -U -a "${this.keychainAccount}" -s "${KEYCHAIN_SERVICE}" -X "${hexStr}"\n`,
+      encoding: 'utf-8',
+      timeout: 10000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
   }
 
   private loadRegistry(): AccountRegistry | null {
