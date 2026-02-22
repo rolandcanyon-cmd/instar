@@ -268,123 +268,181 @@ For **Project Agents**: Telegram is strongly recommended. Frame it as: "Your age
 
 If the user declines, accept it in one sentence and move on — but they should understand they're choosing the terminal-only experience.
 
-#### Browser-Automated Setup (Default)
+### Browser Automation Strategy
 
-**You have Playwright browser automation available.** Use it to do ALL of this for the user. They just need to be logged into Telegram Web.
+**Use Playwright (mcp__playwright__*) as the primary browser automation tool.** It is more reliable than the Chrome extension. The Chrome extension (mcp__claude-in-chrome__*) is a fallback only.
+
+**CRITICAL UX RULE: Never silently attempt browser automation.** The user must know what's happening at every step. If something fails, explain what happened — don't just report "it didn't work."
+
+#### Step 3a: Detect Available Browser Tools
+
+Before telling the user anything about browser automation, silently check what tools you have:
+
+1. Try calling `mcp__playwright__browser_snapshot` — if it succeeds or returns a meaningful error (like "no page open"), Playwright is available.
+2. If Playwright is NOT available, check for `mcp__claude-in-chrome__tabs_context_mcp`.
+3. If NEITHER is available, go directly to **Manual Fallback** (Step 3g below).
+
+Do NOT tell the user about tools that don't work. Only present the path you can actually execute.
+
+#### Step 3b: Announce What's About to Happen
+
+**Always warn the user before opening a browser.** Say exactly this:
+
+> "I'm going to open a browser window to set up Telegram automatically. I'll create a bot, set up a group, and configure everything."
+>
+> "A browser window will appear — you'll need to log into Telegram there if you're not already logged in."
+>
+> "Ready? Say OK and I'll open it."
+
+**Wait for the user to confirm before proceeding.** Do NOT open the browser until they say OK/yes/go/ready.
+
+#### Step 3c: Open Browser and Navigate
+
+**Using Playwright (preferred):**
+```
+mcp__playwright__browser_navigate({ url: "https://web.telegram.org/a/" })
+```
+
+**Using Chrome extension (fallback):**
+```
+mcp__claude-in-chrome__tabs_context_mcp({ createIfEmpty: true })
+# Then create a new tab and navigate
+mcp__claude-in-chrome__tabs_create_mcp()
+mcp__claude-in-chrome__navigate({ url: "https://web.telegram.org/a/", tabId: TAB_ID })
+```
+
+After navigating, take a snapshot to check the page state:
+```
+mcp__playwright__browser_snapshot()
+```
+
+#### Step 3d: Handle Login
+
+Check the snapshot for login indicators (QR code screen, "Log in" text, phone number input). Two possible states:
+
+**If already logged in** (you see a chat list, search bar, contacts):
+> "You're logged in. Starting the setup now."
+
+Proceed to Step 3e.
+
+**If NOT logged in** (you see QR code or login screen):
 
 Tell the user:
-> "I'll set up Telegram for you automatically using the browser. Just make sure you're logged into web.telegram.org. I'll handle the bot creation, group setup, and everything else."
+> "I see the Telegram login screen in the browser window I just opened."
+>
+> "Please log in now — you can scan the QR code with your phone's Telegram app (Settings > Devices > Link Desktop Device)."
+>
+> "Let me know when you're logged in and I'll continue."
 
-Then ask:
-> "Are you logged into web.telegram.org?"
+**Wait for the user to confirm they've logged in.** Then take another snapshot to verify. If still not logged in, tell them what you see and ask again. Do NOT proceed until login is confirmed by snapshot.
 
-If yes, proceed with full browser automation. If no, tell them to log in first and wait.
+#### Step 3e: Automated Telegram Setup
 
-**The automated flow:**
+Once the user is logged in, automate the entire setup. **Take a snapshot before EVERY interaction** — Telegram Web's UI changes frequently and elements shift.
 
-1. **Navigate to web.telegram.org** using Playwright:
-   ```
-   mcp__playwright__browser_navigate({ url: "https://web.telegram.org/a/" })
-   ```
-   Take a snapshot to verify the user is logged in (look for the chat list, search bar, etc.). If you see a login/QR code screen, tell the user they need to log in first and wait.
+**Step 3e-i: Create a bot via @BotFather**
 
-2. **Create a bot via @BotFather**:
-   - Take a snapshot, find the search input, click it
-   - Type "BotFather" in the search bar
-   - Take a snapshot, find @BotFather in the results, click it
-   - Take a snapshot, find the message input area
-   - If you see a "Start" button, click it. Otherwise type `/start` and press Enter
-   - Wait 2 seconds for BotFather to respond
-   - Type `/newbot` and press Enter
-   - Wait 2 seconds for BotFather to ask for a name
-   - Type the bot display name (use the project name, e.g., "My Project Agent") and press Enter
-   - Wait 2 seconds for BotFather to ask for a username
-   - Type the bot username (e.g., `myproject_agent_bot` — must end in "bot", use lowercase + underscores) and press Enter
-   - Wait 3 seconds for BotFather to respond with the token
-   - Take a snapshot and extract the bot token from BotFather's response. The token looks like `7123456789:AAHn3-xYz_example`. Look for text containing a colon between a number and alphanumeric characters.
-   - **CRITICAL: Store the token** — you'll need it for config.json
+1. Take a snapshot, find the search input, click it
+2. Type "BotFather" in the search bar
+3. Take a snapshot, find @BotFather in the results (has blue checkmark), click it
+4. Take a snapshot, find the message input area
+5. If you see a "Start" button, click it. Otherwise type `/start` and submit
+6. Wait 2-3 seconds, take a snapshot to see BotFather's response
+7. Type `/newbot` and submit
+8. Wait 2-3 seconds, take a snapshot — BotFather asks for a display name
+9. Type the bot display name (e.g., "My Project Agent") and submit
+10. Wait 2-3 seconds, take a snapshot — BotFather asks for a username
+11. Type the bot username (e.g., `myproject_agent_bot` — must end in "bot", lowercase + underscores) and submit
+12. Wait 3-4 seconds, take a snapshot — BotFather responds with the token
+13. **Extract the bot token** from the response. It looks like `7123456789:AAHn3-xYz_example` — a number, colon, then alphanumeric string. Read the page text if needed.
+14. **CRITICAL: Store the token** — you'll need it for config.json
 
-3. **Create a group**:
-   - Take a snapshot of the main Telegram screen
-   - Find and click the "New Message" / compose / pencil button (usually bottom-left area of chat list)
-   - Take a snapshot, find "New Group" option, click it
-   - In the "Add Members" search, type the bot username you just created
-   - Take a snapshot, find the bot in results, click to select it
-   - Find and click the "Next" / arrow button to proceed
-   - Type the group name (use the project name, e.g., "My Project")
-   - Find and click "Create" / checkmark button
-   - Wait 2 seconds for the group to be created
+If the username is taken, BotFather will say so. Try a variation (add random digits) and retry.
 
-4. **Enable Topics**:
-   - Take a snapshot of the new group chat
-   - Click on the group name/header at the top to open group info
-   - Take a snapshot, find the Edit / pencil button, click it
-   - Take a snapshot, look for "Topics" toggle and enable it
-   - If you don't see Topics directly, look for "Group Type" or "Chat Type" first — changing this may reveal the Topics toggle
-   - Find and click Save / checkmark
-   - Wait 2 seconds
+Tell the user: "Bot created! Moving on to the group setup."
 
-5. **Make bot admin**:
-   - Take a snapshot of the group info or edit screen
-   - Navigate to Administrators section (may need to click group name first, then Edit)
-   - Click "Add Admin" or "Add Administrator"
-   - Search for your bot username
-   - Take a snapshot, find the bot, click to select
-   - Click Save / Done to confirm admin rights
-   - Wait 2 seconds
+**Step 3e-ii: Create a group**
 
-6. **Detect chat ID**:
-   - Type "hello" in the group chat and send it (this triggers the bot to see the group)
-   - Wait 3 seconds for the message to propagate to the bot
-   - Use Bash to call the Telegram Bot API:
-   ```bash
-   curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?offset=-1" > /dev/null
-   curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?timeout=5"
-   ```
-   - Parse the response to find `chat.id` where `chat.type` is "supergroup" or "group"
-   - If auto-detection fails, try once more (send another message, wait, call API again)
+1. Navigate back to the main chat list (click the back arrow or Telegram logo)
+2. Take a snapshot, find the "New Message" / compose / pencil button (usually bottom-left of chat list)
+3. Click it, take a snapshot, find "New Group" option, click it
+4. In "Add Members" search, type the bot username you just created
+5. Take a snapshot, find the bot in results, click to select it
+6. Find and click the "Next" / arrow button to proceed
+7. Type the group name (e.g., "My Project")
+8. Find and click "Create" / checkmark button
+9. Wait 2-3 seconds for the group to be created
 
-**Browser automation tips:**
-- **Always take a snapshot** before interacting. Telegram Web's UI changes frequently.
-- **Use `mcp__playwright__browser_snapshot`** to see the accessibility tree (more reliable than screenshots for finding elements).
-- **Use `mcp__playwright__browser_click`** with element refs from the snapshot.
-- **Use `mcp__playwright__browser_type`** to type text into inputs. For the Telegram message input, you may need to find the message input ref and use `submit: true` to send.
-- **Wait 2-3 seconds** after each action for Telegram to process. Use `mcp__playwright__browser_wait_for({ time: 2 })`.
-- **If an element isn't found**, take a fresh snapshot — Telegram may have changed the view.
-- **Telegram Web uses version "a"** (web.telegram.org/a/) — this is the React-based client.
-- **If something goes wrong**, tell the user what happened and offer to retry that step or fall back to manual instructions.
+**Step 3e-iii: Enable Topics**
 
-#### Manual Fallback
+1. Take a snapshot of the new group chat
+2. Click on the group name/header at the top to open group info
+3. Take a snapshot, find the Edit / pencil button, click it
+4. Take a snapshot, look for "Topics" toggle and enable it
+5. If you don't see Topics directly, look for "Group Type" or "Chat Type" first — changing this may reveal the Topics toggle
+6. Find and click Save / checkmark
+7. Wait 2 seconds
 
-If Playwright tools are not available, or if browser automation fails, fall back to the manual walkthrough:
+**Step 3e-iv: Make bot admin**
 
-1. **Create a bot** via @BotFather on Telegram:
-   - Open https://web.telegram.org
-   - Search for @BotFather, send `/newbot`
-   - Choose a name and username (must end in "bot")
-   - Copy the bot token (looks like `7123456789:AAHn3-xYz...`)
+1. Take a snapshot of the group info/edit screen
+2. Navigate to Administrators section (may need to click group name first, then Edit)
+3. Click "Add Admin" or "Add Administrator"
+4. Search for your bot username
+5. Take a snapshot, find the bot, click to select
+6. Click Save / Done to confirm admin rights
+7. Wait 2 seconds
 
-2. **Create a group**:
-   - Create a new group in Telegram, add the bot as a member
-   - Give the group a name
+**Step 3e-v: Detect chat ID**
 
-3. **Enable Topics**:
-   - Open group info, Edit, turn on Topics
+1. Navigate back to the group chat
+2. Type "hello" in the message input and send it
+3. Wait 3 seconds for the message to reach the bot
+4. Use Bash to call the Telegram Bot API:
+```bash
+curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?offset=-1" > /dev/null
+sleep 1
+curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?timeout=5"
+```
+5. Parse the response to find `chat.id` where `chat.type` is "supergroup" or "group"
+6. If auto-detection fails, send another message, wait, and retry once
+7. If still failing, ask the user for the chat ID manually (look at the URL in Telegram Web — prepend `-100` to the number)
 
-4. **Make bot admin**:
-   - Group info, Edit, Administrators, Add your bot
+#### Step 3f: Confirm Success
 
-5. **Detect chat ID**:
-   - Ask the user to send any message in the group
-   - Call the Telegram Bot API to detect:
+After all steps succeed, tell the user:
+> "Telegram is set up! Bot token and chat ID saved."
 
+Close the browser if using Playwright:
+```
+mcp__playwright__browser_close()
+```
+
+#### Step 3g: Manual Fallback
+
+**Only use this if NO browser automation tools are available.** If you tried browser automation and it failed partway, tell the user exactly what succeeded and what still needs doing — don't restart from scratch.
+
+Walk the user through each step with clear instructions:
+
+1. **Create a bot** — Open https://web.telegram.org, search for @BotFather, send `/newbot`, follow prompts, copy the token
+2. **Create a group** — New Group, add the bot, give it a name
+3. **Enable Topics** — Group info > Edit > turn on Topics
+4. **Make bot admin** — Group info > Edit > Administrators > Add bot
+5. **Detect chat ID** — Ask user to send a message in the group, then call Bot API:
 ```bash
 curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?offset=-1" > /dev/null
 curl -s "https://api.telegram.org/bot${TOKEN}/getUpdates?timeout=5"
 ```
 
-   - Look for `chat.id` where `chat.type` is "supergroup" or "group"
-   - If auto-detection fails, guide manual entry
+### Browser Automation Tips
+
+- **Always take a snapshot before interacting.** Telegram Web's UI changes frequently.
+- **Use `browser_snapshot`** (accessibility tree) over screenshots for finding elements — more reliable.
+- **Wait 2-3 seconds** after each action for Telegram to process.
+- **If an element isn't found**, take a fresh snapshot — the view may have changed.
+- **Telegram Web uses version "a"** (web.telegram.org/a/) — this is the React-based client.
+- **If something goes wrong**, tell the user exactly what happened and what you see. Offer to retry that specific step or fall back to manual for just the remaining steps.
+- **NEVER silently fail.** If a browser action doesn't work, say "I tried to click X but it didn't respond. Here's what I see on screen: [describe]. Let me try another approach."
 
 ## Phase 4: Technical Configuration
 
