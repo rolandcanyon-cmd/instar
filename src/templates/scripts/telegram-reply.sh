@@ -32,6 +32,12 @@ fi
 
 PORT="${INSTAR_PORT:-4040}"
 
+# Read auth token from config (if present)
+AUTH_TOKEN=""
+if [ -f ".instar/config.json" ]; then
+  AUTH_TOKEN=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+fi
+
 # Escape for JSON
 JSON_MSG=$(printf '%s' "$MSG" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null)
 if [ -z "$JSON_MSG" ]; then
@@ -39,9 +45,16 @@ if [ -z "$JSON_MSG" ]; then
   JSON_MSG="\"$(printf '%s' "$MSG" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\n/\\n/g')\""
 fi
 
-RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:${PORT}/telegram/reply/${TOPIC_ID}" \
-  -H 'Content-Type: application/json' \
-  -d "{\"text\":${JSON_MSG}}")
+if [ -n "$AUTH_TOKEN" ]; then
+  RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:${PORT}/telegram/reply/${TOPIC_ID}" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${AUTH_TOKEN}" \
+    -d "{\"text\":${JSON_MSG}}")
+else
+  RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:${PORT}/telegram/reply/${TOPIC_ID}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"text\":${JSON_MSG}}")
+fi
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')

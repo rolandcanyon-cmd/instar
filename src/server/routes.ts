@@ -61,8 +61,24 @@ export function createRoutes(ctx: RouteContext): Router {
 
   router.get('/health', (req, res) => {
     const uptimeMs = Date.now() - ctx.startTime.getTime();
+    // Determine if anything is degraded
+    const sessions = ctx.sessionManager.listRunningSessions();
+    const maxSessions = ctx.config.maxSessions ?? 3;
+    const sessionExhausted = sessions.length >= maxSessions;
+
+    let totalFailures = 0;
+    if (ctx.scheduler) {
+      const jobs = ctx.scheduler.getJobs();
+      for (const j of jobs) {
+        const st = ctx.state.getJobState(j.slug);
+        if (st) totalFailures += st.consecutiveFailures;
+      }
+    }
+
+    const isDegraded = sessionExhausted || totalFailures >= 5;
+
     const base: Record<string, unknown> = {
-      status: 'ok',
+      status: isDegraded ? 'degraded' : 'ok',
       uptime: uptimeMs,
       uptimeHuman: formatUptime(uptimeMs),
     };
@@ -82,6 +98,9 @@ export function createRoutes(ctx: RouteContext): Router {
     if (isAuthed) {
       const mem = process.memoryUsage();
       base.version = ctx.config.version || '0.0.0';
+      base.sessions = { current: sessions.length, max: maxSessions };
+      base.schedulerRunning = ctx.scheduler !== null;
+      base.consecutiveJobFailures = totalFailures;
       base.project = ctx.config.projectName;
       base.node = process.version;
       base.memory = {

@@ -90,6 +90,15 @@ export class JobScheduler {
    */
   setTelegram(adapter: TelegramAdapter): void {
     this.telegram = adapter;
+
+    // If scheduler already started, ensure job topics now that Telegram is available.
+    // This fixes the startup race condition where start() runs before Telegram connects.
+    if (this.running && this.jobs.length > 0) {
+      const enabledJobs = this.jobs.filter(j => j.enabled);
+      this.ensureJobTopics(enabledJobs).catch(err => {
+        console.error(`[scheduler] Failed to ensure job topics (post-Telegram init): ${err}`);
+      });
+    }
   }
 
   /**
@@ -324,10 +333,11 @@ export class JobScheduler {
       triggeredBy: `scheduler:${reason}`,
       maxDurationMinutes: job.expectedDurationMinutes,
     }).then(() => {
-      // Update job state on successful spawn (clear error)
+      // Update job state on successful spawn (clear error, set pending result)
       const jobState: JobState = {
         slug: job.slug,
         lastRun: new Date().toISOString(),
+        lastResult: 'pending',
         lastError: undefined,
         consecutiveFailures: 0,
         nextScheduled: this.getNextRun(job.slug),

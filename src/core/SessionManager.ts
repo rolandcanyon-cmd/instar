@@ -416,14 +416,16 @@ export class SessionManager extends EventEmitter {
       return tmuxSession;
     }
 
-    // Interactive sessions get a reserved slot beyond maxSessions.
-    // Users should never be blocked from interacting with their agent because
-    // scheduled jobs filled all slots. Interactive gets maxSessions + 1.
+    // User-initiated sessions bypass the maxSessions limit entirely.
+    // The user should NEVER be blocked from interacting with their agent
+    // because scheduled jobs filled all slots. maxSessions only constrains
+    // autonomous/scheduled sessions, not human-initiated ones.
+    // Safety valve: still cap at maxSessions * 3 to prevent runaway sessions.
     const runningSessions = this.listRunningSessions();
-    const interactiveLimit = this.config.maxSessions + 1;
-    if (runningSessions.length >= interactiveLimit) {
+    const absoluteLimit = this.config.maxSessions * 3;
+    if (runningSessions.length >= absoluteLimit) {
       throw new Error(
-        `Max sessions (${interactiveLimit}, including interactive reserve) reached. ` +
+        `Absolute session limit (${absoluteLimit}) reached. ` +
         `Running: ${runningSessions.map(s => s.name).join(', ')}`
       );
     }

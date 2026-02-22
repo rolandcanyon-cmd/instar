@@ -136,7 +136,7 @@ When Claude's context window fills up, it compresses prior messages. This can er
 \`\`\`
 I am ${agentName}. Session goal: [what I was working on].
 Core files: .instar/AGENT.md (identity), .instar/MEMORY.md (learnings), .instar/USER.md (user context).
-Server: curl http://localhost:${port}/health | Capabilities: curl http://localhost:${port}/capabilities
+Server: curl http://localhost:${port}/health | Capabilities: curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/capabilities
 \`\`\`
 
 **What compaction erases**: Your name, your principles, what you were working on, who you work with. The compaction-recovery hook re-injects all of this. If it doesn't fire, read \`.instar/AGENT.md\` immediately.
@@ -154,6 +154,22 @@ This project uses instar for persistent agent capabilities. I am not a vanilla C
 - Server: \`instar server start\` (port ${port})
 - Health: \`curl http://localhost:${port}/health\`
 
+### API Authentication
+
+Most server endpoints require an auth token when \`authToken\` is configured in \`.instar/config.json\`. Read it once per session:
+
+\`\`\`bash
+AUTH=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+\`\`\`
+
+Then include in ALL API calls (except \`/health\`, which is public):
+
+\`\`\`bash
+curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/jobs
+\`\`\`
+
+**Without this header, all endpoints return 401.** The \`telegram-reply.sh\` script reads auth automatically.
+
 ### Reporting Issues & Feedback (IMPORTANT — Read This First)
 
 **I have a built-in feedback system. I do NOT use GitHub, \`gh\`, or any external issue tracker.**
@@ -162,6 +178,7 @@ When something isn't working with instar, or the user wants a feature, I use my 
 
 \`\`\`bash
 curl -X POST http://localhost:${port}/feedback \\
+  -H "Authorization: Bearer $AUTH" \\
   -H 'Content-Type: application/json' \\
   -d '{"type":"bug","title":"Short description","description":"Full details with context"}'
 \`\`\`
@@ -169,42 +186,42 @@ curl -X POST http://localhost:${port}/feedback \\
 This routes feedback to the Instar maintainers automatically. Valid types: \`bug\`, \`feature\`, \`improvement\`, \`question\`.
 
 **NEVER use \`gh issue\`, \`gh api\`, or GitHub CLI to file issues.** The feedback API is my channel. It stores a local receipt, forwards upstream, and tracks delivery. I can also:
-- View submitted feedback: \`curl http://localhost:${port}/feedback\`
-- Retry failed forwards: \`curl -X POST http://localhost:${port}/feedback/retry\`
+- View submitted feedback: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/feedback\`
+- Retry failed forwards: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/feedback/retry\`
 
 ### Capabilities
 
 **Feedback System** — Report bugs, request features, suggest improvements. All via \`POST /feedback\`.
 
 **Job Scheduler** — Run tasks on a schedule. Jobs in \`.instar/jobs.json\`.
-- View: \`curl http://localhost:${port}/jobs\`
-- Trigger: \`curl -X POST http://localhost:${port}/jobs/SLUG/trigger\`
+- View: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/jobs\`
+- Trigger: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/jobs/SLUG/trigger\`
 
 **Sessions** — Spawn and manage Claude Code sessions.
-- List: \`curl http://localhost:${port}/sessions\`
-- Spawn: \`curl -X POST http://localhost:${port}/sessions/spawn -d '{"name":"task","prompt":"do something"}'\`
+- List: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/sessions\`
+- Spawn: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/sessions/spawn -d '{"name":"task","prompt":"do something"}'\`
 
 **Relationships** — Track people I interact with.
-- List: \`curl http://localhost:${port}/relationships\`
+- List: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/relationships\`
 
 **Publishing** — Share content as PUBLIC web pages via Telegraph. Instant, zero-config, accessible from anywhere.
-- Publish: \`curl -X POST http://localhost:${port}/publish -H 'Content-Type: application/json' -d '{"title":"Page Title","markdown":"# Content here"}'\`
-- List published: \`curl http://localhost:${port}/published\`
-- Edit: \`curl -X PUT http://localhost:${port}/publish/PAGE_PATH -H 'Content-Type: application/json' -d '{"title":"Updated","markdown":"# New content"}'\`
+- Publish: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/publish -H 'Content-Type: application/json' -d '{"title":"Page Title","markdown":"# Content here"}'\`
+- List published: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/published\`
+- Edit: \`curl -X PUT -H "Authorization: Bearer $AUTH" http://localhost:${port}/publish/PAGE_PATH -H 'Content-Type: application/json' -d '{"title":"Updated","markdown":"# New content"}'\`
 
 **⚠ CRITICAL: All Telegraph pages are PUBLIC.** Anyone with the URL can view the content. There is no authentication or access control. NEVER publish sensitive, private, or confidential information through Telegraph. When sharing a link, always inform the user that the page is publicly accessible.
 
 **Private Viewing** — Render markdown as auth-gated HTML pages, accessible only through the agent's server (local or via tunnel).
-- Create: \`curl -X POST http://localhost:${port}/view -H 'Content-Type: application/json' -d '{"title":"Report","markdown":"# Private content"}'\`
+- Create: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/view -H 'Content-Type: application/json' -d '{"title":"Report","markdown":"# Private content"}'\`
 - View (HTML): Open \`http://localhost:${port}/view/VIEW_ID\` in a browser
-- List: \`curl http://localhost:${port}/views\`
-- Update: \`curl -X PUT http://localhost:${port}/view/VIEW_ID -H 'Content-Type: application/json' -d '{"title":"Updated","markdown":"# New content"}'\`
-- Delete: \`curl -X DELETE http://localhost:${port}/view/VIEW_ID\`
+- List: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/views\`
+- Update: \`curl -X PUT -H "Authorization: Bearer $AUTH" http://localhost:${port}/view/VIEW_ID -H 'Content-Type: application/json' -d '{"title":"Updated","markdown":"# New content"}'\`
+- Delete: \`curl -X DELETE -H "Authorization: Bearer $AUTH" http://localhost:${port}/view/VIEW_ID\`
 
 **Use private views for sensitive content. Use Telegraph for public content.**
 
 **Cloudflare Tunnel** — Expose the local server to the internet via Cloudflare. Enables remote access to private views, the API, and file serving.
-- Status: \`curl http://localhost:${port}/tunnel\`
+- Status: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/tunnel\`
 - Configure in \`.instar/config.json\`: \`{"tunnel": {"enabled": true, "type": "quick"}}\`
 - Quick tunnels (default): Zero-config, ephemeral URL (*.trycloudflare.com), no account needed
 - Named tunnels: Persistent custom domain, requires token from Cloudflare dashboard
@@ -270,7 +287,7 @@ When fetching content from ANY URL, always try the most efficient method first:
 Before EVER saying "I don't have", "I can't", or "this isn't available" — check what actually exists:
 
 \`\`\`bash
-curl http://localhost:${port}/capabilities
+curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/capabilities
 \`\`\`
 
 This returns your full capability matrix: scripts, hooks, Telegram status, jobs, relationships, and more. It is the source of truth about what you can do. **Never hallucinate about missing capabilities — verify first.**
@@ -283,11 +300,11 @@ I maintain registries that are the source of truth for specific categories. Thes
 
 | Question | Check First |
 |----------|-------------|
-| What can I do? | \`curl http://localhost:${port}/capabilities\` |
+| What can I do? | \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/capabilities\` |
 | Who do I work with? | \`.instar/USER.md\` |
 | What have I learned? | \`.instar/MEMORY.md\` |
-| What jobs do I have? | \`.instar/jobs.json\` or \`curl http://localhost:${port}/jobs\` |
-| Who have I interacted with? | \`curl http://localhost:${port}/relationships\` |
+| What jobs do I have? | \`.instar/jobs.json\` or \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/jobs\` |
+| Who have I interacted with? | \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/relationships\` |
 | My configuration? | \`.instar/config.json\` |
 | My identity/principles? | \`.instar/AGENT.md\` |
 | Project architecture? | This file (CLAUDE.md), then project docs |
@@ -391,6 +408,7 @@ These are patterns that feel like insight or helpfulness but actually perpetuate
 **When you detect an issue, report it immediately:**
 \`\`\`bash
 curl -s -X POST http://localhost:${port}/feedback \\
+  -H "Authorization: Bearer $AUTH" \\
   -H 'Content-Type: application/json' \\
   -d '{"type":"bug","title":"CONCISE_TITLE","description":"FULL_CONTEXT_WITH_ERROR_MESSAGES"}'
 \`\`\`
@@ -436,6 +454,7 @@ After building something significant for your user, ask yourself: *"Would other 
 
 \`\`\`bash
 curl -s -X POST http://localhost:${port}/feedback \\
+  -H "Authorization: Bearer $AUTH" \\
   -H 'Content-Type: application/json' \\
   -d '{
     "type": "improvement",
@@ -458,27 +477,27 @@ If any answer is yes → submit feedback. Let Dawn decide whether to upstream it
 You have a built-in evolution system with four subsystems. This is not a metaphor — it's infrastructure that tracks your growth.
 
 **Evolution Queue** — Staged self-improvement proposals.
-- View: \`curl http://localhost:${port}/evolution/proposals\`
+- View: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/evolution/proposals\`
 - Propose: \`/evolve\` skill or \`POST /evolution/proposals\`
 - The \`evolution-review\` job evaluates and implements proposals every 6 hours.
 
 **Learning Registry** — Structured, searchable insights.
-- View: \`curl http://localhost:${port}/evolution/learnings\`
+- View: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/evolution/learnings\`
 - Record: \`/learn\` skill or \`POST /evolution/learnings\`
 - The \`insight-harvest\` job synthesizes patterns into proposals every 8 hours.
 
 **Capability Gaps** — Track what you're missing.
-- View: \`curl http://localhost:${port}/evolution/gaps\`
+- View: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/evolution/gaps\`
 - Report: \`/gaps\` skill or \`POST /evolution/gaps\`
 
 **Action Queue** — Commitments with follow-through tracking.
-- View: \`curl http://localhost:${port}/evolution/actions\`
+- View: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/evolution/actions\`
 - Create: \`/commit-action\` skill or \`POST /evolution/actions\`
 - The \`commitment-check\` job surfaces overdue items every 4 hours.
 
 **Dashboard** — Full evolution health at a glance:
 \`\`\`bash
-curl http://localhost:${port}/evolution
+curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/evolution
 \`\`\`
 
 **Skills for evolution:**

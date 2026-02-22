@@ -1117,20 +1117,25 @@ function getDefaultJobs(port: number): object[] {
       gate: `curl -sf http://localhost:${port}/health >/dev/null 2>&1`,
       execute: {
         type: 'prompt',
-        value: `You are your own QA team. Scan for issues with your instar infrastructure and submit feedback for anything wrong. Check each area:
+        value: `You are your own QA team. Scan for issues with your instar infrastructure and submit feedback for anything wrong.
 
-1. **Server health**: curl -s http://localhost:${port}/health — is it responding? Are all fields present?
+FIRST: Read your auth token for API calls:
+AUTH=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+
+Then check each area:
+
+1. **Server health**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/health — is it responding? Are all fields present? Is status "ok" or "degraded"?
 2. **State files**: Check .instar/state/ — are JSON files parseable? Any empty or corrupted? Try: for f in .instar/state/*.json; do python3 -c "import json; json.load(open('$f'))" 2>&1 || echo "CORRUPT: $f"; done
 3. **Hook files**: Do all hooks in .instar/hooks/ exist and have execute permissions? ls -la .instar/hooks/
-4. **Job execution**: curl -s http://localhost:${port}/jobs — are any jobs failing repeatedly? Check lastRun and lastError fields.
-5. **Quota**: curl -s http://localhost:${port}/quota — is usage approaching limits?
+4. **Job execution**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/jobs — are any jobs failing repeatedly? Check lastRun and lastError fields.
+5. **Quota**: curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/quota — is usage approaching limits?
 6. **Logs**: Check .instar/logs/server.log for recent errors: tail -50 .instar/logs/server.log | grep -i error
 7. **Settings coherence**: Are hooks in .claude/settings.json pointing to files that exist?
 8. **Design friction**: During your recent work, did anything feel unnecessarily difficult, confusing, or broken? Did you work around any issues?
 9. **CI health**: Check if the project has a GitHub repo and if CI is passing. Run: REPO=$(git remote get-url origin 2>/dev/null | sed 's/.*github.com[:/]//;s/.git$//'); if [ -n "$REPO" ]; then FAILURES=$(gh run list --repo "$REPO" --status failure --limit 3 --json databaseId,conclusion,headBranch,name,createdAt 2>/dev/null); if echo "$FAILURES" | python3 -c "import sys,json; runs=json.load(sys.stdin); exit(0 if runs else 1)" 2>/dev/null; then echo "CI FAILURES DETECTED in $REPO"; echo "$FAILURES"; echo ""; echo "FIX THESE NOW: Read the failure logs with 'gh run view RUN_ID --repo $REPO --log-failed', diagnose the issue, fix it, run tests locally, commit and push."; fi; fi
 
 For EACH issue found, submit feedback immediately:
-curl -s -X POST http://localhost:${port}/feedback -H 'Content-Type: application/json' -d '{"type":"bug","title":"TITLE","description":"FULL_CONTEXT"}'
+curl -s -X POST http://localhost:${port}/feedback -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' -d '{"type":"bug","title":"TITLE","description":"FULL_CONTEXT"}'
 
 For improvements (not bugs), use type "improvement" instead.
 

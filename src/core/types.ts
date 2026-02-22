@@ -119,7 +119,7 @@ export interface JobExecution {
 export interface JobState {
   slug: string;
   lastRun?: string;
-  lastResult?: 'success' | 'failure' | 'timeout';
+  lastResult?: 'success' | 'failure' | 'timeout' | 'pending';
   /** Error message from the last failure (cleared on success) */
   lastError?: string;
   nextScheduled?: string;

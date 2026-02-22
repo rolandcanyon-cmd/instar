@@ -314,26 +314,29 @@ describe('SessionManager behavioral tests', () => {
       await manager.spawnSession({ name: 'job-2', prompt: 'p2' });
       await manager.spawnSession({ name: 'job-3', prompt: 'p3' });
 
-      // Interactive session should succeed — gets reserved slot (maxSessions + 1)
+      // Interactive session should succeed — user sessions bypass maxSessions (up to 3x limit)
       // spawnInteractiveSession returns the tmux session name string
       const tmuxName = await manager.spawnInteractiveSession(undefined, 'chat');
       expect(tmuxName).toBeDefined();
       expect(tmuxName).toContain('chat');
     });
 
-    it('blocks interactive session when reserved slot is also full', async () => {
-      // Fill up all regular slots (maxSessions: 3)
+    it('blocks interactive session when absolute limit is reached', async () => {
+      // Fill up to absolute limit (maxSessions * 3 = 9)
+      // 3 job sessions
       await manager.spawnSession({ name: 'job-1', prompt: 'p1' });
       await manager.spawnSession({ name: 'job-2', prompt: 'p2' });
       await manager.spawnSession({ name: 'job-3', prompt: 'p3' });
 
-      // First interactive session takes the reserved slot
-      await manager.spawnInteractiveSession(undefined, 'chat-1');
+      // 6 interactive sessions (user sessions bypass maxSessions, up to 3x limit)
+      for (let i = 1; i <= 6; i++) {
+        await manager.spawnInteractiveSession(undefined, `chat-${i}`);
+      }
 
-      // Second interactive session should be blocked (4 = maxSessions + 1)
+      // 10th session should be blocked (9 = maxSessions * 3)
       await expect(
-        manager.spawnInteractiveSession(undefined, 'chat-2')
-      ).rejects.toThrow('Max sessions');
+        manager.spawnInteractiveSession(undefined, 'chat-overflow')
+      ).rejects.toThrow('Absolute session limit');
     });
   });
 
