@@ -46,8 +46,8 @@ import Layout from '../layouts/Layout.astro';
 
       <p class="text-lg sm:text-xl text-slate-400 max-w-2xl mx-auto mb-10 leading-relaxed animate-fade-in-up animate-delay-200">
         Instar turns Claude Code from a CLI tool into a persistent agent.
-        Scheduled jobs, session management, Telegram integration,
-        and the instincts to grow its own capabilities.
+        Scheduled jobs, session management, Telegram integration, auto-start on login,
+        crash recovery, self-updating, and the instincts to grow its own capabilities.
       </p>
 
       <!-- Install command -->
@@ -151,8 +151,9 @@ import Layout from '../layouts/Layout.astro';
             <span class="text-sm font-medium text-teal-400 uppercase tracking-wider">With Instar</span>
           </div>
           <p class="text-slate-200 leading-relaxed">
-            Claude Code becomes an agent. It runs in the background, checks your email on a schedule,
-            monitors your services, messages you on Telegram when something needs attention, and builds new capabilities when you ask for something it can't do yet.
+            Claude Code becomes an agent. It starts when your computer boots, runs in the background, checks your email on a schedule,
+            monitors your services, messages you on Telegram when something needs attention, auto-recovers from crashes, updates itself,
+            and builds new capabilities when you ask for something it can't do yet.
           </p>
         </div>
       </div>
@@ -204,6 +205,14 @@ import Layout from '../layouts/Layout.astro';
           <div class="bg-slate-800/30 p-3 text-sm text-slate-300">Parallel work happens</div>
           <div class="bg-slate-800/30 p-3 text-sm text-slate-400">Subagent spawning</div>
           <div class="bg-slate-800/30 p-3 text-sm text-slate-200">Context propagation &mdash; subagents know who they are</div>
+
+          <div class="bg-slate-900/30 p-3 text-sm text-slate-300">Updates happen silently</div>
+          <div class="bg-slate-900/30 p-3 text-sm text-slate-400">&mdash;</div>
+          <div class="bg-slate-900/30 p-3 text-sm text-slate-200">Built-in AutoUpdater checks npm, applies, restarts</div>
+
+          <div class="bg-slate-800/30 p-3 text-sm text-slate-300">Intelligence flows in</div>
+          <div class="bg-slate-800/30 p-3 text-sm text-slate-400">&mdash;</div>
+          <div class="bg-slate-800/30 p-3 text-sm text-slate-200">AutoDispatcher receives lessons and config from Dawn</div>
         </div>
       </div>
 
@@ -376,6 +385,30 @@ curl -X POST localhost:4040/sessions/research/input \\
             Every person your agent interacts with gets a relationship record that grows over time.
             Cross-platform identity resolution, significance scoring, context injection, and stale detection.
             The agent <em>knows</em> who it's talking to before the conversation starts.
+          </p>
+        </div>
+
+        <!-- Lifeline -->
+        <div class="group rounded-xl border border-slate-800 bg-slate-900/40 p-8 hover:border-teal-500/20 transition-colors">
+          <div class="w-10 h-10 rounded-lg bg-teal-500/10 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-slate-100 mb-2">Lifeline</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            A persistent Telegram connection that supervises the server process. Auto-recovers from crashes,
+            queues messages during downtime, and greets you on first boot. Your agent never goes silent.
+          </p>
+        </div>
+
+        <!-- Auto-Start -->
+        <div class="group rounded-xl border border-slate-800 bg-slate-900/40 p-8 hover:border-teal-500/20 transition-colors">
+          <div class="w-10 h-10 rounded-lg bg-teal-500/10 flex items-center justify-center mb-5">
+            <svg class="w-5 h-5 text-teal-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M5 3l14 9-14 9V3z"/></svg>
+          </div>
+          <h3 class="text-lg font-semibold text-slate-100 mb-2">Auto-Start on Login</h3>
+          <p class="text-slate-400 text-sm leading-relaxed">
+            Your agent starts automatically when you log into your computer. macOS LaunchAgent or Linux systemd &mdash;
+            installed during setup. Reboot your machine, your agent is already running.
           </p>
         </div>
       </div>
@@ -747,7 +780,7 @@ curl -X POST localhost:4040/sessions/research/input \\
           </div>
           <div class="pb-6">
             <p class="text-slate-200 font-medium mb-2">Run one command</p>
-            <p class="text-slate-500 text-sm mb-3">Installs everything, walks you through setup, connects Telegram, configures the server, creates your first job, and starts it all.</p>
+            <p class="text-slate-500 text-sm mb-3">Installs everything, walks you through setup, connects Telegram, configures the server, installs auto-start, creates your first jobs, and starts it all. Your agent greets you on Telegram immediately.</p>
             <div class="terminal text-sm">
               <div class="terminal-header">
                 <div class="terminal-dot bg-red-400/60"></div>
@@ -768,7 +801,7 @@ curl -X POST localhost:4040/sessions/research/input \\
           </div>
           <div>
             <p class="text-slate-200 font-medium mb-2">Your agent is running</p>
-            <p class="text-slate-500 text-sm">Persistent server. Scheduled jobs. Session management. Close your laptop &mdash; it keeps working.</p>
+            <p class="text-slate-500 text-sm">Persistent server. Lifeline supervision. Auto-start on login. Scheduled jobs. Close your laptop &mdash; reboot it &mdash; it keeps working.</p>
           </div>
         </div>
       </div>
@@ -842,6 +875,7 @@ curl -X POST localhost:4040/sessions/research/input \\
         <h2 class="text-3xl sm:text-4xl font-bold text-slate-100 mb-4">Ships With a Heartbeat</h2>
         <p class="text-slate-400 max-w-xl mx-auto">
           Out-of-the-box jobs that give your agent a circadian rhythm &mdash; regular self-maintenance without intervention.
+          Plus built-in systems (AutoUpdater, AutoDispatcher, Lifeline) that run inside the server process with zero Claude sessions needed.
         </p>
       </div>
 
@@ -882,17 +916,6 @@ curl -X POST localhost:4040/sessions/research/input \\
         <div class="flex items-center justify-between p-4 rounded-lg border border-teal-500/10 bg-teal-500/5">
           <div class="flex items-center gap-3">
             <div class="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
-            <span class="text-slate-200 text-sm font-medium font-mono">update-check</span>
-          </div>
-          <div class="flex items-center gap-4">
-            <span class="text-slate-500 text-xs">daily</span>
-            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">haiku</span>
-          </div>
-        </div>
-
-        <div class="flex items-center justify-between p-4 rounded-lg border border-teal-500/10 bg-teal-500/5">
-          <div class="flex items-center gap-3">
-            <div class="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
             <span class="text-slate-200 text-sm font-medium font-mono">feedback-retry</span>
           </div>
           <div class="flex items-center gap-4">
@@ -904,10 +927,32 @@ curl -X POST localhost:4040/sessions/research/input \\
         <div class="flex items-center justify-between p-4 rounded-lg border border-teal-500/10 bg-teal-500/5">
           <div class="flex items-center gap-3">
             <div class="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
+            <span class="text-slate-200 text-sm font-medium font-mono">self-diagnosis</span>
+          </div>
+          <div class="flex items-center gap-4">
+            <span class="text-slate-500 text-xs">every 2h</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">sonnet</span>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between p-4 rounded-lg border border-teal-500/10 bg-teal-500/5">
+          <div class="flex items-center gap-3">
+            <div class="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
             <span class="text-slate-200 text-sm font-medium font-mono">evolution-review</span>
           </div>
           <div class="flex items-center gap-4">
             <span class="text-slate-500 text-xs">every 6h</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">sonnet</span>
+          </div>
+        </div>
+
+        <div class="flex items-center justify-between p-4 rounded-lg border border-teal-500/10 bg-teal-500/5">
+          <div class="flex items-center gap-3">
+            <div class="w-2 h-2 rounded-full bg-teal-400 animate-pulse"></div>
+            <span class="text-slate-200 text-sm font-medium font-mono">insight-harvest</span>
+          </div>
+          <div class="flex items-center gap-4">
+            <span class="text-slate-500 text-xs">every 8h</span>
             <span class="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">sonnet</span>
           </div>
         </div>
@@ -988,7 +1033,7 @@ curl -X POST localhost:4040/sessions/research/input \\
       <div class="grid sm:grid-cols-2 gap-4 max-w-lg mx-auto">
         <div class="flex items-center gap-3 p-3 rounded-lg border border-slate-800 bg-slate-900/40">
           <svg class="w-5 h-5 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>
-          <span class="text-slate-300 text-sm">Node.js 18+</span>
+          <span class="text-slate-300 text-sm">Node.js 20+</span>
         </div>
         <div class="flex items-center gap-3 p-3 rounded-lg border border-slate-800 bg-slate-900/40">
           <svg class="w-5 h-5 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg>

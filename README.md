@@ -73,6 +73,11 @@ instar lifeline start           # Start lifeline (supervises server, queues mess
 instar lifeline stop            # Stop lifeline and server
 instar lifeline status          # Check lifeline health
 
+# Auto-start on login (macOS LaunchAgent / Linux systemd)
+instar autostart install          # Agent starts when you log in
+instar autostart uninstall        # Remove auto-start
+instar autostart status           # Check if auto-start is installed
+
 # Add capabilities
 instar add telegram --token BOT_TOKEN --chat-id CHAT_ID
 instar add email --credentials-file ./credentials.json [--token-file ./token.json]
@@ -91,12 +96,18 @@ instar feedback --type bug --title "Session timeout" --description "Details..."
 ## Highlights
 
 - **[Persistent Server](#persistent-server)** -- Express server in tmux. Runs 24/7, survives disconnects, auto-recovers.
+- **[Lifeline](#lifeline)** -- Persistent Telegram supervisor that auto-recovers from crashes and queues messages during downtime.
+- **[Auto-Start on Login](#auto-start-on-login)** -- macOS LaunchAgent / Linux systemd service. Agent starts when your computer boots.
+- **[AutoUpdater](#autoupdater)** -- Built-in update engine. Checks npm, applies updates, notifies via Telegram, self-restarts. No Claude session needed.
+- **[AutoDispatcher](#autodispatcher)** -- Receives intelligence dispatches from Dawn. Lessons, strategies, and configuration applied automatically.
 - **[Job Scheduler](#job-scheduler)** -- Cron-based task execution with priority levels, model tiering, and quota awareness.
 - **[Identity System](#identity-that-survives-context-death)** -- AGENT.md + USER.md + MEMORY.md with hooks that enforce continuity across compaction.
 - **[Telegram Integration](#telegram-integration)** -- Two-way messaging. Each job gets its own topic. Your group becomes a living dashboard.
 - **[Relationship Tracking](#relationships-as-fundamental-infrastructure)** -- Cross-platform identity resolution, significance scoring, context injection.
 - **[Evolution System](#evolution-system)** -- Four subsystems for structured growth: proposal queue, learning registry, gap tracking, and commitment follow-through.
 - **[Self-Evolution](#self-evolution)** -- The agent modifies its own jobs, hooks, skills, and infrastructure. It builds what it needs.
+- **[Capability Discovery](#capability-discovery)** -- Agents know all their capabilities from the moment they start. Context-triggered feature suggestions.
+- **[Innovation Detection](#innovation-detection)** -- Agents detect when user-built features could benefit all Instar agents and submit improvement feedback.
 - **[Behavioral Hooks](#behavioral-hooks)** -- Structural guardrails: identity injection, dangerous command guards, grounding before messaging.
 - **[Default Coherence Jobs](#default-coherence-jobs)** -- Health checks, reflection, relationship maintenance. A circadian rhythm out of the box.
 - **[Feedback Loop](#the-feedback-loop-a-rising-tide-lifts-all-ships)** -- Your agent reports issues, we fix them, every agent gets the update. A rising tide lifts all ships.
@@ -282,6 +293,76 @@ Two-way messaging via Telegram forum topics. Each topic maps to a Claude session
 - Sessions auto-respawn with conversation history when they expire
 - Every scheduled job gets its own topic -- your group becomes a **living dashboard**
 
+### Lifeline
+
+The Lifeline is a persistent Telegram connection that supervises your agent's server. It runs outside the server process, so it can detect crashes and recover automatically.
+
+- **Auto-recovery** -- If the server goes down, the Lifeline restarts it
+- **Message queuing** -- Messages received during downtime are queued and delivered when the server comes back
+- **First-boot greeting** -- Your agent greets you on Telegram in its own voice the first time it starts
+- **Lifeline topic** -- Created during setup with a green icon, dedicated to agent health
+
+```bash
+instar lifeline start    # Start lifeline (supervises server, queues messages)
+instar lifeline stop     # Stop lifeline and server
+instar lifeline status   # Check lifeline health
+```
+
+### Auto-Start on Login
+
+Your agent can start automatically when you log into your computer. The setup wizard offers to install this during initial configuration.
+
+- **macOS** -- Installs a LaunchAgent plist that starts the Lifeline on login
+- **Linux** -- Installs a systemd user service
+
+```bash
+instar autostart install    # Install auto-start
+instar autostart uninstall  # Remove auto-start
+instar autostart status     # Check if installed
+```
+
+### AutoUpdater
+
+A built-in update engine that runs inside the server process -- no Claude session needed.
+
+- Checks npm for new versions every 30 minutes
+- Auto-applies updates when available
+- Notifies you via Telegram with a changelog summary
+- Self-restarts after updating
+- Supersedes the old `update-check` prompt job (which is now disabled by default)
+
+Status: `GET /updates/auto`
+
+### AutoDispatcher
+
+Receives intelligence dispatches from Dawn -- the AI that maintains Instar. Dispatches flow automatically without requiring a Claude session.
+
+- **Passive dispatches** (lessons, strategies) -- Applied automatically to agent memory and configuration
+- **Action/configuration dispatches** -- Executed programmatically by the DispatchExecutor
+- **Security dispatches** -- Deferred for manual review
+- Polls every 30 minutes
+- Supersedes the old `dispatch-check` prompt job (which is now disabled by default)
+
+Status: `GET /dispatches/auto`
+
+### Capability Discovery
+
+Agents know all their capabilities from the moment they start.
+
+- `GET /capabilities` endpoint returns a structured feature guide
+- Session-start hook queries capabilities and outputs a feature summary
+- Context-triggered feature suggestions -- the agent surfaces relevant capabilities when they'd help
+
+### Innovation Detection
+
+Agents proactively detect when user-built features could benefit all Instar agents. When the agent builds a custom script or capability, it evaluates whether the innovation passes three tests:
+
+1. Does it solve a general problem (not just this user's specific case)?
+2. Would it be useful as a default capability?
+3. Would a fresh agent want it?
+
+If yes, the agent silently submits improvement feedback through the feedback loop, contributing to collective evolution.
+
 ### Persistent Server
 
 The server runs 24/7 in the background, surviving terminal disconnects and auto-recovering from failures. The agent operates it — you don't need to manage it.
@@ -290,7 +371,7 @@ The server runs 24/7 in the background, surviving terminal disconnects and auto-
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Health check (public, no auth) |
+| GET | `/health` | Health check (public, no auth). Returns version, session count, scheduler status, memory usage, Node.js version |
 | GET | `/status` | Running sessions + scheduler status |
 | GET | `/sessions` | List all sessions (filter by `?status=`) |
 | GET | `/sessions/tmux` | List all tmux sessions |
@@ -310,9 +391,13 @@ The server runs 24/7 in the background, surviving terminal disconnects and auto-
 | POST | `/feedback/retry` | Retry un-forwarded feedback |
 | GET | `/updates` | Check for updates |
 | GET | `/updates/last` | Last update check result |
+| GET | `/updates/auto` | AutoUpdater status (last check, version, next check) |
 | GET | `/events` | Query events (`?limit=50&since=24&type=`). `since` is hours (1-720), `limit` is count (1-1000) |
 | GET | `/quota` | Quota usage + recommendation |
+| GET | `/capabilities` | Feature guide and metadata |
+| GET | `/dispatches/auto` | AutoDispatcher status (last poll, pending dispatches) |
 | GET | `/telegram/topics` | List topic-session mappings |
+| POST | `/telegram/topics` | Programmatic topic creation |
 | POST | `/telegram/reply/:topicId` | Send message to a topic |
 | GET | `/telegram/topics/:topicId/messages` | Topic message history (`?limit=20`) |
 | GET | `/evolution` | Full evolution dashboard |
@@ -412,13 +497,15 @@ Ships out of the box:
 | **health-check** | Every 5 min | Haiku | Verify infrastructure health |
 | **reflection-trigger** | Every 4h | Sonnet | Reflect on recent work |
 | **relationship-maintenance** | Daily | Sonnet | Review stale relationships |
-| **update-check** | Every 30 min | Haiku | Detect new Instar versions |
 | **feedback-retry** | Every 6h | Haiku | Retry un-forwarded feedback items |
-| **dispatch-check** | Every 30 min | Haiku | Poll for intelligence dispatches |
 | **self-diagnosis** | Every 2h | Sonnet | Proactive infrastructure scanning |
 | **evolution-review** | Every 6h | Sonnet | Review and implement evolution proposals |
 | **insight-harvest** | Every 8h | Sonnet | Synthesize learnings into proposals |
 | **commitment-check** | Every 4h | Haiku | Surface overdue action items |
+| ~~update-check~~ | -- | -- | *Disabled* -- superseded by [AutoUpdater](#autoupdater) |
+| ~~dispatch-check~~ | -- | -- | *Disabled* -- superseded by [AutoDispatcher](#autodispatcher) |
+
+`update-check` and `dispatch-check` still exist in jobs.json for backward compatibility but are disabled by default. Their functionality is now handled by built-in server components that run without spawning Claude sessions.
 
 These give the agent a **circadian rhythm** -- regular self-maintenance, evolution, and growth without user intervention.
 
@@ -484,6 +571,18 @@ Instead of per-action permission prompts, Instar pushes security to a higher lev
 - Dangerous command guards block `rm -rf`, force push, database drops
 - Grounding hooks force identity re-read before external communication
 - Session-start hooks inject safety context into every new session
+
+**Network and process hardening:**
+- CORS restricted to localhost only
+- Server binds `127.0.0.1` by default -- not exposed to the network
+- Shell injection mitigated via temp files instead of shell interpolation
+- Cryptographic UUIDs (`crypto.randomUUID()`) instead of `Math.random()`
+- Atomic file writes prevent data corruption on crash
+- Bot token redaction in error messages and logs
+- Feedback webhook disabled by default (opt-in)
+- Rate limiting on session spawn (10 requests per 60 seconds sliding window)
+- Request timeout middleware (configurable, default 30s, returns 408)
+- HMAC-SHA256 signing on feedback payloads
 
 **Identity coherence** -- A grounded, coherent agent with clear identity (`AGENT.md`), relationship context (`USER.md`), and accumulated memory (`MEMORY.md`) makes better decisions than a stateless process approving actions one at a time. The intelligence layer IS the security layer.
 
