@@ -157,6 +157,8 @@ export class SessionManager extends EventEmitter {
     // Build Claude CLI arguments — no shell intermediary.
     // tmux new-session executes the command directly (no bash -c needed)
     // when given as separate arguments after the session options.
+    // Use -e CLAUDECODE= to unset the CLAUDECODE env var in spawned sessions,
+    // preventing nested Claude Code detection when instar runs inside Claude Code.
     const claudeArgs = ['--dangerously-skip-permissions'];
     if (options.model) {
       claudeArgs.push('--model', options.model);
@@ -168,6 +170,7 @@ export class SessionManager extends EventEmitter {
         'new-session', '-d',
         '-s', tmuxSession,
         '-c', this.config.projectDir,
+        '-e', 'CLAUDECODE=',
         this.config.claudePath, ...claudeArgs,
       ], { encoding: 'utf-8' });
     } catch (err) {
