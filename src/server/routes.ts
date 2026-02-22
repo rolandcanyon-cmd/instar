@@ -258,6 +258,41 @@ export function createRoutes(ctx: RouteContext): Router {
         count: userCount,
       },
       monitoring: ctx.config.monitoring,
+      evolution: {
+        enabled: !!ctx.evolution,
+        subsystems: ['proposals', 'learnings', 'gaps', 'actions'],
+      },
+      dispatches: {
+        enabled: !!ctx.config.dispatches?.enabled,
+        autoDispatch: !!ctx.autoDispatcher,
+      },
+      updates: {
+        autoUpdate: !!ctx.autoUpdater,
+      },
+      attentionQueue: {
+        enabled: true,
+        hint: 'Use POST /attention to signal important items to the user.',
+      },
+      skipLedger: {
+        enabled: true,
+        hint: 'Use GET /skip-ledger to avoid re-processing items in jobs.',
+      },
+      featureGuide: {
+        description: 'Context-triggered capability suggestions. Use these proactively when context matches.',
+        triggers: [
+          { context: 'User mentions a document, file, or report', action: 'Render it as a private view (POST /view) — beautiful HTML accessible on any device. If tunnel is running, shareable remotely.' },
+          { context: 'User wants to share something publicly', action: 'Publish via Telegraph (POST /publish). Always warn the user it is publicly accessible.' },
+          { context: 'User mentions someone by name', action: 'Check relationships (GET /relationships). Use context to personalize interactions. Offer to start tracking if not found.' },
+          { context: 'User has a recurring task', action: 'Create a scheduled job in .instar/jobs.json. Explain it will run automatically.' },
+          { context: 'User repeats a workflow', action: 'Create a skill in .claude/skills/. It becomes a slash command for future sessions.' },
+          { context: 'User is debugging CI or deployment', action: 'Check CI health (GET /ci) for GitHub Actions status.' },
+          { context: 'User asks about past events', action: 'Search Telegram history (GET /telegram/search?q=...), check memory, review activity logs.' },
+          { context: 'User frustrated with a limitation', action: 'Check for updates (GET /updates). Check dispatches (GET /dispatches/pending). The fix may already exist.' },
+          { context: 'User asks to remember something', action: 'Write to .instar/MEMORY.md. Explain it persists across sessions.' },
+          { context: 'Something needs user attention later', action: 'Queue in attention system (POST /attention). More reliable than hoping they see a message.' },
+          { context: 'Job processes a list of items', action: 'Use skip ledger (POST /skip-ledger/workload) to avoid re-processing on next run.' },
+        ],
+      },
     });
   });
 

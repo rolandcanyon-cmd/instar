@@ -1543,17 +1543,56 @@ if [ -d "$INSTAR_DIR/relationships" ]; then
   [ "\$REL_COUNT" -gt "0" ] && echo "  \${REL_COUNT} tracked relationships in .instar/relationships/"
 fi
 
-# Server status + self-discovery
+# Server status + feature discovery
 if [ -f "$INSTAR_DIR/config.json" ]; then
   PORT=\$(python3 -c "import json; print(json.load(open('$INSTAR_DIR/config.json')).get('port', 4040))" 2>/dev/null || echo "4040")
+  AUTH=\$(python3 -c "import json; print(json.load(open('$INSTAR_DIR/config.json')).get('authToken',''))" 2>/dev/null)
   HEALTH=\$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:\${PORT}/health" 2>/dev/null)
   if [ "\$HEALTH" = "200" ]; then
     echo ""
     echo "Instar server: RUNNING on port \${PORT}"
-    echo "Capabilities: curl http://localhost:\${PORT}/capabilities"
+    echo ""
+    # Query capabilities and output a compact feature summary
+    CAPS=\$(curl -s -H "Authorization: Bearer \${AUTH}" "http://localhost:\${PORT}/capabilities" 2>/dev/null)
+    if [ -n "\$CAPS" ]; then
+      echo "Your capabilities (use these proactively — don't wait for the user to ask):"
+      # Parse key features with python
+      python3 -c "
+import json, sys
+try:
+    c = json.loads('''$CAPS'''.replace(\"'\", ''))
+except:
+    c = json.loads(sys.stdin.read()) if not sys.stdin.isatty() else {}
+features = []
+if c.get('telegram', {}).get('bidirectional'): features.append('Telegram (bidirectional messaging)')
+if c.get('scheduler', {}).get('enabled'):
+    slugs = c.get('scheduler', {}).get('jobSlugs', [])
+    features.append(f'Job Scheduler ({len(slugs)} jobs)')
+if c.get('relationships', {}).get('count', 0) > 0:
+    features.append(f'Relationships ({c[\"relationships\"][\"count\"]} tracked)')
+if c.get('publishing', {}).get('enabled'): features.append('Telegraph Publishing (public pages)')
+if c.get('privateViewer', {}).get('enabled'): features.append('Private Viewer (auth-gated HTML pages)')
+if c.get('tunnel', {}).get('running'): features.append(f'Cloudflare Tunnel ({c[\"tunnel\"].get(\"url\", \"active\")})')
+elif c.get('tunnel', {}).get('enabled'): features.append('Cloudflare Tunnel (configured, not running)')
+if c.get('evolution', {}).get('enabled'): features.append('Evolution System (proposals, learnings, gaps, actions)')
+if c.get('dispatches', {}).get('enabled'): features.append('Dispatch System (receive behavioral updates)')
+if c.get('updates', {}).get('autoUpdate'): features.append('Auto-Updater (checks for new versions)')
+features.append('Attention Queue (signal items to user)')
+features.append('Skip Ledger (avoid re-processing)')
+features.append('Feedback System (report bugs/features upstream)')
+features.append('CI Health (check GitHub Actions)')
+for f in features:
+    print(f'  - {f}')
+" 2>/dev/null <<< "\$CAPS"
+      echo ""
+      echo "Proactive guidance: When the user mentions documents → use Private Viewer."
+      echo "When they repeat a task → suggest creating a job. When something needs"
+      echo "attention later → use the Attention Queue. You are the user's guide."
+    fi
   else
     echo ""
     echo "Instar server: NOT RUNNING (port \${PORT})"
+    echo "Start it with: instar server start"
   fi
 fi
 
