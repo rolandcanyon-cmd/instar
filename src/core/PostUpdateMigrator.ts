@@ -162,6 +162,11 @@ When user input starts with \`[telegram:N]\` (e.g., \`[telegram:26] hello\`), th
 
 **IMMEDIATE ACKNOWLEDGMENT (MANDATORY):** When you receive a Telegram message, your FIRST action — before reading files, searching code, or doing any work — must be sending a brief acknowledgment back. This confirms the message was received and you haven't stalled. Examples: "Got it, looking into this now." / "On it — checking the scheduler." / "Received, working on the sync." Then do the work, then send the full response.
 
+**Message types:**
+- **Text**: \`[telegram:26] hello there\` — standard text message
+- **Voice**: \`[telegram:26] [voice] transcribed text here\` — voice message, already transcribed
+- **Photo**: \`[telegram:26] [image:/path/to/file.jpg]\` or \`[telegram:26] [image:/path/to/file.jpg] caption text\` — use the Read tool to view the image at the given path
+
 **Response relay:** After completing your work, relay your response back:
 
 \`\`\`bash
@@ -189,6 +194,18 @@ Strip the \`[telegram:N]\` prefix before interpreting the message. Respond natur
           patched = true;
           result.upgraded.push('CLAUDE.md: added mandatory acknowledgment to Telegram Relay');
         }
+      }
+    }
+
+    // Upgrade existing Telegram Relay sections to document image message format
+    if (this.config.hasTelegram && content.includes('Telegram Relay') && !content.includes('[image:')) {
+      const imageBlock = `\n**Message types:**\n- **Text**: \`[telegram:N] hello there\` — standard text message\n- **Voice**: \`[telegram:N] [voice] transcribed text here\` — voice message, already transcribed\n- **Photo**: \`[telegram:N] [image:/path/to/file.jpg]\` or with caption — use the Read tool to view the image at the given path\n`;
+      // Insert before the Response relay section
+      const relayIdx = content.indexOf('**Response relay:**');
+      if (relayIdx >= 0) {
+        content = content.slice(0, relayIdx) + imageBlock + '\n' + content.slice(relayIdx);
+        patched = true;
+        result.upgraded.push('CLAUDE.md: added image/photo message format to Telegram Relay');
       }
     }
 

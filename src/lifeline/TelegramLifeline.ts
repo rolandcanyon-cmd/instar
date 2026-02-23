@@ -93,6 +93,8 @@ interface TelegramUpdate {
     chat: { id: number };
     message_thread_id?: number;
     text?: string;
+    caption?: string;
+    photo?: Array<{ file_id: string; file_size?: number; width: number; height: number }>;
     date: number;
   };
 }
@@ -274,7 +276,15 @@ export class TelegramLifeline {
 
   private async processUpdate(update: TelegramUpdate): Promise<void> {
     const msg = update.message;
-    if (!msg || !msg.text) return;
+    if (!msg) return;
+
+    // Handle photo messages
+    if (msg.photo && msg.photo.length > 0 && !msg.text) {
+      await this.handlePhotoMessage(msg);
+      return;
+    }
+
+    if (!msg.text) return;
 
     const topicId = msg.message_thread_id ?? 1;
     const text = msg.text;
@@ -324,6 +334,86 @@ export class TelegramLifeline {
     await this.sendToTopic(topicId,
       `Server is temporarily down. Your message has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
     );
+  }
+
+  /**
+   * Handle an incoming photo message: download it and forward/queue with [image:path] content.
+   */
+  private async handlePhotoMessage(
+    msg: NonNullable<TelegramUpdate['message']>,
+  ): Promise<void> {
+    const topicId = msg.message_thread_id ?? 1;
+    const photos = msg.photo!;
+    const photo = photos[photos.length - 1]; // highest resolution
+    const caption = msg.caption ?? '';
+
+    let content: string;
+    let photoPath: string | undefined;
+    try {
+      photoPath = await this.downloadPhoto(photo.file_id, msg.message_id);
+      content = caption ? `[image:${photoPath}] ${caption}` : `[image:${photoPath}]`;
+    } catch (err) {
+      // Download failed — forward caption or placeholder so message isn't silently dropped
+      content = caption ? `[image:download-failed] ${caption}` : '[image:download-failed]';
+      console.error(`[lifeline] Failed to download photo: ${err}`);
+    }
+
+    if (this.supervisor.healthy) {
+      const forwarded = await this.forwardToServer(topicId, content, msg);
+      if (forwarded) {
+        await this.sendToTopic(topicId, '✓ Delivered');
+        return;
+      }
+    }
+
+    // Queue the photo message (server down or forward failed)
+    this.queue.enqueue({
+      id: `tg-${msg.message_id}`,
+      topicId,
+      text: content,
+      fromUserId: msg.from.id,
+      fromUsername: msg.from.username,
+      fromFirstName: msg.from.first_name,
+      timestamp: new Date(msg.date * 1000).toISOString(),
+      photoPath,
+    });
+
+    if (this.supervisor.healthy) {
+      await this.sendToTopic(topicId,
+        `Server is restarting. Your photo has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
+      );
+    } else {
+      await this.sendToTopic(topicId,
+        `Server is temporarily down. Your photo has been queued (${this.queue.length} in queue). It will be delivered when the server recovers.`
+      );
+    }
+  }
+
+  /**
+   * Download a photo from Telegram and save it to the state directory.
+   */
+  private async downloadPhoto(fileId: string, messageId: number): Promise<string> {
+    // Get file path from Telegram
+    const infoRes = await fetch(
+      `https://api.telegram.org/bot${this.config.token}/getFile?file_id=${encodeURIComponent(fileId)}`
+    );
+    if (!infoRes.ok) throw new Error(`getFile failed: ${infoRes.status}`);
+    const infoData = await infoRes.json() as { ok: boolean; result?: { file_path: string } };
+    if (!infoData.ok || !infoData.result?.file_path) throw new Error('getFile returned no path');
+
+    const filePath = infoData.result.file_path;
+    const photoDir = path.join(this.projectConfig.stateDir, 'telegram-images');
+    fs.mkdirSync(photoDir, { recursive: true });
+    const filename = `photo-${Date.now()}-${messageId}.jpg`;
+    const localPath = path.join(photoDir, filename);
+
+    const fileRes = await fetch(
+      `https://api.telegram.org/file/bot${this.config.token}/${filePath}`
+    );
+    if (!fileRes.ok) throw new Error(`File download failed: ${fileRes.status}`);
+    const buf = Buffer.from(await fileRes.arrayBuffer());
+    fs.writeFileSync(localPath, buf);
+    return localPath;
   }
 
   /**
