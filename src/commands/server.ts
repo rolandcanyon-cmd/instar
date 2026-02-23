@@ -10,6 +10,7 @@
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import pc from 'picocolors';
 import { loadConfig, ensureStateDir, detectTmuxPath } from '../core/Config.js';
@@ -37,6 +38,7 @@ import { AccountSwitcher } from '../monitoring/AccountSwitcher.js';
 import { QuotaNotifier } from '../monitoring/QuotaNotifier.js';
 import { classifySessionDeath } from '../monitoring/QuotaExhaustionDetector.js';
 import type { Message } from '../core/types.js';
+import { installAutoStart } from './setup.js';
 
 interface StartOptions {
   foreground?: boolean;
@@ -44,6 +46,23 @@ interface StartOptions {
   /** When false, skip Telegram polling (used when lifeline owns the Telegram connection).
    *  Commander maps --no-telegram to telegram: false. */
   telegram?: boolean;
+}
+
+/**
+ * Check if autostart is installed for this project.
+ * Extracted from the CLI `autostart status` handler for programmatic use.
+ */
+function isAutostartInstalled(projectName: string): boolean {
+  if (process.platform === 'darwin') {
+    const label = `ai.instar.${projectName}`;
+    const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+    return fs.existsSync(plistPath);
+  } else if (process.platform === 'linux') {
+    const serviceName = `instar-${projectName}.service`;
+    const servicePath = path.join(os.homedir(), '.config', 'systemd', 'user', serviceName);
+    return fs.existsSync(servicePath);
+  }
+  return false;
 }
 
 /**
@@ -822,6 +841,84 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     console.log(pc.green('  Evolution system enabled'));
 
+    // Start MemoryPressureMonitor (platform-aware memory tracking)
+    const { MemoryPressureMonitor } = await import('../monitoring/MemoryPressureMonitor.js');
+    const memoryMonitor = new MemoryPressureMonitor({});
+    memoryMonitor.on('stateChange', ({ from, to, state: memState }: { from: string; to: string; state: any }) => {
+      // Gate scheduler spawning on memory pressure
+      if (scheduler && (to === 'elevated' || to === 'critical')) {
+        console.log(`[MemoryPressure] ${from} -> ${to} — scheduler should respect canSpawnSession()`);
+      }
+      // Alert via Telegram attention topic
+      if (telegram && to !== 'normal') {
+        const attentionTopicId = state.get<number>('agent-attention-topic');
+        if (attentionTopicId) {
+          telegram.sendToTopic(attentionTopicId,
+            `Memory ${to}: ${memState.pressurePercent.toFixed(1)}% used, ${memState.freeGB.toFixed(1)}GB free (trend: ${memState.trend})`
+          ).catch(() => {});
+        }
+      }
+    });
+    memoryMonitor.start();
+
+    // Wire memory gate into scheduler
+    if (scheduler) {
+      const originalCanRun = scheduler.canRunJob;
+      scheduler.canRunJob = (priority) => {
+        // Check memory first
+        const memCheck = memoryMonitor.canSpawnSession();
+        if (!memCheck.allowed) {
+          return false;
+        }
+        // Then check original gate (quota, etc.)
+        return originalCanRun(priority);
+      };
+    }
+
+    // Start CaffeinateManager (prevents macOS system sleep)
+    const { CaffeinateManager } = await import('../core/CaffeinateManager.js');
+    const caffeinateManager = new CaffeinateManager({ stateDir: config.stateDir });
+    caffeinateManager.start();
+
+    // Start SleepWakeDetector (re-validate sessions on wake)
+    const { SleepWakeDetector } = await import('../core/SleepWakeDetector.js');
+    const sleepWakeDetector = new SleepWakeDetector();
+    sleepWakeDetector.on('wake', async (event: { sleepDurationSeconds: number; timestamp: string }) => {
+      console.log(`[SleepWake] Wake detected after ~${event.sleepDurationSeconds}s sleep`);
+
+      // Re-validate tmux sessions
+      try {
+        const tmuxPath = detectTmuxPath();
+        if (tmuxPath) {
+          const { execFileSync } = await import('child_process');
+          const result = execFileSync(tmuxPath, ['list-sessions'], { encoding: 'utf-8', timeout: 5000 }).trim();
+          console.log(`[SleepWake] tmux sessions after wake: ${result.split('\n').length}`);
+        }
+      } catch {
+        console.warn('[SleepWake] tmux check failed after wake');
+      }
+
+      // Restart tunnel if configured
+      if (tunnel) {
+        try {
+          await tunnel.stop();
+          const tunnelUrl = await tunnel.start();
+          console.log(`[SleepWake] Tunnel restarted: ${tunnelUrl}`);
+        } catch (err) {
+          console.error(`[SleepWake] Tunnel restart failed:`, err);
+        }
+      }
+
+      // Notify via Telegram attention topic
+      if (telegram) {
+        const attentionTopicId = state.get<number>('agent-attention-topic');
+        if (attentionTopicId) {
+          telegram.sendToTopic(attentionTopicId, `Wake detected after ~${event.sleepDurationSeconds}s sleep. Sessions re-validated.`).catch(() => {});
+        }
+      }
+    });
+    sleepWakeDetector.start();
+
     const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution });
     await server.start();
 
@@ -836,9 +933,32 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }
 
+    // Self-healing: ensure autostart is installed so the server always restarts
+    // This is a non-negotiable requirement — the user must always be able to reach their agent remotely.
+    // If autostart isn't installed, install it silently. The agent should never require human intervention
+    // to ensure its own resilience.
+    try {
+      const hasTelegram = !!telegram;
+      const autostartInstalled = isAutostartInstalled(config.projectName);
+      if (!autostartInstalled) {
+        const installed = installAutoStart(config.projectName, config.projectDir, hasTelegram);
+        if (installed) {
+          console.log(pc.green(`  Auto-start self-healed: installed ${process.platform === 'darwin' ? 'LaunchAgent' : 'systemd service'}`));
+        } else {
+          console.log(pc.yellow(`  Auto-start not available on ${process.platform}`));
+        }
+      }
+    } catch (err) {
+      // Non-critical — don't crash the server over autostart
+      console.error(`  Auto-start check failed: ${err instanceof Error ? err.message : err}`);
+    }
+
     // Graceful shutdown
     const shutdown = async () => {
       console.log('\nShutting down...');
+      memoryMonitor.stop();
+      caffeinateManager.stop();
+      sleepWakeDetector.stop();
       autoUpdater.stop();
       autoDispatcher?.stop();
       if (tunnel) await tunnel.stop();

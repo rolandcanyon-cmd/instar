@@ -20,10 +20,12 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import pc from 'picocolors';
 import { loadConfig, ensureStateDir } from '../core/Config.js';
 import { registerPort, unregisterPort, startHeartbeat } from '../core/PortRegistry.js';
+import { installAutoStart } from '../commands/setup.js';
 import { MessageQueue, type QueuedMessage } from './MessageQueue.js';
 import { ServerSupervisor } from './ServerSupervisor.js';
 
@@ -205,6 +207,19 @@ export class TelegramLifeline {
       if (this.supervisor.healthy) {
         setTimeout(() => this.replayQueue(), 5000); // Wait for server to fully start
       }
+    }
+
+    // Self-healing: ensure autostart is installed so the lifeline persists across reboots.
+    // The user must always be able to reach their agent remotely — this is non-negotiable.
+    try {
+      if (!this.isAutostartInstalled()) {
+        const installed = installAutoStart(this.projectConfig.projectName, this.projectConfig.projectDir, true);
+        if (installed) {
+          console.log(pc.green(`  Auto-start self-healed: installed ${process.platform === 'darwin' ? 'LaunchAgent' : 'systemd service'}`));
+        }
+      }
+    } catch {
+      // Non-critical — don't crash the lifeline over autostart
     }
 
     // Graceful shutdown
@@ -437,6 +452,22 @@ export class TelegramLifeline {
   }
 
   // ── Lifeline Topic ──────────────────────────────────────────
+
+  /**
+   * Check if OS-level autostart is installed for this project.
+   */
+  private isAutostartInstalled(): boolean {
+    if (process.platform === 'darwin') {
+      const label = `ai.instar.${this.projectConfig.projectName}`;
+      const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', `${label}.plist`);
+      return fs.existsSync(plistPath);
+    } else if (process.platform === 'linux') {
+      const serviceName = `instar-${this.projectConfig.projectName}.service`;
+      const servicePath = path.join(os.homedir(), '.config', 'systemd', 'user', serviceName);
+      return fs.existsSync(servicePath);
+    }
+    return false;
+  }
 
   /**
    * Ensure the Lifeline topic exists. Recreates if deleted.
