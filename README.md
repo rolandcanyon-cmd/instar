@@ -178,8 +178,8 @@ Anthropic's policy: OAuth tokens are for Claude Code and claude.ai only. Project
 | | OpenClaw | Instar |
 |---|---|---|
 | **What it is** | AI assistant framework | Autonomy infrastructure |
-| **Runtime** | Pi SDK (API wrapper) | Claude Code (full dev environment) |
-| **Sessions** | Single gateway | Multiple parallel Claude Code instances |
+| **Runtime** | Pi SDK (embedded agent) | Claude Code (full dev environment) |
+| **Sessions** | Multi-session gateway | Multiple parallel Claude Code instances |
 | **Identity** | SOUL.md (file) | Multi-file + behavioral hooks + CLAUDE.md instructions |
 | **Memory** | Hybrid vector search | Relationship-centric (cross-platform, significance) |
 | **Messaging** | 20+ channels | Telegram (Slack/Discord planned) |
@@ -187,7 +187,7 @@ Anthropic's policy: OAuth tokens are for Claude Code and claude.ai only. Project
 | **Device apps** | macOS, Android, iOS (preview) | -- |
 | **Sandbox** | Docker 3×3 matrix | Dangerous command guards |
 | **Self-evolution** | Workspace file updates | Full infrastructure self-modification |
-| **ToS status** | OAuth extraction (restricted) | Spawns real Claude Code (compliant) |
+| **ToS status** | API keys + OAuth (OAuth path restricted) | Spawns real Claude Code (compliant) |
 
 **OpenClaw optimizes for ubiquity** -- AI across every messaging platform. **Instar optimizes for autonomy** -- an agent that runs, remembers, grows, and evolves.
 

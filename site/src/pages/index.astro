@@ -616,7 +616,7 @@ curl -X POST localhost:4040/sessions/research/input \\
                   Claude Code CLI (native)
                 </span>
               </td>
-              <td class="py-3 px-4 text-slate-500">Pi SDK (API wrapper)</td>
+              <td class="py-3 px-4 text-slate-500">Pi SDK (embedded agent)</td>
             </tr>
             <tr class="border-b border-slate-800/50">
               <td class="py-3 px-4 text-slate-500">Auth method</td>
@@ -628,8 +628,8 @@ curl -X POST localhost:4040/sessions/research/input \\
               </td>
               <td class="py-3 px-4 text-slate-500">
                 <span class="inline-flex items-center gap-1.5">
-                  <svg class="w-3.5 h-3.5 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
-                  OAuth token extraction (banned)
+                  <svg class="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 9v2m0 4h.01M12 2l9.66 16.5H2.34L12 2z"/></svg>
+                  API keys + OAuth (OAuth path restricted)
                 </span>
               </td>
             </tr>
@@ -643,8 +643,8 @@ curl -X POST localhost:4040/sessions/research/input \\
               </td>
               <td class="py-3 px-4 text-slate-500">
                 <span class="inline-flex items-center gap-1.5">
-                  <svg class="w-3.5 h-3.5 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M6 18L18 6M6 6l12 12"/></svg>
-                  Banned by Anthropic
+                  <svg class="w-3.5 h-3.5 text-yellow-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M12 9v2m0 4h.01M12 2l9.66 16.5H2.34L12 2z"/></svg>
+                  OAuth path restricted by Anthropic
                 </span>
               </td>
             </tr>
@@ -656,7 +656,7 @@ curl -X POST localhost:4040/sessions/research/input \\
                   Multi-session orchestration
                 </span>
               </td>
-              <td class="py-3 px-4 text-slate-500">Single gateway</td>
+              <td class="py-3 px-4 text-slate-500">Multi-session gateway</td>
             </tr>
             <tr class="border-b border-slate-800/50">
               <td class="py-3 px-4 text-slate-500">Tool access</td>
@@ -677,8 +677,10 @@ curl -X POST localhost:4040/sessions/research/input \\
                 </span>
               </td>
               <td class="py-3 px-4 text-slate-500">
-                <svg class="w-3.5 h-3.5 text-slate-600 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M20 12H4"/></svg>
-                Not available
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg>
+                  Supported (6 budget levels)
+                </span>
               </td>
             </tr>
             <tr class="border-b border-slate-800/50">
@@ -690,8 +692,10 @@ curl -X POST localhost:4040/sessions/research/input \\
                 </span>
               </td>
               <td class="py-3 px-4 text-slate-500">
-                <svg class="w-3.5 h-3.5 text-slate-600 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M20 12H4"/></svg>
-                Not available
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg>
+                  sessions_spawn with model tiers
+                </span>
               </td>
             </tr>
             <tr class="border-b border-slate-800/50">
@@ -703,8 +707,10 @@ curl -X POST localhost:4040/sessions/research/input \\
                 </span>
               </td>
               <td class="py-3 px-4 text-slate-500">
-                <svg class="w-3.5 h-3.5 text-slate-600 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path d="M20 12H4"/></svg>
-                Not available
+                <span class="inline-flex items-center gap-1.5">
+                  <svg class="w-3.5 h-3.5 text-green-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M5 13l4 4L19 7"/></svg>
+                  Via mcporter bridge
+                </span>
               </td>
             </tr>
             <tr class="border-b border-slate-800/50">

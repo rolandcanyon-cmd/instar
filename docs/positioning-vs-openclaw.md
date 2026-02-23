@@ -67,9 +67,9 @@ Instar gives Claude Code agents the infrastructure to run autonomously. Two path
 
 ## The Architectural Divide
 
-### Runtime: API Wrapper vs. Development Environment
+### Runtime: Embedded Agent vs. Development Environment
 
-**OpenClaw** wraps the Claude API (via Pi SDK) to create an agent that responds to messages. The agent has tools (bash, read, write, edit), but it's fundamentally a **message-response loop** — users send messages, the agent processes them, the agent responds.
+**OpenClaw** uses the Pi SDK to create an embedded agent that responds to messages. The agent has tools (bash, read, write, edit), extended thinking (6 budget levels), and sub-agent spawning — it's a capable **agent framework**, but fundamentally a **message-response loop**.
 
 **Instar** runs on Claude Code — Anthropic's full agentic development environment. Each session is a complete Claude Code instance with:
 - Extended thinking
@@ -80,11 +80,11 @@ Instar gives Claude Code agents the infrastructure to run autonomously. Two path
 - Context management with automatic compaction
 - MCP server integration (Playwright, Chrome extension, etc.)
 
-The difference: OpenClaw's agent executes tools through an API. Instar's agent IS a development environment.
+The difference: OpenClaw's agent is an embedded framework with growing capabilities. Instar's agent IS a development environment — every feature Claude Code ships, Instar gets automatically.
 
-### Session Model: Single Gateway vs. Multi-Session Orchestration
+### Session Model: Multi-Session Gateway vs. Multi-Session Orchestration
 
-**OpenClaw** runs a single gateway process. All conversations route through one WebSocket server with one embedded agent. Multiple agents are supported through routing rules, but each agent is still a single process.
+**OpenClaw** runs a WebSocket gateway with `sessions_spawn` for multi-session support and model-tiered sub-agents. Multiple agents are supported through routing rules with deterministic priority hierarchy.
 
 **Instar** manages multiple independent Claude Code sessions, each running in its own tmux process. The server orchestrates which sessions run, monitors their health, respawns them when they die, and coordinates through Telegram topics and event logs.
 
@@ -215,9 +215,9 @@ Spawns the real Claude Code CLI. Never extracts, proxies, or spoofs OAuth tokens
 | Dimension | OpenClaw | Instar |
 |---|---|---|
 | **What it is** | AI assistant framework | Autonomy infrastructure (fresh or existing projects) |
-| **Runtime** | Pi SDK (API wrapper) | Claude Code (full dev environment) |
-| **Auth model** | OAuth token extraction (now restricted) | Spawns real Claude Code CLI (ToS-compliant) |
-| **Session model** | Single gateway, multi-agent routing | Multi-session orchestration (parallel tmux) |
+| **Runtime** | Pi SDK (embedded agent) | Claude Code (full dev environment) |
+| **Auth model** | API keys + OAuth (OAuth path restricted) | Spawns real Claude Code CLI (ToS-compliant) |
+| **Session model** | Multi-session gateway, multi-agent routing | Multi-session orchestration (parallel tmux) |
 | **Identity** | SOUL.md (co-created, agent-modifiable) | Multi-file + hooks + compaction recovery + grounding |
 | **Memory retrieval** | Hybrid BM25 + vector, MMR, temporal decay | File-based + relationship-centric |
 | **Relationships** | Session-based | Deep tracking (cross-platform, significance, context) |
@@ -290,7 +290,7 @@ More messaging channels and voice. That's it. And it's a gap we choose not to cl
 ### The Honest Advantage
 
 Everything else:
-- Runtime depth (full Claude Code vs API wrapper)
+- Runtime depth (full Claude Code vs embedded agent framework)
 - Multi-session orchestration (parallel agents vs single gateway)
 - Identity infrastructure (structural guarantees vs file the agent tries to remember)
 - Self-evolution (modify the system itself vs modify workspace files)
