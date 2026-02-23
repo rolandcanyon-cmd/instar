@@ -96,12 +96,18 @@ export class AutoUpdater {
 
     const intervalMs = this.config.checkIntervalMinutes * 60 * 1000;
 
-    // Warn if running from npx cache (auto-updates won't work properly)
+    // Detect npx cache — auto-apply and restart cause infinite loops when
+    // running from npx because the cache still resolves to the old version
+    // after npm installs the update. The restart finds the update again,
+    // applies it again, restarts again — forever, killing all sessions each time.
     const scriptPath = process.argv[1] || '';
-    if (scriptPath.includes('.npm/_npx') || scriptPath.includes('/_npx/')) {
+    const runningFromNpx = scriptPath.includes('.npm/_npx') || scriptPath.includes('/_npx/');
+    if (runningFromNpx) {
+      this.config.autoApply = false;
+      this.config.autoRestart = false;
       console.warn(
-        '[AutoUpdater] WARNING: Running from npx cache. Auto-updates require a global install.\n' +
-        '[AutoUpdater] Run: npm install -g instar'
+        '[AutoUpdater] Running from npx cache. Auto-apply and auto-restart disabled to prevent restart loops.\n' +
+        '[AutoUpdater] Run: npm install -g instar  (then restart with: instar server start)'
       );
     }
 

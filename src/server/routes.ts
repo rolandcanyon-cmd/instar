@@ -9,6 +9,7 @@ import { Router } from 'express';
 import { execFileSync } from 'node:child_process';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
@@ -112,7 +113,6 @@ export function createRoutes(ctx: RouteContext): Router {
       };
 
       // System-wide memory state
-      const os = require('node:os');
       const totalMem = os.totalmem();
       const freeMem = os.freemem();
       base.systemMemory = {
