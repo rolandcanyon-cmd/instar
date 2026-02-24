@@ -91,10 +91,14 @@ export async function runSetup(opts?: { classic?: boolean }): Promise<void> {
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
     const repoName = path.basename(gitRoot);
-    gitContext = ` This directory is inside a git repository "${repoName}" at ${gitRoot}.`;
+    gitContext = ` This directory is inside a git repository "${repoName}" at ${gitRoot}. Set up a project-bound agent here.`;
   } catch {
-    gitContext = ' This directory is NOT inside a git repository.';
+    gitContext = ' This directory is NOT inside a git repository. Set up a standalone agent at ~/.instar/agents/<name>/ using `npx instar init --standalone <name>`.';
   }
+
+  // Detect if .instar already exists (existing project)
+  const existingConfig = fs.existsSync(path.join(projectDir, '.instar', 'config.json'));
+  const existingContext = existingConfig ? ' An existing .instar/config.json was found — offer to reconfigure or skip.' : '';
 
   // Pre-install Playwright browser binaries AND register the MCP server so the
   // wizard has browser automation available from the start. Both are required:
@@ -132,7 +136,7 @@ export async function runSetup(opts?: { classic?: boolean }): Promise<void> {
   // only writes to well-defined locations (.instar/, .claude/, CLAUDE.md).
   const child = spawn(claudePath, [
     '--dangerously-skip-permissions',
-    `/setup-wizard The project to set up is at: ${projectDir}.${gitContext}`,
+    `/setup-wizard The project to set up is at: ${projectDir}.${gitContext}${existingContext}`,
   ], {
     cwd: instarRoot,
     stdio: 'inherit',

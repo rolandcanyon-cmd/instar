@@ -67,13 +67,27 @@ If the user objects ("actually I want a personal agent, not a project agent"), a
 
 **Welcome to Instar!**
 
-You're not inside a project, so I'll set up a personal agent — a persistent AI companion you talk to through Telegram.
+You're not inside a project, so I'll set up a standalone agent — a persistent AI companion you talk to through Telegram.
 
 It can research, schedule tasks, manage files, and grow over time.
 
 ---
 
 Then ask: "What should your agent be called?" (default: "my-agent")
+
+**IMPORTANT — Standalone Agent Path:** When not in a git repository, you are creating a **standalone agent**. This means:
+- The agent lives at `~/.instar/agents/<name>/` (NOT the current directory)
+- You MUST run `npx instar init --standalone <name>` via Bash to scaffold the directory structure and register in the global agent registry
+- All subsequent file writes (AGENT.md, USER.md, MEMORY.md, config.json, etc.) go into `~/.instar/agents/<name>/.instar/`
+- The `projectDir` for the rest of setup becomes `~/.instar/agents/<name>/`
+- After init, verify the directory exists before writing identity files
+
+```bash
+# Create standalone agent scaffold
+npx instar init --standalone "<agent-name>" --port <port>
+```
+
+This handles directory creation, registry entry, port allocation, and gitignore — you just need to write the identity and config files into the created directory.
 
 ### Key principle: Telegram is the interface, always
 
@@ -542,8 +556,8 @@ Now that identity and Telegram are established, handle the remaining technical s
 
 ### 4a. Project Detection
 
-- The project directory is passed in the prompt (e.g., "The project to set up is at: /path/to/project")
-- All files should be written there, not in the instar package directory
+- **Project-bound agents**: The project directory is passed in the prompt (e.g., "The project to set up is at: /path/to/project"). All files go there.
+- **Standalone agents**: The directory was created in Phase 1 at `~/.instar/agents/<name>/`. All files go there. The `projectDir` is now that standalone directory, NOT the original cwd.
 - Check if `.instar/config.json` already exists (offer to reconfigure or skip)
 - Verify prerequisites: check that `tmux` and `claude` CLI are available
 
