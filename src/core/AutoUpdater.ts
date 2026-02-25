@@ -102,18 +102,18 @@ export class AutoUpdater {
 
     const intervalMs = this.config.checkIntervalMinutes * 60 * 1000;
 
-    // Detect npx cache — auto-apply and restart cause infinite loops when
-    // running from npx because the cache still resolves to the old version
-    // after npm installs the update. The restart finds the update again,
-    // applies it again, restarts again — forever, killing all sessions each time.
+    // Detect stale binary sources — npx cache and local node_modules don't update
+    // when we run npm install -g, causing restart loops. Auto-apply still works
+    // (installs globally), but auto-restart would loop if we can't find the global binary.
+    // We now have robust binary resolution (findBestBinary), so we only disable
+    // auto-restart for npx — local installs can restart via global binary resolution.
     const scriptPath = process.argv[1] || '';
     const runningFromNpx = scriptPath.includes('.npm/_npx') || scriptPath.includes('/_npx/');
     if (runningFromNpx) {
-      this.config.autoApply = false;
       this.config.autoRestart = false;
       console.warn(
-        '[AutoUpdater] Running from npx cache. Auto-apply and auto-restart disabled to prevent restart loops.\n' +
-        '[AutoUpdater] Run: npm install -g instar  (then restart with: instar server start)'
+        '[AutoUpdater] Running from npx cache. Auto-restart disabled — updates will be applied globally.\n' +
+        '[AutoUpdater] The server will use the new version on next restart.'
       );
     }
 
@@ -196,17 +196,20 @@ export class AutoUpdater {
       if (this.lastAppliedVersion === info.latestVersion) {
         console.log(
           `[AutoUpdater] v${info.latestVersion} was already applied in a previous cycle. ` +
-          `The running binary didn't pick up the update — skipping to prevent restart loop.`
+          `The running binary didn't pick up the update — attempting recovery restart.`
         );
 
-        // Notify the user once (not every tick)
+        // The previous restart spawned from a stale binary. Try once more with
+        // aggressive path resolution. If this fails, accept current state — never
+        // ask the user to run a command.
         if (!this.loopNotified) {
           this.loopNotified = true;
           await this.notify(
-            `I already installed v${info.latestVersion} but my running binary didn't pick up the change ` +
-            `(might be running from a cached or local install). ` +
-            `Please restart me from the global binary: instar server start --foreground`
+            `Update to v${info.latestVersion} was installed but the restart loaded a stale binary. ` +
+            `Attempting recovery restart from the correct path...`
           );
+          await new Promise(r => setTimeout(r, 2000));
+          this.selfRestart();
         }
 
         this.pendingUpdate = null;
@@ -302,69 +305,118 @@ export class AutoUpdater {
    * If running under a process manager (launchd, systemd), the
    * manager handles restart automatically after we exit.
    */
-  private selfRestart(): void {
-    console.log('[AutoUpdater] Initiating self-restart...');
+  /**
+   * Find the best available binary path for restart.
+   * Tries multiple strategies, from most reliable to least:
+   *
+   * 1. `npm bin -g` — the actual global bin directory npm uses
+   * 2. `which instar` — PATH-based lookup (excludes npx cache and local node_modules)
+   * 3. `npm prefix -g` + `/bin/instar` — prefix-based lookup
+   * 4. `npm root -g` + `/instar/dist/cli.js` — direct module entry point (nuclear option)
+   * 5. `process.argv` fallback — only if not from npx cache or local node_modules
+   *
+   * Returns { bin, method } or null if no viable path found.
+   */
+  private findBestBinary(): { bin: string; method: string; useNode?: boolean } | null {
+    const isStaleSource = (p: string): boolean =>
+      p.includes('.npm/_npx') || p.includes('/_npx/') || p.includes('node_modules/.bin/');
 
-    // After an update, prefer the global binary (which has the new version)
-    // over process.argv (which may point to a stale npx cache).
-    // Extract non-path args (server, start, --foreground, --dir, etc.)
-    const cliArgs = process.argv.slice(2); // skip node + script path
-    let instarBin: string | null = null;
+    // Strategy 1: npm bin -g (most reliable — the actual bin dir npm writes to)
+    try {
+      const globalBinDir = execFileSync('npm', ['bin', '-g'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      const candidate = path.join(globalBinDir, 'instar');
+      if (fs.existsSync(candidate) && !isStaleSource(candidate)) {
+        return { bin: candidate, method: 'npm-bin-g' };
+      }
+    } catch { /* npm bin -g failed */ }
+
+    // Strategy 2: which instar (excludes stale sources)
     try {
       const which = execFileSync('which', ['instar'], {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
       }).trim();
-      if (which && !which.includes('.npm/_npx')) {
-        instarBin = which;
+      if (which && !isStaleSource(which)) {
+        return { bin: which, method: 'which' };
       }
-    } catch { /* not found globally */ }
+    } catch { /* not found in PATH */ }
 
-    // If `which instar` didn't find a global binary, try npm's prefix path directly.
-    // This handles the common case where npm's global bin directory is not in PATH
-    // (automation contexts, fresh shell sessions, custom npm prefixes).
-    if (!instarBin) {
-      try {
-        const npmPrefix = execFileSync('npm', ['prefix', '-g'], {
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-        }).trim();
-        const candidate = `${npmPrefix}/bin/instar`;
-        if (fs.existsSync(candidate)) {
-          instarBin = candidate;
-          console.log(`[AutoUpdater] Found global binary via npm prefix: ${instarBin}`);
-        }
-      } catch { /* npm not available or prefix lookup failed */ }
+    // Strategy 3: npm prefix -g + /bin/instar
+    try {
+      const npmPrefix = execFileSync('npm', ['prefix', '-g'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      const candidate = path.join(npmPrefix, 'bin', 'instar');
+      if (fs.existsSync(candidate) && !isStaleSource(candidate)) {
+        return { bin: candidate, method: 'npm-prefix-g' };
+      }
+    } catch { /* npm prefix failed */ }
+
+    // Strategy 4: Nuclear — find the installed package's main entry point directly.
+    // This bypasses the bin symlink and runs the module's CLI entry with node.
+    try {
+      const globalRoot = execFileSync('npm', ['root', '-g'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      const mainEntry = path.join(globalRoot, 'instar', 'dist', 'cli.js');
+      if (fs.existsSync(mainEntry)) {
+        return { bin: mainEntry, method: 'npm-root-g-direct', useNode: true };
+      }
+    } catch { /* npm root failed */ }
+
+    // Strategy 5: process.argv fallback — only if it's not from a stale source
+    const scriptPath = process.argv[1] || '';
+    if (scriptPath && !isStaleSource(scriptPath)) {
+      return { bin: scriptPath, method: 'process-argv', useNode: true };
     }
 
+    return null;
+  }
+
+  private selfRestart(): void {
+    console.log('[AutoUpdater] Initiating self-restart...');
+
+    const cliArgs = process.argv.slice(2); // skip node + script path
+    const quotedArgs = cliArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
+
+    // Check if we're managed by launchd or systemd — if so, just exit cleanly
+    // and let the service manager handle the restart.
+    const managedByLaunchd = !!process.env.LAUNCHED_BY_LAUNCHD || this.isLaunchdManaged();
+    const managedBySystemd = !!process.env.INVOCATION_ID; // systemd sets this
+
+    if (managedByLaunchd || managedBySystemd) {
+      const manager = managedByLaunchd ? 'launchd' : 'systemd';
+      console.log(`[AutoUpdater] Managed by ${manager} — exiting for automatic restart.`);
+
+      this.writeUpdateRestartFlag();
+      // Just exit — the service manager will restart us from the updated binary
+      process.exit(0);
+      return; // unreachable but makes TypeScript happy
+    }
+
+    // Find the best binary path
+    const found = this.findBestBinary();
     let cmd: string;
-    if (instarBin) {
-      // Use the global binary — guaranteed to be the updated version
-      const quotedArgs = cliArgs.map(a => `'${a.replace(/'/g, "'\\''")}'`).join(' ');
-      cmd = `sleep 2 && exec '${instarBin.replace(/'/g, "'\\''")}' ${quotedArgs}`;
-      console.log(`[AutoUpdater] Will restart from global binary: ${instarBin}`);
-    } else {
-      // No global binary found. If we were running from npx cache, restarting
-      // from process.argv would loop (npx cache is the old version, which would
-      // detect the update again and restart again indefinitely).
-      const scriptPath = process.argv[1] || '';
-      const isNpxCache = scriptPath.includes('.npm/_npx') || scriptPath.includes('/_npx/');
-      if (isNpxCache) {
-        console.error('[AutoUpdater] Update applied but cannot restart — global binary not found in PATH or npm prefix.');
-        console.error('[AutoUpdater] Restarting from npx cache would cause a restart loop.');
-        console.error('[AutoUpdater] Manual restart required: npm install -g instar && instar server start');
-        void this.notify(
-          `I've updated to the latest version, but I wasn't able to restart automatically. ` +
-          `Could you restart me when you get a chance?`
-        );
-        return;
+
+    if (found) {
+      console.log(`[AutoUpdater] Found binary via ${found.method}: ${found.bin}`);
+      const quotedBin = `'${found.bin.replace(/'/g, "'\\''")}'`;
+      if (found.useNode) {
+        cmd = `sleep 2 && exec ${process.execPath} ${quotedBin} ${quotedArgs}`;
+      } else {
+        cmd = `sleep 2 && exec ${quotedBin} ${quotedArgs}`;
       }
-      // Not from npx cache — safe to restart from current path
-      const args = process.argv.slice(1)
-        .map(a => `'${a.replace(/'/g, "'\\''")}'`)
-        .join(' ');
-      cmd = `sleep 2 && exec ${process.execPath} ${args}`;
-      console.log('[AutoUpdater] No global binary found, restarting from current path');
+    } else {
+      // All strategies failed — this is extremely rare. Log it but don't ask the user.
+      console.error('[AutoUpdater] Cannot find any viable binary path for restart.');
+      console.error('[AutoUpdater] Update was applied globally. The server will pick it up on next manual restart.');
+      // Do NOT ask the user to run commands. Just log and continue running.
+      return;
     }
 
     try {
@@ -387,6 +439,23 @@ export class AutoUpdater {
     } catch (err) {
       console.error(`[AutoUpdater] Self-restart failed: ${err}`);
       console.error('[AutoUpdater] Update was applied but manual restart is needed.');
+    }
+  }
+
+  /**
+   * Check if this server process is managed by macOS launchd.
+   * If so, we can just exit and launchd will restart us.
+   */
+  private isLaunchdManaged(): boolean {
+    if (process.platform !== 'darwin') return false;
+    try {
+      // Look for an instar plist in LaunchAgents
+      const plistDir = path.join(process.env.HOME || '', 'Library', 'LaunchAgents');
+      if (!fs.existsSync(plistDir)) return false;
+      const files = fs.readdirSync(plistDir);
+      return files.some(f => f.startsWith('ai.instar.') && f.endsWith('.plist'));
+    } catch {
+      return false;
     }
   }
 
