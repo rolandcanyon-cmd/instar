@@ -37,7 +37,7 @@ export class AnthropicIntelligenceProvider implements IntelligenceProvider {
    * Follows the same graceful degradation pattern as TelegramAdapter's voice providers.
    */
   static fromEnv(): AnthropicIntelligenceProvider | null {
-    const apiKey = process.env['ANTHROPIC_API_KEY'];
+    const apiKey = process.env['ANTHROPIC_API_KEY']?.trim();
     if (!apiKey) {
       return null;
     }

@@ -34,6 +34,8 @@ export class ServerSupervisor extends EventEmitter {
   private spawnedAt = 0;
   private retryCooldownMs = 5 * 60_000; // 5 minutes cooldown after max retries exhausted
   private maxRetriesExhaustedAt = 0;
+  private consecutiveFailures = 0; // Hysteresis: require 2 consecutive failures before marking unhealthy
+  private readonly unhealthyThreshold = 2;
 
   constructor(options: {
     projectDir: string;
@@ -191,11 +193,18 @@ export class ServerSupervisor extends EventEmitter {
           this.isRunning = true;
           this.lastHealthy = Date.now();
           this.restartAttempts = 0;
+          this.consecutiveFailures = 0;
         } else {
-          this.handleUnhealthy();
+          this.consecutiveFailures++;
+          if (this.consecutiveFailures >= this.unhealthyThreshold) {
+            this.handleUnhealthy();
+          }
         }
       } catch {
-        this.handleUnhealthy();
+        this.consecutiveFailures++;
+        if (this.consecutiveFailures >= this.unhealthyThreshold) {
+          this.handleUnhealthy();
+        }
       }
     }, 10_000); // Check every 10 seconds
   }
@@ -229,6 +238,7 @@ export class ServerSupervisor extends EventEmitter {
       this.isRunning = false;
       this.emit('serverDown', 'Health check failed');
     }
+    this.consecutiveFailures = 0; // Reset after triggering action
 
     // After max retries exhausted, wait for cooldown before trying again.
     // This prevents permanent death from transient issues (port conflicts, etc.)
