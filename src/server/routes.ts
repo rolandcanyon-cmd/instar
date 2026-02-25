@@ -35,6 +35,9 @@ import type { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
 import type { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import type { TopicMemory } from '../memory/TopicMemory.js';
 import type { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
+import type { ProjectMapper } from '../core/ProjectMapper.js';
+import type { CoherenceGate } from '../core/CoherenceGate.js';
+import type { HighRiskAction } from '../core/CoherenceGate.js';
 
 export interface RouteContext {
   config: InstarConfig;
@@ -57,6 +60,8 @@ export interface RouteContext {
   triageNurse: StallTriageNurse | null;
   topicMemory: TopicMemory | null;
   feedbackAnomalyDetector: FeedbackAnomalyDetector | null;
+  projectMapper: ProjectMapper | null;
+  coherenceGate: CoherenceGate | null;
   startTime: Date;
 }
 
@@ -538,6 +543,23 @@ export function createRoutes(ctx: RouteContext): Router {
         enabled: true,
         hint: 'Use GET /skip-ledger to avoid re-processing items in jobs.',
       },
+      projectMap: {
+        enabled: !!ctx.projectMapper,
+        hasSavedMap: ctx.projectMapper?.loadSavedMap() !== null,
+        endpoints: ctx.projectMapper ? [
+          'GET /project-map — full project structure (JSON, ?format=markdown, ?format=compact)',
+          'POST /project-map/refresh — regenerate the project map',
+        ] : [],
+      },
+      coherence: {
+        enabled: !!ctx.coherenceGate,
+        endpoints: ctx.coherenceGate ? [
+          'POST /coherence/check — pre-action coherence verification',
+          'POST /coherence/reflect — generate self-reflection prompt',
+          'GET /topic-bindings — list topic-project bindings',
+          'POST /topic-bindings — bind a topic to a project',
+        ] : [],
+      },
       featureGuide: {
         description: 'Context-triggered capability suggestions. Use these proactively when context matches.',
         triggers: [
@@ -552,9 +574,117 @@ export function createRoutes(ctx: RouteContext): Router {
           { context: 'User asks to remember something', action: 'Write to .instar/MEMORY.md. Explain it persists across sessions.' },
           { context: 'Something needs user attention later', action: 'Queue in attention system (POST /attention). More reliable than hoping they see a message.' },
           { context: 'Job processes a list of items', action: 'Use skip ledger (POST /skip-ledger/workload) to avoid re-processing on next run.' },
+          { context: 'About to deploy, push, or modify files outside project', action: 'Run coherence check FIRST (POST /coherence/check). Verify you are in the right project for the current topic.' },
+          { context: 'Working on a topic tied to a specific project', action: 'Check topic-project binding (GET /topic-bindings). If unbound, bind it (POST /topic-bindings) to prevent cross-project confusion.' },
+          { context: 'Unsure what project this is or what files exist', action: 'Check project map (GET /project-map?format=compact) for spatial awareness — project type, key files, deployment targets.' },
         ],
       },
     });
+  });
+
+  // ── Project Map ───────────────────────────────────────────────────
+  //
+  // Auto-generated territory map of the project structure. Agents use this
+  // for spatial awareness — "where am I and what does this project look like?"
+
+  router.get('/project-map', (_req, res) => {
+    if (!ctx.projectMapper) {
+      res.status(501).json({ error: 'ProjectMapper not initialized' });
+      return;
+    }
+
+    // Try to load saved map first; generate if missing
+    let map = ctx.projectMapper.loadSavedMap();
+    if (!map) {
+      map = ctx.projectMapper.generateAndSave();
+    }
+
+    const format = _req.query.format;
+    if (format === 'markdown') {
+      res.type('text/markdown').send(ctx.projectMapper.toMarkdown(map));
+    } else if (format === 'compact') {
+      res.type('text/plain').send(ctx.projectMapper.getCompactSummary(map));
+    } else {
+      res.json(map);
+    }
+  });
+
+  router.post('/project-map/refresh', (_req, res) => {
+    if (!ctx.projectMapper) {
+      res.status(501).json({ error: 'ProjectMapper not initialized' });
+      return;
+    }
+
+    const map = ctx.projectMapper.generateAndSave();
+    res.json({ refreshed: true, projectName: map.projectName, totalFiles: map.totalFiles, directories: map.directories.length });
+  });
+
+  // ── Coherence Gate ────────────────────────────────────────────────
+  //
+  // Pre-action coherence verification. Agents call this before high-risk
+  // actions to verify they're in the right project for the right topic.
+
+  router.post('/coherence/check', (req, res) => {
+    if (!ctx.coherenceGate) {
+      res.status(501).json({ error: 'CoherenceGate not initialized' });
+      return;
+    }
+
+    const { action, context } = req.body;
+    if (!action || typeof action !== 'string') {
+      res.status(400).json({ error: 'Missing required field: action (e.g., "deploy", "git-push")' });
+      return;
+    }
+
+    const result = ctx.coherenceGate.check(action as HighRiskAction, context);
+    res.json(result);
+  });
+
+  router.post('/coherence/reflect', (req, res) => {
+    if (!ctx.coherenceGate) {
+      res.status(501).json({ error: 'CoherenceGate not initialized' });
+      return;
+    }
+
+    const { action, context } = req.body;
+    if (!action || typeof action !== 'string') {
+      res.status(400).json({ error: 'Missing required field: action' });
+      return;
+    }
+
+    const prompt = ctx.coherenceGate.generateReflectionPrompt(action as HighRiskAction, context);
+    res.type('text/plain').send(prompt);
+  });
+
+  // ── Topic-Project Bindings ────────────────────────────────────────
+  //
+  // Manage which Telegram topics are bound to which projects.
+  // Critical for multi-project agents — prevents cross-project confusion.
+
+  router.get('/topic-bindings', (_req, res) => {
+    if (!ctx.coherenceGate) {
+      res.status(501).json({ error: 'CoherenceGate not initialized' });
+      return;
+    }
+
+    const bindings = ctx.coherenceGate.loadTopicBindings();
+    res.json(bindings);
+  });
+
+  router.post('/topic-bindings', (req, res) => {
+    if (!ctx.coherenceGate) {
+      res.status(501).json({ error: 'CoherenceGate not initialized' });
+      return;
+    }
+
+    const { topicId, binding } = req.body;
+    if (!topicId || !binding?.projectName || !binding?.projectDir) {
+      res.status(400).json({ error: 'Required: topicId (number), binding.projectName, binding.projectDir' });
+      return;
+    }
+
+    ctx.coherenceGate.setTopicBinding(Number(topicId), binding);
+    res.json({ bound: true, topicId: Number(topicId), binding });
   });
 
   // ── CI Health ─────────────────────────────────────────────────────

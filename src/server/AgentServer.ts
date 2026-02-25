@@ -70,6 +70,8 @@ export class AgentServer {
     triageNurse?: StallTriageNurse;
     topicMemory?: TopicMemory;
     feedbackAnomalyDetector?: FeedbackAnomalyDetector;
+    projectMapper?: import('../core/ProjectMapper.js').ProjectMapper;
+    coherenceGate?: import('../core/CoherenceGate.js').CoherenceGate;
     coordinator?: MultiMachineCoordinator;
     localSigningKeyPem?: string;
   }) {
@@ -192,6 +194,8 @@ export class AgentServer {
       triageNurse: options.triageNurse ?? null,
       topicMemory: options.topicMemory ?? null,
       feedbackAnomalyDetector: options.feedbackAnomalyDetector ?? null,
+      projectMapper: options.projectMapper ?? null,
+      coherenceGate: options.coherenceGate ?? null,
       startTime: this.startTime,
     });
     this.app.use(routes);

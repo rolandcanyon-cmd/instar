@@ -70,6 +70,10 @@ export { GitSyncManager, mergeRelationship } from './core/GitSync.js';
 export type { GitSyncConfig, SyncResult } from './core/GitSync.js';
 export type { MigrationResult as SecretMigrationResult } from './core/SecretMigrator.js';
 export { GitStateManager } from './core/GitStateManager.js';
+export { ProjectMapper } from './core/ProjectMapper.js';
+export type { ProjectMapConfig, ProjectMap, ProjectMapEntry } from './core/ProjectMapper.js';
+export { CoherenceGate } from './core/CoherenceGate.js';
+export type { CoherenceGateConfig, CoherenceCheckResult, CoherenceCheck, TopicProjectBinding, HighRiskAction } from './core/CoherenceGate.js';
 
 // Memory
 export { MemoryIndex } from './memory/MemoryIndex.js';

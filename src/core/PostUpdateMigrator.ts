@@ -265,6 +265,39 @@ Strip the \`[telegram:N]\` prefix before interpreting the message. Respond natur
       result.skipped.push('CLAUDE.md: Dashboard section already present');
     }
 
+    // Coherence Gate section — pre-action verification for high-risk actions
+    if (!content.includes('Coherence Gate') && !content.includes('/coherence/check')) {
+      const section = `
+### Coherence Gate (Pre-Action Verification)
+
+**BEFORE any high-risk action** (deploying, pushing to git, modifying files outside this project, calling external APIs):
+
+1. **Check coherence**: \`curl -X POST http://localhost:${port}/coherence/check -H 'Content-Type: application/json' -d '{"action":"deploy","context":{"topicId":TOPIC_ID}}'\`
+2. **If result says "block"** — STOP. You may be working on the wrong project for this topic.
+3. **If result says "warn"** — Pause and verify before proceeding.
+4. **Generate a reflection prompt**: \`POST http://localhost:${port}/coherence/reflect\` — produces a self-verification checklist.
+
+**Topic-Project Bindings**: Each Telegram topic can be bound to a specific project. When switching topics, verify the binding matches your current working directory.
+- View bindings: \`GET http://localhost:${port}/topic-bindings\`
+- Create binding: \`POST http://localhost:${port}/topic-bindings\` with \`{"topicId": N, "binding": {"projectName": "...", "projectDir": "..."}}\`
+
+**Project Map**: Your spatial awareness of the working environment.
+- View: \`GET http://localhost:${port}/project-map?format=compact\`
+- Refresh: \`POST http://localhost:${port}/project-map/refresh\`
+`;
+      // Insert before Scripts or append
+      const insertBefore = content.indexOf('**Scripts**');
+      if (insertBefore >= 0) {
+        content = content.slice(0, insertBefore) + section + '\n' + content.slice(insertBefore);
+      } else {
+        content += '\n' + section;
+      }
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Coherence Gate section');
+    } else {
+      result.skipped.push('CLAUDE.md: Coherence Gate section already present');
+    }
+
     if (patched) {
       try {
         fs.writeFileSync(claudeMdPath, content);
@@ -544,12 +577,53 @@ if [ -f "$INSTAR_DIR/AGENT.md" ]; then
   sed -n '/^## Personality/,/^## [^P]/p' "$INSTAR_DIR/AGENT.md" 2>/dev/null | head -10
 fi
 
+# PROJECT MAP — spatial awareness of the working environment
+if [ -f "$INSTAR_DIR/project-map.json" ]; then
+  echo ""
+  echo "--- PROJECT CONTEXT ---"
+  python3 -c "
+import json, sys
+try:
+    m = json.load(open('$INSTAR_DIR/project-map.json'))
+    print(f'Project: {m[\"projectName\"]} ({m[\"projectType\"]})')
+    print(f'Path: {m[\"projectDir\"]}')
+    r = m.get('gitRemote')
+    b = m.get('gitBranch')
+    if r: print(f'Git: {r}' + (f' [{b}]' if b else ''))
+    t = m.get('deploymentTargets', [])
+    if t: print(f'Deploy targets: {(\", \").join(t)}')
+    d = m.get('directories', [])
+    print(f'Files: {m[\"totalFiles\"]} across {len(d)} directories')
+    for dd in d[:6]:
+        print(f'  {dd[\"name\"]}/ ({dd[\"fileCount\"]}) — {dd[\"description\"]}')
+    if len(d) > 6: print(f'  ... and {len(d) - 6} more')
+except Exception as e:
+    print(f'(project map load failed: {e})', file=sys.stderr)
+" 2>/dev/null
+  echo "--- END PROJECT CONTEXT ---"
+fi
+
+# COHERENCE SCOPE — before ANY high-risk action, verify alignment
+if [ -f "$INSTAR_DIR/config.json" ]; then
+  echo ""
+  echo "--- COHERENCE SCOPE ---"
+  echo "BEFORE deploying, pushing, or modifying files outside this project:"
+  echo "  1. Verify you are in the RIGHT project for the current topic/task"
+  echo "  2. Check: curl -X POST http://localhost:\${PORT:-4040}/coherence/check \\\\"
+  echo "       -H 'Content-Type: application/json' \\\\"
+  echo "       -d '{\"action\":\"deploy\",\"context\":{\"topicId\":N}}'"
+  echo "  3. If the check says BLOCK — STOP. You may be in the wrong project."
+  echo "  4. Read the full reflection: POST /coherence/reflect"
+  echo "--- END COHERENCE SCOPE ---"
+fi
+
 # Key files
 echo ""
 echo "Key files:"
 [ -f "$INSTAR_DIR/AGENT.md" ] && echo "  .instar/AGENT.md — Your identity (read for full context)"
 [ -f "$INSTAR_DIR/USER.md" ] && echo "  .instar/USER.md — Your collaborator"
 [ -f "$INSTAR_DIR/MEMORY.md" ] && echo "  .instar/MEMORY.md — Persistent learnings"
+[ -f "$INSTAR_DIR/project-map.md" ] && echo "  .instar/project-map.md — Project structure map"
 
 # Relationship count
 if [ -d "$INSTAR_DIR/relationships" ]; then
@@ -678,6 +752,29 @@ for pattern in "rm -rf /" "rm -rf ~" "> /dev/sda" "mkfs\\." "dd if=" ":(){:|:&};
   fi
 done
 
+# Deployment/push commands — check coherence gate first
+for pattern in "vercel deploy" "vercel --prod" "git push" "npm publish" "npx wrangler deploy" "fly deploy" "railway up"; do
+  if echo "$INPUT" | grep -qi "$pattern"; then
+    if [ -f "$INSTAR_DIR/config.json" ]; then
+      PORT=$(python3 -c "import json; print(json.load(open('$INSTAR_DIR/config.json')).get('port', 4040))" 2>/dev/null || echo "4040")
+      TOPIC_ID="\${INSTAR_TELEGRAM_TOPIC:-}"
+      ACTION="deploy"
+      echo "$INPUT" | grep -qi "git push" && ACTION="git-push"
+      echo "$INPUT" | grep -qi "npm publish" && ACTION="git-push"
+      CTX="{}"
+      [ -n "$TOPIC_ID" ] && CTX="{\\\"topicId\\\": $TOPIC_ID}"
+      CHECK=$(curl -s -X POST "http://localhost:$PORT/coherence/check" -H 'Content-Type: application/json' -d "{\\\"action\\\":\\\"$ACTION\\\",\\\"context\\\":$CTX}" 2>/dev/null)
+      if echo "$CHECK" | grep -q '"recommendation":"block"'; then
+        SUMMARY=$(echo "$CHECK" | python3 -c "import sys,json; print(json.load(sys.stdin).get('summary','Coherence check failed'))" 2>/dev/null || echo "Coherence check failed")
+        echo "BLOCKED: Coherence gate blocked this action." >&2
+        echo "$SUMMARY" >&2
+        echo "Run POST /coherence/reflect for a detailed self-verification checklist." >&2
+        exit 2
+      fi
+    fi
+  fi
+done
+
 # Risky commands — behavior depends on safety level
 for pattern in "rm -rf \\." "git push --force" "git push -f" "git reset --hard" "git clean -fd" "DROP TABLE" "DROP DATABASE" "TRUNCATE" "DELETE FROM"; do
   if echo "$INPUT" | grep -qi "$pattern"; then
@@ -785,6 +882,28 @@ if [ -f "\$INSTAR_DIR/AGENT.md" ]; then
   cat "\$INSTAR_DIR/AGENT.md"
   echo ""
   echo "--- End Identity ---"
+fi
+
+# ── 2b. PROJECT CONTEXT (where am I working?) ──
+if [ -f "\$INSTAR_DIR/project-map.json" ]; then
+  echo ""
+  echo "--- PROJECT CONTEXT ---"
+  python3 -c "
+import json, sys
+try:
+    m = json.load(open('\$INSTAR_DIR/project-map.json'))
+    print(f'Project: {m[\"projectName\"]} ({m[\"projectType\"]})')
+    print(f'Path: {m[\"projectDir\"]}')
+    r = m.get('gitRemote')
+    b = m.get('gitBranch')
+    if r: print(f'Git: {r}' + (f' [{b}]' if b else ''))
+    t = m.get('deploymentTargets', [])
+    if t: print(f'Deploy targets: {(\", \").join(t)}')
+    print(f'Files: {m[\"totalFiles\"]} across {len(m.get(\"directories\", []))} directories')
+except Exception as e:
+    print(f'(project map load failed: {e})', file=sys.stderr)
+" 2>/dev/null
+  echo "--- END PROJECT CONTEXT ---"
 fi
 
 # ── 3. MEMORY (first 50 lines — what have I learned?) ──

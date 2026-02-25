@@ -46,6 +46,8 @@ import { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import { MultiMachineCoordinator } from '../core/MultiMachineCoordinator.js';
 import { MachineIdentityManager } from '../core/MachineIdentity.js';
 import { GitSyncManager } from '../core/GitSync.js';
+import { ProjectMapper } from '../core/ProjectMapper.js';
+import { CoherenceGate } from '../core/CoherenceGate.js';
 import type { Message } from '../core/types.js';
 // setup.ts uses @inquirer/prompts which requires Node 20.12+
 // Dynamic import to avoid breaking the server on older Node versions
@@ -1308,7 +1310,24 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     sleepWakeDetector.start();
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    // Project Map + Coherence Gate — spatial awareness and pre-action verification
+    const projectMapper = new ProjectMapper({ projectDir: config.projectDir, stateDir: config.stateDir });
+    try {
+      projectMapper.generateAndSave();
+      console.log(pc.green('  Project map generated'));
+    } catch (err) {
+      console.error(`  Project map generation failed (non-critical): ${err instanceof Error ? err.message : err}`);
+    }
+
+    const coherenceGate = new CoherenceGate({
+      projectDir: config.projectDir,
+      stateDir: config.stateDir,
+      projectName: config.projectName,
+    });
+    // Load any persisted topic-project bindings
+    coherenceGate.loadTopicBindings();
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Start tunnel AFTER server is listening
