@@ -297,6 +297,11 @@ This routes feedback to the Instar maintainers automatically. Valid types: \`bug
 **Quota Tracking** — Monitor Claude API usage when configured.
 - Check: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/quota\`
 
+**Stall Triage** — LLM-powered session recovery when configured. Automatically diagnoses and recovers stuck sessions.
+- Status: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/triage/status\`
+- History: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/triage/history\`
+- Manual trigger: \`curl -X POST -H "Authorization: Bearer $AUTH" -H "Content-Type: application/json" -d '{"sessionName":"NAME","topicId":123}' http://localhost:${port}/triage/trigger\`
+
 **Event Stream (SSE)** — Real-time server events via Server-Sent Events. Useful for monitoring activity in real-time.
 - Connect: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/events\`
 

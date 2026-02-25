@@ -181,6 +181,8 @@ export class TelegramAdapter implements MessagingAdapter {
   public onQuotaStatusRequest: ((replyTopicId: number) => Promise<void>) | null = null;
   public onLoginRequest: ((email: string | null, replyTopicId: number) => Promise<void>) | null = null;
   public onClassifySessionDeath: ((sessionName: string) => Promise<{ cause: string; detail: string } | null>) | null = null;
+  /** LLM-powered stall triage — called instead of generic stall alert when set */
+  public onStallDetected: ((topicId: number, sessionName: string, messageText: string, injectedAt: number) => Promise<{ resolved: boolean }>) | null = null;
 
   // Unknown user handling callbacks (Multi-User Setup Wizard Phase 4.5)
   // Returns the registration policy and optional contact hint for the gated message
@@ -688,6 +690,22 @@ export class TelegramAdapter implements MessagingAdapter {
       }
 
       pending.alerted = true;
+
+      // Try LLM-powered triage first if available
+      if (this.onStallDetected) {
+        try {
+          const triageResult = await this.onStallDetected(
+            pending.topicId, pending.sessionName, pending.messageText, pending.injectedAt,
+          );
+          if (triageResult.resolved) {
+            this.pendingMessages.delete(key);
+            continue; // Nurse handled it
+          }
+          // Nurse couldn't resolve — fall through to quota check / generic alert
+        } catch (err) {
+          console.warn(`[telegram] Triage nurse error:`, err);
+        }
+      }
 
       // Classify the stall — check if it's a quota death
       let isQuotaDeath = false;

@@ -13,12 +13,14 @@ import type { SessionManager } from '../core/SessionManager.js';
 import type { JobScheduler } from '../scheduler/JobScheduler.js';
 import type { HealthStatus, ComponentHealth, InstarConfig } from '../core/types.js';
 import type { SessionWatchdog } from './SessionWatchdog.js';
+import type { StallTriageNurse } from './StallTriageNurse.js';
 
 export class HealthChecker {
   private config: InstarConfig;
   private sessionManager: SessionManager;
   private scheduler: JobScheduler | null;
   private watchdog: SessionWatchdog | null;
+  private triageNurse: StallTriageNurse | null;
   private checkInterval: ReturnType<typeof setInterval> | null = null;
   private lastStatus: HealthStatus | null = null;
 
@@ -27,11 +29,13 @@ export class HealthChecker {
     sessionManager: SessionManager,
     scheduler: JobScheduler | null = null,
     watchdog: SessionWatchdog | null = null,
+    triageNurse: StallTriageNurse | null = null,
   ) {
     this.config = config;
     this.sessionManager = sessionManager;
     this.scheduler = scheduler;
     this.watchdog = watchdog;
+    this.triageNurse = triageNurse;
   }
 
   /**
@@ -57,6 +61,17 @@ export class HealthChecker {
         message: intervening.length > 0
           ? `Intervening on ${intervening.length} session(s)`
           : `Monitoring${wdStatus.enabled ? '' : ' (disabled)'}`,
+        lastCheck: new Date().toISOString(),
+      };
+    }
+
+    if (this.triageNurse) {
+      const triageStatus = this.triageNurse.getStatus();
+      components.triage = {
+        status: triageStatus.activeCases > 0 ? 'degraded' : 'healthy',
+        message: triageStatus.activeCases > 0
+          ? `Triaging ${triageStatus.activeCases} case(s)`
+          : `Ready (${triageStatus.historyCount} past triages)`,
         lastCheck: new Date().toISOString(),
       };
     }

@@ -109,6 +109,8 @@ export type { RemoteQuotaResult } from './monitoring/QuotaTracker.js';
 export { classifySessionDeath } from './monitoring/QuotaExhaustionDetector.js';
 export { AccountSwitcher } from './monitoring/AccountSwitcher.js';
 export { QuotaNotifier } from './monitoring/QuotaNotifier.js';
+export { StallTriageNurse } from './monitoring/StallTriageNurse.js';
+export type { StallTriageConfig, TreatmentAction, TriageDiagnosis, TriageContext, TriageResult, TriageRecord, TriageEvents, TriageDeps } from './monitoring/StallTriageNurse.types.js';
 export { SleepWakeDetector } from './core/SleepWakeDetector.js';
 
 // Messaging

@@ -32,6 +32,7 @@ import type { TunnelManager } from '../tunnel/TunnelManager.js';
 import type { EvolutionManager } from '../core/EvolutionManager.js';
 import type { EvolutionStatus, EvolutionType, GapCategory } from '../core/types.js';
 import type { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
+import type { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import type { TopicMemory } from '../memory/TopicMemory.js';
 
 export interface RouteContext {
@@ -52,6 +53,7 @@ export interface RouteContext {
   tunnel: TunnelManager | null;
   evolution: EvolutionManager | null;
   watchdog: SessionWatchdog | null;
+  triageNurse: StallTriageNurse | null;
   topicMemory: TopicMemory | null;
   startTime: Date;
 }
@@ -2610,6 +2612,39 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(201).json(entry);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to log decision' });
+    }
+  });
+
+  // ── Triage ───────────────────────────────────────────────────────
+
+  router.get('/triage/status', (_req, res) => {
+    if (!ctx.triageNurse) {
+      return res.json({ enabled: false });
+    }
+    res.json(ctx.triageNurse.getStatus());
+  });
+
+  router.get('/triage/history', (req, res) => {
+    if (!ctx.triageNurse) {
+      return res.json([]);
+    }
+    const limit = parseInt(req.query.limit as string) || 20;
+    res.json(ctx.triageNurse.getHistory(limit));
+  });
+
+  router.post('/triage/trigger', async (req, res) => {
+    if (!ctx.triageNurse) {
+      return res.status(400).json({ error: 'Triage nurse not enabled' });
+    }
+    const { sessionName, topicId } = req.body;
+    if (!sessionName || !topicId) {
+      return res.status(400).json({ error: 'sessionName and topicId required' });
+    }
+    try {
+      const result = await ctx.triageNurse.triage(topicId, sessionName, '(manual trigger)', Date.now(), 'manual');
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Triage failed' });
     }
   });
 

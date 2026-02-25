@@ -41,6 +41,7 @@ import { AccountSwitcher } from '../monitoring/AccountSwitcher.js';
 import { QuotaNotifier } from '../monitoring/QuotaNotifier.js';
 import { classifySessionDeath } from '../monitoring/QuotaExhaustionDetector.js';
 import { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
+import { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import { MultiMachineCoordinator } from '../core/MultiMachineCoordinator.js';
 import { MachineIdentityManager } from '../core/MachineIdentity.js';
 import { GitSyncManager } from '../core/GitSync.js';
@@ -1082,6 +1083,45 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Session Watchdog enabled'));
     }
 
+    // StallTriageNurse — LLM-powered session recovery
+    let triageNurse: StallTriageNurse | undefined;
+    if (config.monitoring.triage?.enabled && telegram) {
+      triageNurse = new StallTriageNurse(
+        {
+          captureSessionOutput: (name, lines) => sessionManager.captureOutput(name, lines),
+          isSessionAlive: (name) => sessionManager.isSessionAlive(name),
+          sendKey: (name, key) => sessionManager.sendKey(name, key),
+          sendInput: (name, text) => sessionManager.sendInput(name, text),
+          getTopicHistory: (topicId, limit) => {
+            const entries = telegram!.getTopicHistory(topicId, limit);
+            return entries.map(e => ({
+              text: e.text,
+              fromUser: e.fromUser,
+              timestamp: e.timestamp,
+            }));
+          },
+          sendToTopic: (topicId, text) => telegram!.sendToTopic(topicId, text),
+          respawnSession: (name, topicId) => respawnSessionForTopic(sessionManager, telegram!, name, topicId, undefined, topicMemory),
+          clearStallForTopic: (topicId) => {
+            // Access the TelegramAdapter's internal stall tracking
+            // The sendToTopic call from the nurse will clear it naturally
+          },
+        },
+        {
+          config: config.monitoring.triage,
+          state,
+        },
+      );
+
+      // Wire nurse into TelegramAdapter stall detection
+      telegram.onStallDetected = async (topicId, sessionName, messageText, injectedAt) => {
+        const result = await triageNurse!.triage(topicId, sessionName, messageText, injectedAt, 'telegram_stall');
+        return { resolved: result.resolved };
+      };
+
+      console.log(pc.green('  Stall Triage Nurse enabled'));
+    }
+
     // Set up feedback and update checking
     let feedback: FeedbackManager | undefined;
     if (config.feedback) {
@@ -1265,7 +1305,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     sleepWakeDetector.start();
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Start tunnel AFTER server is listening

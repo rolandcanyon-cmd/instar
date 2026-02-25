@@ -1046,6 +1046,20 @@ export interface MonitoringConfig {
     /** Poll interval in ms (default: 30000) */
     pollIntervalMs?: number;
   };
+  /** LLM-powered stall triage nurse — intelligent session recovery */
+  triage?: {
+    enabled: boolean;
+    /** Anthropic API key (falls back to env) */
+    apiKey?: string;
+    /** Cooldown between triages for same topic in ms (default: 180000) */
+    cooldownMs?: number;
+    /** Delay before verifying action worked in ms (default: 10000) */
+    verifyDelayMs?: number;
+    /** Max escalation attempts (default: 2) */
+    maxEscalations?: number;
+    /** Use IntelligenceProvider instead of direct API (default: true) */
+    useIntelligenceProvider?: boolean;
+  };
 }
 
 /** @deprecated Use InstarConfig instead */
