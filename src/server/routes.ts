@@ -34,6 +34,7 @@ import type { EvolutionStatus, EvolutionType, GapCategory } from '../core/types.
 import type { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
 import type { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import type { TopicMemory } from '../memory/TopicMemory.js';
+import type { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 
 export interface RouteContext {
   config: InstarConfig;
@@ -55,6 +56,7 @@ export interface RouteContext {
   watchdog: SessionWatchdog | null;
   triageNurse: StallTriageNurse | null;
   topicMemory: TopicMemory | null;
+  feedbackAnomalyDetector: FeedbackAnomalyDetector | null;
   startTime: Date;
 }
 
@@ -1214,7 +1216,8 @@ export function createRoutes(ctx: RouteContext): Router {
 
   // ── Feedback ────────────────────────────────────────────────────
 
-  router.post('/feedback', async (req, res) => {
+  const feedbackLimiter = rateLimiter(60_000, 10);
+  router.post('/feedback', feedbackLimiter, async (req, res) => {
     if (!ctx.feedback) {
       res.status(503).json({ error: 'Feedback not configured' });
       return;
@@ -1237,6 +1240,26 @@ export function createRoutes(ctx: RouteContext): Router {
     const validTypes = ['bug', 'feature', 'improvement', 'question', 'other'];
     const feedbackType = validTypes.includes(type) ? type : 'other';
 
+    // Semantic quality validation
+    const quality = ctx.feedback.validateFeedbackQuality(title, description);
+    if (!quality.valid) {
+      res.status(422).json({ error: quality.reason });
+      return;
+    }
+
+    // Anomaly detection — check submission patterns before storing
+    if (ctx.feedbackAnomalyDetector) {
+      const agentPseudonym = ctx.feedback.generatePseudonym(ctx.config.projectName);
+      const anomalyCheck = ctx.feedbackAnomalyDetector.check(agentPseudonym);
+      if (!anomalyCheck.allowed) {
+        res.status(429).json({
+          error: anomalyCheck.reason,
+          anomalyType: anomalyCheck.anomalyType,
+        });
+        return;
+      }
+    }
+
     try {
       const item = await ctx.feedback.submit({
         type: feedbackType,
@@ -1248,6 +1271,11 @@ export function createRoutes(ctx: RouteContext): Router {
         nodeVersion: process.version,
         os: `${process.platform} ${process.arch}`,
       });
+
+      // Record submission for anomaly tracking
+      if (ctx.feedbackAnomalyDetector && item.agentPseudonym) {
+        ctx.feedbackAnomalyDetector.recordSubmission(item.agentPseudonym);
+      }
 
       res.status(201).json({
         ok: true,
@@ -1463,6 +1491,55 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     res.json({ evaluated: true, decision });
+  });
+
+  router.post('/dispatches/:id/approve', (req, res) => {
+    if (!ctx.dispatches) {
+      res.status(503).json({ error: 'Dispatch system not configured' });
+      return;
+    }
+
+    const success = ctx.dispatches.approve(req.params.id);
+    if (!success) {
+      res.status(404).json({ error: 'Dispatch not found or not pending approval' });
+      return;
+    }
+
+    res.json({ approved: true, dispatchId: req.params.id });
+  });
+
+  router.post('/dispatches/:id/reject', (req, res) => {
+    if (!ctx.dispatches) {
+      res.status(503).json({ error: 'Dispatch system not configured' });
+      return;
+    }
+
+    const { reason } = req.body as { reason?: string };
+    if (!reason || typeof reason !== 'string' || reason.length < 1) {
+      res.status(400).json({ error: '"reason" must be a non-empty string' });
+      return;
+    }
+    if (reason.length > 2000) {
+      res.status(400).json({ error: '"reason" must be under 2000 characters' });
+      return;
+    }
+
+    const success = ctx.dispatches.reject(req.params.id, reason);
+    if (!success) {
+      res.status(404).json({ error: 'Dispatch not found or not pending approval' });
+      return;
+    }
+
+    res.json({ rejected: true, dispatchId: req.params.id, reason });
+  });
+
+  router.get('/dispatches/pending-approval', (_req, res) => {
+    if (!ctx.dispatches) {
+      res.json({ dispatches: [] });
+      return;
+    }
+
+    res.json({ dispatches: ctx.dispatches.pendingApproval() });
   });
 
   router.get('/dispatches/applied', (_req, res) => {

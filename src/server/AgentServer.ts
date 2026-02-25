@@ -34,6 +34,7 @@ import type { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
 import type { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import type { MultiMachineCoordinator } from '../core/MultiMachineCoordinator.js';
 import type { TopicMemory } from '../memory/TopicMemory.js';
+import type { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 import { createRoutes } from './routes.js';
 import { createMachineRoutes } from './machineRoutes.js';
 import { corsMiddleware, authMiddleware, requestTimeout, errorHandler } from './middleware.js';
@@ -68,6 +69,7 @@ export class AgentServer {
     watchdog?: SessionWatchdog;
     triageNurse?: StallTriageNurse;
     topicMemory?: TopicMemory;
+    feedbackAnomalyDetector?: FeedbackAnomalyDetector;
     coordinator?: MultiMachineCoordinator;
     localSigningKeyPem?: string;
   }) {
@@ -189,6 +191,7 @@ export class AgentServer {
       watchdog: options.watchdog ?? null,
       triageNurse: options.triageNurse ?? null,
       topicMemory: options.topicMemory ?? null,
+      feedbackAnomalyDetector: options.feedbackAnomalyDetector ?? null,
       startTime: this.startTime,
     });
     this.app.use(routes);

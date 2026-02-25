@@ -203,16 +203,22 @@ export class AutoDispatcher {
         }
       }
 
-      // Step 3: Notify about any remaining unapplied dispatches
-      const remaining = this.dispatches.pending();
-      if (remaining.length > 0) {
-        const securityDispatches = remaining.filter(d => d.type === 'security');
-        if (securityDispatches.length > 0) {
-          await this.notify(
-            `Heads up — I received a security-related update that I'd like you to review before I apply it. ` +
-            `Nothing urgent, just being careful.`
-          );
+      // Step 3: Gate security and behavioral dispatches for human approval
+      const APPROVAL_REQUIRED_TYPES: ReadonlySet<string> = new Set(['security', 'behavioral']);
+      const needsApproval = result.dispatches.filter(
+        d => APPROVAL_REQUIRED_TYPES.has(d.type) && !d.applied
+      );
+      if (needsApproval.length > 0) {
+        for (const dispatch of needsApproval) {
+          this.dispatches.markPendingApproval(dispatch.dispatchId);
         }
+
+        const typeLabels = [...new Set(needsApproval.map(d => d.type))].join('/');
+        const ids = needsApproval.map(d => d.dispatchId).join(', ');
+        await this.notify(
+          `I received ${needsApproval.length} ${typeLabels} dispatch(es) that need your approval ` +
+          `before I can apply them. IDs: ${ids}`
+        );
       }
 
       this.saveState();

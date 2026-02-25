@@ -127,8 +127,8 @@ describe('Feedback Routes', () => {
         .post('/feedback')
         .send({
           type: 'invalid-type',
-          title: 'Test',
-          description: 'Testing invalid type',
+          title: 'Test invalid type handling',
+          description: 'Testing that an invalid feedback type defaults to other correctly',
         });
 
       expect(res.status).toBe(201);
@@ -144,8 +144,8 @@ describe('Feedback Routes', () => {
         .post('/feedback')
         .send({
           type: 'feature',
-          title: 'Need something',
-          description: 'Details here',
+          title: 'Need something new in the system',
+          description: 'We need a feature that provides detailed agent metadata tracking',
         });
 
       // Check that the stored feedback has system info

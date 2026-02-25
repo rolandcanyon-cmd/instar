@@ -14,16 +14,26 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID, createHmac } from 'node:crypto';
+import { randomUUID, createHmac, createHash } from 'node:crypto';
 import type { FeedbackItem, FeedbackConfig } from './types.js';
 
 /** Maximum number of feedback items stored locally. */
 const MAX_FEEDBACK_ITEMS = 1000;
 
+/** Default salt for pseudonym generation when no shared secret is configured. */
+const DEFAULT_PSEUDONYM_SALT = 'instar-default-salt';
+
+export interface FeedbackQualityResult {
+  valid: boolean;
+  reason?: string;
+}
+
 export class FeedbackManager {
   private config: FeedbackConfig;
   private feedbackFile: string;
   private version: string;
+  /** Cache of agentName -> pseudonym for resolvePseudonym reverse lookups */
+  private pseudonymMap: Map<string, string> = new Map();
 
   constructor(config: FeedbackConfig) {
     if (config.webhookUrl) {
@@ -75,12 +85,79 @@ export class FeedbackManager {
   }
 
   /**
+   * Validate feedback content quality.
+   * Checks for whitespace-only input, minimum description length, and duplicate titles.
+   */
+  validateFeedbackQuality(title: string, description: string): FeedbackQualityResult {
+    // Title must not be just whitespace
+    if (!title.trim()) {
+      return { valid: false, reason: 'Title must contain non-whitespace content' };
+    }
+
+    // Description must have at least 20 chars of real content (strip whitespace/punctuation)
+    const realContent = description.replace(/[\s\p{P}]/gu, '');
+    if (realContent.length < 20) {
+      return { valid: false, reason: 'Description must contain at least 20 characters of real content' };
+    }
+
+    // Check for duplicate titles against last 50 items
+    const recent = this.loadFeedback().slice(-50);
+    const normalizedTitle = title.trim().toLowerCase();
+    const isDuplicate = recent.some(f => f.title.trim().toLowerCase() === normalizedTitle);
+    if (isDuplicate) {
+      return { valid: false, reason: 'A feedback item with this title already exists' };
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Generate a stable pseudonym for an agent name.
+   * Uses SHA-256 of (agentName + secret), truncated to 12 hex chars, prefixed with "agent-".
+   */
+  generatePseudonym(agentName: string): string {
+    const secret = this.config.sharedSecret || DEFAULT_PSEUDONYM_SALT;
+    const hash = createHash('sha256').update(agentName + secret).digest('hex');
+    const pseudonym = `agent-${hash.slice(0, 12)}`;
+    // Cache the mapping for reverse lookups
+    this.pseudonymMap.set(pseudonym, agentName);
+    return pseudonym;
+  }
+
+  /**
+   * Resolve a pseudonym back to the real agent name.
+   * Only works locally since it requires the cached mapping (which needs the secret).
+   */
+  resolvePseudonym(pseudonym: string): string | null {
+    // Check in-memory cache first
+    if (this.pseudonymMap.has(pseudonym)) {
+      return this.pseudonymMap.get(pseudonym)!;
+    }
+
+    // Rebuild cache from stored feedback
+    const items = this.loadFeedback();
+    for (const item of items) {
+      if (item.agentName) {
+        const generated = this.generatePseudonym(item.agentName);
+        if (generated === pseudonym) {
+          return item.agentName;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Submit feedback — stores locally and forwards to webhook.
    */
-  async submit(item: Omit<FeedbackItem, 'id' | 'submittedAt' | 'forwarded'>): Promise<FeedbackItem> {
+  async submit(item: Omit<FeedbackItem, 'id' | 'submittedAt' | 'forwarded' | 'agentPseudonym'>): Promise<FeedbackItem> {
+    const agentPseudonym = this.generatePseudonym(item.agentName);
+
     const feedback: FeedbackItem = {
       ...item,
       id: `fb-${randomUUID().slice(0, 12)}`,
+      agentPseudonym,
       submittedAt: new Date().toISOString(),
       forwarded: false,
     };
@@ -94,6 +171,7 @@ export class FeedbackManager {
           title: feedback.title,
           description: feedback.description,
           agentName: feedback.agentName,
+          agentPseudonym,
           instarVersion: this.version,
           nodeVersion: process.version,
           os: feedback.os,

@@ -31,6 +31,8 @@ export interface Dispatch {
   receivedAt: string;
   /** Whether this dispatch has been acknowledged/applied */
   applied: boolean;
+  /** Whether this dispatch is awaiting human approval before processing */
+  pendingApproval?: boolean;
   /** Evaluation decision (Phase 2) */
   evaluation?: DispatchEvaluation;
   /** Feedback on dispatch effectiveness (Phase 3) */
@@ -242,10 +244,73 @@ export class DispatchManager {
   }
 
   /**
-   * List only unapplied dispatches.
+   * List only unapplied dispatches (includes those pending approval).
    */
   pending(): Dispatch[] {
     return this.loadDispatches().filter(d => !d.applied);
+  }
+
+  /**
+   * List only dispatches awaiting human approval.
+   */
+  pendingApproval(): Dispatch[] {
+    return this.loadDispatches().filter(d => d.pendingApproval === true && !d.applied);
+  }
+
+  /**
+   * Approve a dispatch that was pending human sign-off.
+   * Clears pendingApproval and marks as applied with an accepted evaluation.
+   */
+  approve(dispatchId: string): boolean {
+    const dispatches = this.loadDispatches();
+    const dispatch = dispatches.find(d => d.dispatchId === dispatchId);
+    if (!dispatch || !dispatch.pendingApproval) return false;
+
+    dispatch.pendingApproval = false;
+    dispatch.applied = true;
+    dispatch.evaluation = {
+      decision: 'accepted',
+      reason: 'Human-approved',
+      evaluatedAt: new Date().toISOString(),
+      auto: false,
+    };
+
+    this.saveDispatches(dispatches);
+    this.rebuildContextFile();
+    return true;
+  }
+
+  /**
+   * Reject a dispatch that was pending human sign-off.
+   * Clears pendingApproval and records a rejection evaluation.
+   */
+  reject(dispatchId: string, reason: string): boolean {
+    const dispatches = this.loadDispatches();
+    const dispatch = dispatches.find(d => d.dispatchId === dispatchId);
+    if (!dispatch || !dispatch.pendingApproval) return false;
+
+    dispatch.pendingApproval = false;
+    dispatch.evaluation = {
+      decision: 'rejected',
+      reason,
+      evaluatedAt: new Date().toISOString(),
+      auto: false,
+    };
+
+    this.saveDispatches(dispatches);
+    return true;
+  }
+
+  /**
+   * Mark a dispatch as pending human approval.
+   */
+  markPendingApproval(dispatchId: string): boolean {
+    const dispatches = this.loadDispatches();
+    const dispatch = dispatches.find(d => d.dispatchId === dispatchId);
+    if (!dispatch) return false;
+    dispatch.pendingApproval = true;
+    this.saveDispatches(dispatches);
+    return true;
   }
 
   /**

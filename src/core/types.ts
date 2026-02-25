@@ -446,6 +446,8 @@ export interface FeedbackItem {
   description: string;
   /** Agent name that submitted this */
   agentName: string;
+  /** Pseudonymized agent identifier — stable hash, not reversible without shared secret */
+  agentPseudonym?: string;
   /** Instar version the agent is running */
   instarVersion: string;
   /** Node.js version */

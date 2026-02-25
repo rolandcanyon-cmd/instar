@@ -11,6 +11,7 @@ export { RelationshipManager } from './core/RelationshipManager.js';
 export { ClaudeCliIntelligenceProvider } from './core/ClaudeCliIntelligenceProvider.js';
 export { AnthropicIntelligenceProvider } from './core/AnthropicIntelligenceProvider.js';
 export { FeedbackManager } from './core/FeedbackManager.js';
+export type { FeedbackQualityResult } from './core/FeedbackManager.js';
 export { EvolutionManager } from './core/EvolutionManager.js';
 export { DecisionJournal } from './core/DecisionJournal.js';
 export type { DecisionJournalStats } from './core/DecisionJournal.js';
@@ -113,6 +114,8 @@ export { AccountSwitcher } from './monitoring/AccountSwitcher.js';
 export { QuotaNotifier } from './monitoring/QuotaNotifier.js';
 export { StallTriageNurse } from './monitoring/StallTriageNurse.js';
 export type { StallTriageConfig, TreatmentAction, TriageDiagnosis, TriageContext, TriageResult, TriageRecord, TriageEvents, TriageDeps } from './monitoring/StallTriageNurse.types.js';
+export { FeedbackAnomalyDetector } from './monitoring/FeedbackAnomalyDetector.js';
+export type { AnomalyDetectorConfig, AnomalyCheckResult } from './monitoring/FeedbackAnomalyDetector.js';
 export { SleepWakeDetector } from './core/SleepWakeDetector.js';
 
 // Messaging

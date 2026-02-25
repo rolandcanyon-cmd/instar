@@ -23,6 +23,7 @@ import { RelationshipManager } from '../core/RelationshipManager.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
 import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
+import { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 import { DispatchManager } from '../core/DispatchManager.js';
 import { UpdateChecker } from '../core/UpdateChecker.js';
 import { AutoUpdater } from '../core/AutoUpdater.js';
@@ -1124,12 +1125,14 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     // Set up feedback and update checking
     let feedback: FeedbackManager | undefined;
+    let feedbackAnomalyDetector: FeedbackAnomalyDetector | undefined;
     if (config.feedback) {
       feedback = new FeedbackManager({
         ...config.feedback,
         version: config.version,
       });
-      console.log(pc.green('  Feedback loop enabled'));
+      feedbackAnomalyDetector = new FeedbackAnomalyDetector();
+      console.log(pc.green('  Feedback loop enabled (with anomaly detection)'));
     }
     // Set up dispatch system with auto-dispatcher
     let dispatches: DispatchManager | undefined;
@@ -1305,7 +1308,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     sleepWakeDetector.start();
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Start tunnel AFTER server is listening
