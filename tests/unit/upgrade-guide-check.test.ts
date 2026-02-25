@@ -21,15 +21,17 @@ describe('Upgrade Guide Infrastructure', () => {
   const upgradesDir = path.join(ROOT, 'upgrades');
 
   describe('existing guides are well-formed', () => {
-    const guideFiles = fs.existsSync(upgradesDir)
+    const allGuideFiles = fs.existsSync(upgradesDir)
       ? fs.readdirSync(upgradesDir).filter(f => f.endsWith('.md'))
       : [];
+    // NEXT.md is the pending guide for the next release — validated separately
+    const versionedGuides = allGuideFiles.filter(f => f !== 'NEXT.md');
 
     it('has at least one upgrade guide', () => {
-      expect(guideFiles.length).toBeGreaterThan(0);
+      expect(allGuideFiles.length).toBeGreaterThan(0);
     });
 
-    for (const file of guideFiles) {
+    for (const file of versionedGuides) {
       describe(`upgrades/${file}`, () => {
         const content = fs.readFileSync(path.join(upgradesDir, file), 'utf-8');
 
@@ -51,6 +53,30 @@ describe('Upgrade Guide Infrastructure', () => {
 
         it('filename matches semver pattern', () => {
           expect(file).toMatch(/^\d+\.\d+\.\d+\.md$/);
+        });
+      });
+    }
+
+    // NEXT.md convention — if present, must be well-formed
+    const nextMdPath = path.join(upgradesDir, 'NEXT.md');
+    if (fs.existsSync(nextMdPath)) {
+      describe('upgrades/NEXT.md (pending release guide)', () => {
+        const content = fs.readFileSync(nextMdPath, 'utf-8');
+
+        it('has "What Changed" section', () => {
+          expect(content).toContain('## What Changed');
+        });
+
+        it('has "What to Tell Your User" section', () => {
+          expect(content).toContain('## What to Tell Your User');
+        });
+
+        it('has "Summary of New Capabilities" section', () => {
+          expect(content).toContain('## Summary of New Capabilities');
+        });
+
+        it('has substantial content (> 200 chars)', () => {
+          expect(content.length).toBeGreaterThan(200);
         });
       });
     }
