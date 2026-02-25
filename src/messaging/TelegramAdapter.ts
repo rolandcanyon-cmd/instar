@@ -26,6 +26,8 @@ export interface TelegramConfig {
   voiceProvider?: string;
   /** Stall detection timeout in minutes (default: 5, 0 to disable) */
   stallTimeoutMinutes?: number;
+  /** Promise follow-through timeout in minutes (default: 10, 0 to disable) */
+  promiseTimeoutMinutes?: number;
   /** Lifeline topic thread ID — the always-available channel. Auto-recreated if deleted. */
   lifelineTopicId?: number;
 }
@@ -129,6 +131,15 @@ interface PendingMessage {
   alerted: boolean;
 }
 
+/** Tracks an agent promise that expects follow-through */
+interface PendingPromise {
+  topicId: number;
+  sessionName: string;
+  promiseText: string;
+  promisedAt: number;
+  alerted: boolean;
+}
+
 export class TelegramAdapter implements MessagingAdapter {
   readonly platform = 'telegram';
 
@@ -159,6 +170,9 @@ export class TelegramAdapter implements MessagingAdapter {
   private pendingMessages: Map<string, PendingMessage> = new Map(); // key = topicId-timestamp
   private stallCheckInterval: ReturnType<typeof setInterval> | null = null;
 
+  // Promise tracking (agent said "give me a minute" but hasn't followed up)
+  private pendingPromises: Map<number, PendingPromise> = new Map(); // key = topicId
+
   // Topic message callback — fires on every incoming topic message
   public onTopicMessage: ((message: Message) => void) | null = null;
 
@@ -172,6 +186,19 @@ export class TelegramAdapter implements MessagingAdapter {
   // Message log callback — fires on every message logged (inbound and outbound).
   // Used by TopicMemory to dual-write to SQLite for search and summarization.
   public onMessageLogged: ((entry: { messageId: number; topicId: number | null; text: string; fromUser: boolean; timestamp: string; sessionName: string | null }) => void) | null = null;
+
+  // Sentinel interceptor — fires BEFORE the message handler for real-time interrupt detection.
+  // Returns the sentinel classification. If category is 'emergency-stop' or 'pause',
+  // the adapter will handle the session action and skip the normal handler.
+  public onSentinelIntercept: ((message: string, topicId: number) => Promise<{
+    category: 'emergency-stop' | 'pause' | 'redirect' | 'normal';
+    action: { type: string; message?: string };
+    reason?: string;
+  } | null>) | null = null;
+
+  // Session kill/pause callbacks — used by sentinel to take immediate action
+  public onSentinelKillSession: ((sessionName: string) => boolean) | null = null;
+  public onSentinelPauseSession: ((sessionName: string) => void) | null = null;
 
   // Attention queue callbacks
   public onAttentionStatusChange: ((itemId: string, status: string) => Promise<void>) | null = null;
@@ -300,6 +327,24 @@ export class TelegramAdapter implements MessagingAdapter {
 
     // Clear stall tracking for this topic (agent responded)
     this.clearStallForTopic(topicId);
+
+    // Promise tracking — detect agent "working on it" messages that need follow-through
+    const sessionName = this.topicToSession.get(topicId);
+    if (sessionName) {
+      if (this.isPromiseMessage(text)) {
+        // Agent just promised to follow up — track it
+        this.pendingPromises.set(topicId, {
+          topicId,
+          sessionName,
+          promiseText: text.slice(0, 100),
+          promisedAt: Date.now(),
+          alerted: false,
+        });
+      } else if (this.pendingPromises.has(topicId) && this.isFollowThroughMessage(text)) {
+        // Agent delivered on its promise — clear it
+        this.pendingPromises.delete(topicId);
+      }
+    }
 
     return { messageId: result.message_id, topicId };
   }
@@ -668,6 +713,77 @@ export class TelegramAdapter implements MessagingAdapter {
     this.clearStallForTopic(topicId);
   }
 
+  /** Clear promise tracking for a topic (e.g., after successful recovery) */
+  clearPromiseTracking(topicId: number): void {
+    this.pendingPromises.delete(topicId);
+  }
+
+  /** Detect "work-in-progress" messages that imply the agent will follow up */
+  private isPromiseMessage(text: string): boolean {
+    const promisePatterns = [
+      /give me (?:a )?(?:couple|few|some) (?:more )?minutes/i,
+      /give me (?:a )?(?:minute|moment|second|sec)/i,
+      /working on (?:it|this|that)/i,
+      /looking into (?:it|this|that)/i,
+      /let me (?:check|look|investigate|dig|research)/i,
+      /investigating/i,
+      /still (?:on it|working|looking)/i,
+      /one moment/i,
+      /be right back/i,
+      /hang on/i,
+      /bear with me/i,
+      /i'll (?:get back|follow up|check|look into)/i,
+      /narrowing (?:it |this |that )?down/i,
+    ];
+    return promisePatterns.some(p => p.test(text));
+  }
+
+  /** Detect messages that indicate the agent delivered on its promise */
+  private isFollowThroughMessage(text: string): boolean {
+    // Messages that indicate the agent is delivering results (not just status updates)
+    // Must be substantially longer than a typical status update
+    if (text.length > 200) return true;
+
+    // Explicit completion signals
+    const completionPatterns = [
+      /here(?:'s| is| are) (?:what|the)/i,
+      /i found/i,
+      /the (?:issue|problem|bug|fix|solution|answer|result)/i,
+      /done|completed|finished|resolved/i,
+      /summary|overview|analysis/i,
+    ];
+    return completionPatterns.some(p => p.test(text));
+  }
+
+  /** Get all active topic-session mappings (used by SessionMonitor) */
+  getActiveTopicSessions(): Map<number, string> {
+    return new Map(this.topicToSession);
+  }
+
+  /** Get recent message log entries for analysis */
+  getMessageLog(limit = 100): Array<{ topicId: number; text: string; fromUser: boolean; timestamp: string }> {
+    try {
+      if (!fs.existsSync(this.messageLogPath)) return [];
+      const content = fs.readFileSync(this.messageLogPath, 'utf-8');
+      const lines = content.trim().split('\n').filter(Boolean).slice(-limit);
+      return lines.map(line => {
+        try {
+          const entry = JSON.parse(line);
+          return {
+            topicId: entry.topicId,
+            text: entry.text || '',
+            fromUser: entry.fromUser ?? true,
+            timestamp: entry.timestamp || new Date().toISOString(),
+          };
+        } catch {
+          return null;
+        }
+      }).filter(Boolean) as Array<{ topicId: number; text: string; fromUser: boolean; timestamp: string }>;
+    } catch {
+      return [];
+    }
+  }
+
   private async checkForStalls(): Promise<void> {
     const stallMinutes = this.config.stallTimeoutMinutes ?? 5;
     const stallThresholdMs = stallMinutes * 60 * 1000;
@@ -748,6 +864,59 @@ export class TelegramAdapter implements MessagingAdapter {
       }
     }
 
+    // Check for expired promises (agent said "give me a minute" but never followed up)
+    const promiseMinutes = this.config.promiseTimeoutMinutes ?? 10;
+    const promiseThresholdMs = promiseMinutes * 60 * 1000;
+
+    if (promiseMinutes > 0) {
+      for (const [topicId, promise] of this.pendingPromises) {
+        if (promise.alerted) continue;
+        if (now - promise.promisedAt < promiseThresholdMs) continue;
+
+        promise.alerted = true;
+        console.log(`[telegram] Promise expired for topic ${topicId}: "${promise.promiseText}" (${Math.round((now - promise.promisedAt) / 60000)} min ago)`);
+
+        // Check if session is still alive
+        const alive = this.onIsSessionAlive
+          ? this.onIsSessionAlive(promise.sessionName)
+          : true;
+
+        // Delegate to triage nurse if available
+        if (this.onStallDetected) {
+          try {
+            const triageResult = await this.onStallDetected(
+              promise.topicId, promise.sessionName,
+              `[promise expired] ${promise.promiseText}`, promise.promisedAt,
+            );
+            if (triageResult.resolved) {
+              this.pendingPromises.delete(topicId);
+              continue;
+            }
+          } catch (err) {
+            console.warn(`[telegram] Promise triage error:`, err);
+          }
+        }
+
+        // Fallback: send user-facing alert
+        if (!alive) {
+          await this.sendToTopic(topicId,
+            `The session stopped unexpectedly after saying "${promise.promiseText}". Sending a new message will auto-spawn a fresh session.`
+          ).catch(() => {});
+        } else {
+          await this.sendToTopic(topicId,
+            `It's been ${Math.round((now - promise.promisedAt) / 60000)} minutes since the session said "${promise.promiseText}" — checking on it now...`
+          ).catch(() => {});
+        }
+      }
+
+      // Clean up old promise entries
+      for (const [topicId, promise] of this.pendingPromises) {
+        if (promise.alerted && now - promise.promisedAt > 60 * 60 * 1000) {
+          this.pendingPromises.delete(topicId);
+        }
+      }
+    }
+
     // Clean up old entries (older than 30 minutes, already alerted)
     for (const [key, pending] of this.pendingMessages) {
       if (pending.alerted && now - pending.injectedAt > 30 * 60 * 1000) {
@@ -762,12 +931,14 @@ export class TelegramAdapter implements MessagingAdapter {
     started: boolean;
     uptime: number | null;
     pendingStalls: number;
+    pendingPromises: number;
     topicMappings: number;
   } {
     return {
       started: this.polling,
       uptime: this.startedAt ? Date.now() - this.startedAt.getTime() : null,
       pendingStalls: this.pendingMessages.size,
+      pendingPromises: this.pendingPromises.size,
       topicMappings: this.topicToSession.size,
     };
   }
@@ -1614,6 +1785,44 @@ export class TelegramAdapter implements MessagingAdapter {
       timestamp: new Date(msg.date * 1000).toISOString(),
       sessionName: this.topicToSession.get(numericTopicId) ?? null,
     });
+
+    // Sentinel intercept — fires BEFORE routing to detect emergency stop/pause.
+    // This runs in the server process, separate from the session, so it can
+    // kill/pause the session even when the session is mid-tool-call.
+    if (this.onSentinelIntercept) {
+      try {
+        const classification = await this.onSentinelIntercept(text, numericTopicId);
+        if (classification && (classification.category === 'emergency-stop' || classification.category === 'pause')) {
+          const sessionName = this.topicToSession.get(numericTopicId);
+          if (classification.category === 'emergency-stop' && sessionName) {
+            console.log(`[sentinel] Emergency stop for session "${sessionName}" in topic ${numericTopicId}`);
+            if (this.onSentinelKillSession) {
+              this.onSentinelKillSession(sessionName);
+            }
+            await this.sendToTopic(numericTopicId,
+              `Session terminated. ${classification.reason ? `Reason: ${classification.reason}` : 'Emergency stop signal detected.'}\n\nSend a new message to start a fresh session.`
+            ).catch(() => {});
+          } else if (classification.category === 'pause' && sessionName) {
+            console.log(`[sentinel] Pause for session "${sessionName}" in topic ${numericTopicId}`);
+            if (this.onSentinelPauseSession) {
+              this.onSentinelPauseSession(sessionName);
+            }
+            await this.sendToTopic(numericTopicId,
+              `Session paused. ${classification.reason || 'Pause signal detected.'}\n\nSend a message to resume.`
+            ).catch(() => {});
+          } else if (!sessionName) {
+            // No active session — just acknowledge the stop/pause signal
+            await this.sendToTopic(numericTopicId,
+              `No active session to ${classification.category === 'emergency-stop' ? 'stop' : 'pause'}.`
+            ).catch(() => {});
+          }
+          return; // Don't route to session — sentinel handled it
+        }
+      } catch (err) {
+        console.error(`[sentinel] Intercept error: ${err}`);
+        // On sentinel error, fall through to normal routing (fail-open for message delivery)
+      }
+    }
 
     // Fire topic message callback (always fires — General topic falls back to ID 1)
     if (this.onTopicMessage) {

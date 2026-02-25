@@ -43,6 +43,7 @@ import { QuotaNotifier } from '../monitoring/QuotaNotifier.js';
 import { classifySessionDeath } from '../monitoring/QuotaExhaustionDetector.js';
 import { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
 import { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
+import { SessionMonitor } from '../monitoring/SessionMonitor.js';
 import { MultiMachineCoordinator } from '../core/MultiMachineCoordinator.js';
 import { MachineIdentityManager } from '../core/MachineIdentity.js';
 import { GitSyncManager } from '../core/GitSync.js';
@@ -1174,6 +1175,36 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Stall Triage Nurse enabled'));
     }
 
+    // SessionMonitor — proactive session health monitoring
+    let sessionMonitor: SessionMonitor | undefined;
+    if (telegram) {
+      sessionMonitor = new SessionMonitor(
+        {
+          getActiveTopicSessions: () => telegram!.getActiveTopicSessions(),
+          captureSessionOutput: (name, lines) => sessionManager.captureOutput(name, lines),
+          isSessionAlive: (name) => sessionManager.isSessionAlive(name),
+          getTopicHistory: (topicId, limit) => {
+            const history = telegram!.getMessageLog?.();
+            if (!history) return [];
+            return history
+              .filter((m: any) => m.topicId === topicId)
+              .slice(-limit)
+              .map((m: any) => ({ text: m.text, fromUser: m.fromUser, timestamp: m.timestamp }));
+          },
+          sendToTopic: (topicId, text) => telegram!.sendToTopic(topicId, text),
+          triggerTriage: triageNurse
+            ? async (topicId, sessionName, reason) => {
+                const result = await triageNurse!.triage(topicId, sessionName, reason, Date.now(), 'watchdog');
+                return { resolved: result.resolved };
+              }
+            : undefined,
+        },
+        config.monitoring.sessionMonitor,
+      );
+      sessionMonitor.start();
+      console.log(pc.green('  Session Monitor enabled'));
+    }
+
     // Set up feedback and update checking
     let feedback: FeedbackManager | undefined;
     let feedbackAnomalyDetector: FeedbackAnomalyDetector | undefined;
@@ -1395,17 +1426,45 @@ export async function startServer(options: StartOptions): Promise<void> {
     }
 
     // External Operation Safety — gate, sentinel, trust
+    const extOpsConfig = config.externalOperations;
+    const extOpsEnabled = extOpsConfig?.enabled !== false;
     const autonomyLevel = config.agentAutonomy?.level ?? 'collaborative';
     const autonomyProfile = AUTONOMY_PROFILES[autonomyLevel] ?? AUTONOMY_PROFILES.collaborative;
-    const operationGate = new ExternalOperationGate({
+    const operationGate = extOpsEnabled ? new ExternalOperationGate({
       stateDir: config.stateDir,
       autonomyDefaults: autonomyProfile,
-    });
-    const sentinel = new MessageSentinel({});
-    const adaptiveTrust = new AdaptiveTrust({
+      services: (extOpsConfig?.services ?? {}) as Record<string, import('../core/ExternalOperationGate.js').ServicePermissions>,
+      readOnlyServices: extOpsConfig?.readOnlyServices ?? [],
+    }) : undefined;
+    const sentinel = extOpsEnabled && extOpsConfig?.sentinel?.enabled !== false
+      ? new MessageSentinel({})
+      : undefined;
+    const adaptiveTrust = extOpsEnabled ? new AdaptiveTrust({
       stateDir: config.stateDir,
-    });
-    console.log(pc.green(`  External operation safety: gate=${autonomyLevel}, sentinel=on, trust=on`));
+    }) : undefined;
+    if (extOpsEnabled) {
+      console.log(pc.green(`  External operation safety: gate=${autonomyLevel}, sentinel=${sentinel ? 'on' : 'off'}, trust=on`));
+    }
+
+    // Wire sentinel into Telegram message flow — intercepts BEFORE session routing.
+    // Must be wired AFTER sentinel is created but BEFORE server starts.
+    if (sentinel && telegram) {
+      telegram.onSentinelIntercept = async (text: string, _topicId: number) => {
+        const classification = await sentinel.classify(text);
+        if (classification.category === 'emergency-stop' || classification.category === 'pause') {
+          return {
+            category: classification.category,
+            action: classification.action as { type: string; message?: string },
+            reason: classification.reason,
+          };
+        }
+        return null; // Normal messages pass through
+      };
+      telegram.onSentinelKillSession = (sessionName: string) => {
+        return sessionManager.killSession(sessionName);
+      };
+      console.log(pc.green('  Sentinel wired into Telegram message flow'));
+    }
 
     const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
@@ -1529,6 +1588,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       sleepWakeDetector.stop();
       autoUpdater.stop();
       autoDispatcher?.stop();
+      sessionMonitor?.stop();
       if (tunnel) await tunnel.stop();
       stopHeartbeat();
       unregisterAgent(config.projectDir);

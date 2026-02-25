@@ -897,6 +897,42 @@ export interface JoinRequest {
   resolvedAt?: string;
 }
 
+// ── External Operation Safety ────────────────────────────────────────
+
+export interface ExternalOperationsConfig {
+  /** Whether external operation safety is enabled (default: true) */
+  enabled: boolean;
+  /** Message Sentinel configuration */
+  sentinel?: {
+    /** Whether the sentinel is enabled (default: true) */
+    enabled: boolean;
+  };
+  /** Per-service permissions (structural floor) */
+  services?: Record<string, ExternalServicePermissions>;
+  /** Services that are completely read-only (no mutations allowed) */
+  readOnlyServices?: string[];
+  /** Trust configuration */
+  trust?: {
+    /** Trust floor — never auto-escalate past this (default: 'collaborative') */
+    floor: 'supervised' | 'collaborative';
+    /** Whether auto-elevation is enabled (default: true) */
+    autoElevateEnabled: boolean;
+    /** Successes before suggesting elevation (default: 5) */
+    elevationThreshold: number;
+  };
+}
+
+export interface ExternalServicePermissions {
+  /** Allowed operation types */
+  permissions: string[];
+  /** Blocked operation types (hard gate — no override) */
+  blocked?: string[];
+  /** Operations that require approval regardless of trust level */
+  requireApproval?: string[];
+  /** Maximum items per batch operation */
+  batchLimit?: number;
+}
+
 // ── Server Configuration ────────────────────────────────────────────
 
 export interface InstarConfig {
@@ -952,6 +988,8 @@ export interface InstarConfig {
   userRegistrationPolicy?: UserRegistrationPolicy;
   /** Agent autonomy configuration */
   agentAutonomy?: AgentAutonomyConfig;
+  /** External operation safety — gate, sentinel, trust */
+  externalOperations?: ExternalOperationsConfig;
   /** Recovery key for admin self-recovery */
   recoveryKey?: RecoveryKeyConfig;
   /** Registration contact hint for rejected users */
@@ -1061,6 +1099,17 @@ export interface MonitoringConfig {
     maxEscalations?: number;
     /** Use IntelligenceProvider instead of direct API (default: true) */
     useIntelligenceProvider?: boolean;
+  };
+  /** Proactive session health monitoring */
+  sessionMonitor?: {
+    /** Enable the session monitor (default: true) */
+    enabled?: boolean;
+    /** How often to check sessions, in seconds (default: 60) */
+    pollIntervalSec?: number;
+    /** Minutes of inactivity before a session is flagged as idle (default: 15) */
+    idleThresholdMinutes?: number;
+    /** Minimum minutes between user notifications per topic (default: 30) */
+    notificationCooldownMinutes?: number;
   };
 }
 

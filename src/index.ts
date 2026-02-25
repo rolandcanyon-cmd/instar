@@ -145,6 +145,8 @@ export { StallTriageNurse } from './monitoring/StallTriageNurse.js';
 export type { StallTriageConfig, TreatmentAction, TriageDiagnosis, TriageContext, TriageResult, TriageRecord, TriageEvents, TriageDeps } from './monitoring/StallTriageNurse.types.js';
 export { FeedbackAnomalyDetector } from './monitoring/FeedbackAnomalyDetector.js';
 export type { AnomalyDetectorConfig, AnomalyCheckResult } from './monitoring/FeedbackAnomalyDetector.js';
+export { SessionMonitor } from './monitoring/SessionMonitor.js';
+export type { SessionMonitorConfig, SessionMonitorDeps, SessionMonitorEvents } from './monitoring/SessionMonitor.js';
 export { SleepWakeDetector } from './core/SleepWakeDetector.js';
 
 // Messaging
@@ -187,6 +189,8 @@ export type {
   ComponentHealth,
   ActivityEvent,
   InstarConfig,
+  ExternalOperationsConfig,
+  ExternalServicePermissions,
   MonitoringConfig,
   RelationshipRecord,
   RelationshipManagerConfig,
