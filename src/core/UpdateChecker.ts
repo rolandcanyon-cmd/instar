@@ -111,6 +111,10 @@ export class UpdateChecker {
 
   /**
    * Apply the update: npm update, verify new version, check health.
+   *
+   * Uses explicit version pinning (not @latest) to avoid npm CDN propagation
+   * delays where @latest still resolves to the old version for several minutes
+   * after a new version is published. Retries up to 3 times with backoff.
    */
   async applyUpdate(): Promise<UpdateResult> {
     const previousVersion = this.getInstalledVersion();
@@ -128,37 +132,50 @@ export class UpdateChecker {
       };
     }
 
-    try {
-      // Use `npm install -g instar@latest` — `npm update -g` is unreliable
-      // for global packages and often silently fails to change the version.
-      // --ignore-scripts prevents cloudflared's postinstall binary download from
-      // failing with ENOENT in environments where the download path doesn't exist.
-      // The cloudflared binary is installed lazily on-demand by TunnelManager when
-      // the tunnel feature is first used (via install(bin) from the cloudflared package).
-      await this.execAsync('npm', ['install', '-g', 'instar@latest', '--ignore-scripts'], 120000);
-    } catch (err) {
-      return {
-        success: false,
-        previousVersion,
-        newVersion: previousVersion,
-        message: `Update failed: ${err instanceof Error ? err.message : String(err)}`,
-        restartNeeded: false,
-        healthCheck: 'skipped',
-      };
+    // Use explicit version pin — `@latest` tag has CDN propagation delay
+    // that can cause installs to silently resolve to the old version.
+    const targetVersion = info.latestVersion;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAYS = [0, 5000, 15000]; // immediate, 5s, 15s
+
+    let lastError: string | null = null;
+    let newVersion = 'unknown';
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        console.log(`[UpdateChecker] Retry ${attempt}/${MAX_RETRIES - 1} after ${RETRY_DELAYS[attempt]}ms...`);
+        await new Promise(r => setTimeout(r, RETRY_DELAYS[attempt]));
+      }
+
+      try {
+        // --ignore-scripts prevents cloudflared's postinstall binary download from
+        // failing with ENOENT in environments where the download path doesn't exist.
+        // The cloudflared binary is installed lazily on-demand by TunnelManager when
+        // the tunnel feature is first used (via install(bin) from the cloudflared package).
+        await this.execAsync('npm', ['install', '-g', `instar@${targetVersion}`, '--ignore-scripts'], 120000);
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        continue;
+      }
+
+      // Verify the update was applied
+      try {
+        const listOutput = await this.execAsync('npm', ['list', '-g', 'instar', '--depth=0', '--json'], 15000);
+        const parsed = JSON.parse(listOutput);
+        newVersion = parsed?.dependencies?.instar?.version || 'unknown';
+      } catch {
+        newVersion = 'unknown';
+      }
+
+      if (newVersion === targetVersion) {
+        break; // Success
+      }
+
+      lastError = `Installed version is ${newVersion}, expected ${targetVersion}`;
+      console.log(`[UpdateChecker] Attempt ${attempt + 1}: ${lastError}`);
     }
 
-    // Verify the update was applied by checking npm again
-    let newVersion: string;
-    try {
-      newVersion = await this.execAsync('npm', ['list', '-g', 'instar', '--depth=0', '--json'], 15000);
-      // Parse JSON output to extract version
-      const parsed = JSON.parse(newVersion);
-      newVersion = parsed?.dependencies?.instar?.version || 'unknown';
-    } catch {
-      newVersion = 'unknown';
-    }
-
-    const success = newVersion !== previousVersion && newVersion !== 'unknown';
+    const success = newVersion === targetVersion;
 
     // Save rollback info on successful update
     if (success) {

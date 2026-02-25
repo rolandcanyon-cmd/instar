@@ -1343,6 +1343,11 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Spawn a short session to process any pending upgrade guide and message the user.
     // This fires after full server initialization — sessionManager, telegram, everything is ready.
     // The guide was written by `instar migrate` (during auto-update) or by the startup migration above.
+    //
+    // Uses UpgradeNotifyManager for verified delivery with model escalation:
+    //   1. Try with haiku (fast, cheap)
+    //   2. If guide wasn't acknowledged, retry with sonnet (more capable)
+    //   3. If all attempts fail, preserve guide for next session-start
     try {
       const pendingGuidePath = path.join(config.stateDir, 'state', 'pending-upgrade-guide.md');
       if (fs.existsSync(pendingGuidePath)) {
@@ -1353,83 +1358,55 @@ export async function startServer(options: StartOptions): Promise<void> {
           // Brief delay so server is fully ready (scheduler, tunnel, etc.)
           setTimeout(async () => {
             try {
+              const { UpgradeNotifyManager } = await import('../core/UpgradeNotifyManager.js');
+
               // Find the Telegram reply script for the prompt (may be in .claude/scripts or .instar/scripts)
               const replyScriptClaude = path.join(config.projectDir, '.claude', 'scripts', 'telegram-reply.sh');
               const replyScriptInstar = path.join(config.projectDir, '.instar', 'scripts', 'telegram-reply.sh');
               const replyScript = fs.existsSync(replyScriptClaude) ? replyScriptClaude
                 : fs.existsSync(replyScriptInstar) ? replyScriptInstar : '';
-              const hasReplyScript = !!replyScript;
               // Route upgrade notifications to Updates topic (informational, not critical)
               const notifyTopicId = state.get<number>('agent-updates-topic') || state.get<number>('agent-attention-topic') || 0;
 
-              // Gather concrete details the agent should include in the message
-              const dashboardPin = config.dashboardPin || '';
-              const tunnelUrl = tunnel?.url || '';
-              const dashboardUrl = tunnelUrl
-                ? `${tunnelUrl}/dashboard`
-                : `http://localhost:${config.port}/dashboard`;
+              const notifyManager = new UpgradeNotifyManager(
+                {
+                  pendingGuidePath,
+                  projectDir: config.projectDir,
+                  stateDir: config.stateDir,
+                  port: config.port,
+                  dashboardPin: config.dashboardPin || '',
+                  tunnelUrl: tunnel?.url || '',
+                  currentVersion: getInstalledVersion(),
+                  replyScript,
+                  notifyTopicId,
+                },
+                // SessionSpawner
+                (opts) => sessionManager.spawnSession(opts),
+                // SessionCompletionChecker
+                (sessionId) => {
+                  const session = state.getSession(sessionId);
+                  return !session || session.status === 'completed' || session.status === 'failed' || session.status === 'killed';
+                },
+                // ActivityLogger — writes to activity JSONL for observability
+                (event) => {
+                  try {
+                    const logDir = path.join(config.stateDir, 'logs');
+                    fs.mkdirSync(logDir, { recursive: true });
+                    const today = new Date().toISOString().slice(0, 10);
+                    const logFile = path.join(logDir, `activity-${today}.jsonl`);
+                    const entry = { ...event, timestamp: new Date().toISOString() };
+                    fs.appendFileSync(logFile, JSON.stringify(entry) + '\n');
+                  } catch { /* non-critical */ }
+                },
+              );
 
-              await sessionManager.spawnSession({
-                name: 'upgrade-notify',
-                prompt: [
-                  'IMPORTANT: You are a SHORT-LIVED session with a SPECIFIC task. Do NOT search for files or explore the codebase. Everything you need is in this prompt.',
-                  '',
-                  'You have been updated to a new Instar version. Read the upgrade guide below, then do ALL THREE steps.',
-                  'IMPORTANT: The guide below contains ONLY what is new in THIS update. Do not mention features from previous updates.',
-                  '',
-                  '',
-                  '## Step 1: Notify your user',
-                  '',
-                  'Compose a brief, personalized message (3-8 sentences) for your user about the new features.',
-                  '   RULES:',
-                  '   - Write like you\'re texting a friend — warm, conversational, no jargon',
-                  '   - This should NOT look like a changelog or release notes',
-                  '   - Lead with the biggest USER-VISIBLE feature',
-                  '   - Include CONCRETE details — actual URLs, PINs, things they can click/use right now',
-                  '   - NEVER mention "bearer tokens", "auth tokens", version numbers in headers, or internal implementation details',
-                  '   - Focus on what matters to THEM, not internal plumbing',
-                  '   - NO bullet lists, NO markdown headers, NO technical formatting — just natural sentences',
-                  '',
-                  '   CONCRETE DETAILS TO INCLUDE:',
-                  `   - Dashboard URL: ${dashboardUrl}`,
-                  dashboardPin ? `   - Dashboard PIN: ${dashboardPin}` : '   - No dashboard PIN set',
-                  `   - Current version: ${getInstalledVersion()}`,
-                  '',
-                  `Send the message via Telegram:`,
-                  hasReplyScript && notifyTopicId
-                    ? `   Run: cat <<'MSGEOF' | bash ${replyScript} ${notifyTopicId}\nYOUR_MESSAGE_HERE\nMSGEOF`
-                    : `   Use the telegram-reply script in .instar/scripts/ to send to the updates topic.`,
-                  '',
-                  '## Step 2: Update your memory with new capabilities',
-                  '',
-                  'Read the upgrade guide\'s "Summary of New Capabilities" section and add the relevant information to your MEMORY.md file (.instar/MEMORY.md).',
-                  'This ensures you KNOW about these capabilities in every future session — not just this one.',
-                  '',
-                  'Add a section like:',
-                  '```',
-                  '## Capabilities Added in vX.Y.Z',
-                  '- Brief description of each capability',
-                  '- How to use it (API endpoints, commands, automatic behaviors)',
-                  '- Any behavioral changes you should be aware of',
-                  '```',
-                  '',
-                  'Keep it concise — focus on WHAT you can now do and HOW to do it, not the implementation details.',
-                  'If there are existing capability notes in MEMORY.md, update or merge rather than duplicate.',
-                  '',
-                  '## Step 3: Acknowledge',
-                  '',
-                  'Run: instar upgrade-ack',
-                  '',
-                  'Do all three steps, then exit. Do not search for files or read config files beyond MEMORY.md.',
-                  '',
-                  '--- UPGRADE GUIDE ---',
-                  guideContent,
-                  '--- END GUIDE ---',
-                ].join('\n'),
-                model: 'haiku',
-                jobSlug: 'upgrade-notify',
-                maxDurationMinutes: 5,
-              });
+              const result = await notifyManager.notify();
+              if (result.success) {
+                console.log(pc.green(`  Upgrade guide delivered (${result.model}, ${result.attempts} attempt${result.attempts !== 1 ? 's' : ''})`));
+              } else {
+                console.warn(pc.yellow(`  Upgrade guide delivery failed after ${result.attempts} attempts: ${result.error}`));
+                console.warn(pc.yellow('  Guide preserved — will be injected at next session-start'));
+              }
             } catch (err) {
               console.error(`[UpgradeGuide] Failed to spawn notification session: ${err instanceof Error ? err.message : err}`);
             }

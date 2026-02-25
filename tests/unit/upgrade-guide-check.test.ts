@@ -117,32 +117,31 @@ describe('Upgrade Guide Infrastructure', () => {
   });
 
   describe('upgrade-notify session includes memory internalization', () => {
-    const serverPath = path.join(ROOT, 'src', 'commands', 'server.ts');
-    const serverContent = fs.readFileSync(serverPath, 'utf-8');
+    // Prompt building was extracted to UpgradeNotifyManager for testability
+    const notifyManagerPath = path.join(ROOT, 'src', 'core', 'UpgradeNotifyManager.ts');
+    const notifyContent = fs.readFileSync(notifyManagerPath, 'utf-8');
 
     it('instructs agent to update MEMORY.md', () => {
-      // Find the upgrade-notify section
-      const notifyIdx = serverContent.indexOf('upgrade-notify');
-      expect(notifyIdx).toBeGreaterThan(-1);
-
-      // Extract surrounding context (the full prompt area)
-      const surroundingContent = serverContent.slice(
-        Math.max(0, notifyIdx - 3000),
-        notifyIdx + 3000,
-      );
-
-      expect(surroundingContent).toContain('Update your memory');
-      expect(surroundingContent).toContain('MEMORY.md');
+      expect(notifyContent).toContain('Update your memory');
+      expect(notifyContent).toContain('MEMORY.md');
     });
 
     it('does NOT say "That is ALL" (allows memory update step)', () => {
-      const notifyIdx = serverContent.indexOf('upgrade-notify');
-      const surroundingContent = serverContent.slice(
-        Math.max(0, notifyIdx - 3000),
-        notifyIdx + 3000,
-      );
+      expect(notifyContent).not.toContain('That is ALL');
+    });
 
-      expect(surroundingContent).not.toContain('That is ALL');
+    it('includes all three steps (notify, memory, acknowledge)', () => {
+      expect(notifyContent).toContain('Step 1: Notify your user');
+      expect(notifyContent).toContain('Step 2: Update your memory');
+      expect(notifyContent).toContain('Step 3: Acknowledge');
+      expect(notifyContent).toContain('instar upgrade-ack');
+    });
+
+    it('server.ts uses UpgradeNotifyManager for verified delivery', () => {
+      const serverPath = path.join(ROOT, 'src', 'commands', 'server.ts');
+      const serverContent = fs.readFileSync(serverPath, 'utf-8');
+      expect(serverContent).toContain('UpgradeNotifyManager');
+      expect(serverContent).toContain('.notify()');
     });
   });
 

@@ -17,6 +17,8 @@ export type { DecisionJournalStats } from './core/DecisionJournal.js';
 export { DispatchManager } from './core/DispatchManager.js';
 export { UpdateChecker } from './core/UpdateChecker.js';
 export type { RollbackResult, UpdateCheckerConfig } from './core/UpdateChecker.js';
+export { UpgradeNotifyManager } from './core/UpgradeNotifyManager.js';
+export type { UpgradeNotifyConfig, UpgradeNotifyResult, SessionSpawner, SessionCompletionChecker, ActivityLogger } from './core/UpgradeNotifyManager.js';
 export { PostUpdateMigrator } from './core/PostUpdateMigrator.js';
 export type { MigrationResult, MigratorConfig } from './core/PostUpdateMigrator.js';
 export { loadConfig, detectTmuxPath, detectClaudePath, detectProjectDir, ensureStateDir, resolveAgentDir, standaloneAgentsDir } from './core/Config.js';
