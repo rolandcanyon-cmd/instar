@@ -22,6 +22,7 @@ import pc from 'picocolors';
 import { standaloneAgentsDir } from '../core/Config.js';
 import { unregisterAgent } from '../core/AgentRegistry.js';
 import { uninstallAutoStart } from './setup.js';
+import { SecretManager, SECRET_KEYS } from '../core/SecretManager.js';
 
 interface NukeOptions {
   skipConfirm?: boolean;
@@ -159,7 +160,28 @@ export async function nukeAgent(name: string, options: NukeOptions = {}): Promis
     }
   }
 
-  // Step 4: Remove from agent registry
+  // Step 4: Back up secrets before deletion
+  try {
+    const config = JSON.parse(fs.readFileSync(path.join(stateDir, 'config.json'), 'utf-8'));
+    const secretMgr = new SecretManager({ agentName: name });
+    secretMgr.initialize();
+
+    const telegramEntry = config.messaging?.find((m: { type: string }) => m.type === 'telegram');
+    if (telegramEntry?.config) {
+      secretMgr.backupFromConfig({
+        telegramToken: telegramEntry.config.token,
+        telegramChatId: telegramEntry.config.chatId,
+        authToken: config.authToken,
+        dashboardPin: config.dashboardPin,
+        tunnelToken: config.tunnel?.token,
+      });
+      console.log(`  ${pc.green('✓')} Secrets backed up (will auto-restore on reinstall)`);
+    }
+  } catch {
+    // Non-fatal — secrets may not exist or store may not be configured
+  }
+
+  // Step 5: Remove from agent registry
   try {
     unregisterAgent(agentDir);
     console.log(`  ${pc.green('✓')} Removed from agent registry`);
@@ -167,7 +189,7 @@ export async function nukeAgent(name: string, options: NukeOptions = {}): Promis
     // Non-fatal — may not be registered
   }
 
-  // Step 5: Delete the agent directory
+  // Step 6: Delete the agent directory
   try {
     fs.rmSync(agentDir, { recursive: true, force: true });
     console.log(`  ${pc.green('✓')} Deleted ${agentDir}`);

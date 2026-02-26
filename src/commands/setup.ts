@@ -28,6 +28,7 @@ import { FeedbackManager } from '../core/FeedbackManager.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { UserManager } from '../users/UserManager.js';
 import { validateJob } from '../scheduler/JobLoader.js';
+import { SecretManager, SECRET_KEYS, type SecretBackend } from '../core/SecretManager.js';
 import type { InstarConfig, JobDefinition, JobPriority, ModelTier, UserProfile, UserChannel } from '../core/types.js';
 
 /**
@@ -496,25 +497,35 @@ async function runClassicSetup(): Promise<void> {
     }
   }
 
-  // ── Step 2: Telegram — the primary interface ───────────────────
+  // ── Step 2: Secret management ──────────────────────────────────
+
+  const secretMgr = await promptForSecretBackend(projectName);
+
+  // ── Step 3: Telegram — the primary interface ───────────────────
 
   console.log();
   console.log(pc.bold('  Telegram — How You Talk to Your Agent'));
   console.log();
-  console.log(pc.dim('  Telegram is a free messaging app (like iMessage or WhatsApp) with'));
-  console.log(pc.dim('  features perfect for AI agents: topic threads, bot API, mobile + desktop.'));
-  console.log();
-  console.log(pc.dim('  Once connected, you just talk — no commands, no terminal.'));
-  console.log(pc.dim('  Topic threads, message history, mobile access, proactive notifications.'));
-  console.log();
-  console.log(pc.dim('  Telegram IS the interface — for any agent type.'));
-  console.log();
-  console.log(pc.dim(`  If you don't have Telegram yet: ${pc.cyan('https://telegram.org/apps')}`));
-  console.log(pc.dim('  Install it on your phone first — you\'ll need it to log in on the web.'));
-  console.log();
-  const telegramConfig = await promptForTelegram();
 
-  // ── Step 3: Server config (sensible defaults) ──────────────────
+  // Try to restore from secrets first
+  let telegramConfig = await tryRestoreTelegramFromSecrets(secretMgr);
+
+  if (!telegramConfig) {
+    console.log(pc.dim('  Telegram is a free messaging app (like iMessage or WhatsApp) with'));
+    console.log(pc.dim('  features perfect for AI agents: topic threads, bot API, mobile + desktop.'));
+    console.log();
+    console.log(pc.dim('  Once connected, you just talk — no commands, no terminal.'));
+    console.log(pc.dim('  Topic threads, message history, mobile access, proactive notifications.'));
+    console.log();
+    console.log(pc.dim('  Telegram IS the interface — for any agent type.'));
+    console.log();
+    console.log(pc.dim(`  If you don't have Telegram yet: ${pc.cyan('https://telegram.org/apps')}`));
+    console.log(pc.dim('  Install it on your phone first — you\'ll need it to log in on the web.'));
+    console.log();
+    telegramConfig = await promptForTelegram();
+  }
+
+  // ── Step 4: Server config (sensible defaults) ──────────────────
 
   const port = await number({
     message: 'Server port',
@@ -534,7 +545,7 @@ async function runClassicSetup(): Promise<void> {
     },
   }) ?? 3;
 
-  // ── Step 4: User setup ─────────────────────────────────────────
+  // ── Step 5: User setup ─────────────────────────────────────────
 
   console.log();
   const addUser = await confirm({
@@ -555,7 +566,7 @@ async function runClassicSetup(): Promise<void> {
     }
   }
 
-  // ── Step 5: Scheduler + first job ──────────────────────────────
+  // ── Step 6: Scheduler + first job ──────────────────────────────
 
   console.log();
   const enableScheduler = await confirm({
@@ -633,6 +644,16 @@ async function runClassicSetup(): Promise<void> {
     { mode: 0o600 },
   );
   console.log(`  ${pc.green('✓')} Config written`);
+
+  // Save secrets to the configured backend (so future installs auto-restore)
+  if (telegramConfig && secretMgr.getBackend() !== 'manual') {
+    secretMgr.backupFromConfig({
+      telegramToken: telegramConfig.token,
+      telegramChatId: telegramConfig.chatId,
+      authToken,
+    });
+    console.log(`  ${pc.green('✓')} Secrets saved to ${secretMgr.getBackend()} store`);
+  }
 
   // Users
   const userManager = new UserManager(stateDir);
@@ -1111,6 +1132,126 @@ function escapeXml(str: string): string {
 }
 
 // ── Prompt Helpers ───────────────────────────────────────────────
+
+/**
+ * Prompt the user to choose how they want secrets managed.
+ * Returns a configured SecretManager instance.
+ */
+async function promptForSecretBackend(agentName: string): Promise<SecretManager> {
+  const mgr = new SecretManager({ agentName });
+  const existing = mgr.getPreference();
+
+  // If already configured, offer to keep the existing backend
+  if (existing && existing.backend !== 'manual') {
+    const label = existing.backend === 'bitwarden' ? 'Bitwarden' : 'local encrypted store';
+    console.log(`  ${pc.green('✓')} Secret management: ${pc.cyan(label)} (previously configured)`);
+    mgr.initialize();
+    return mgr;
+  }
+
+  console.log();
+  console.log(pc.bold('  Secret Management'));
+  console.log();
+  console.log('  How should your agent store sensitive data like Telegram tokens?');
+  console.log('  This choice persists across reinstalls — you only configure it once.');
+  console.log();
+
+  const choice = await select<SecretBackend>({
+    message: 'Secret storage method',
+    choices: [
+      {
+        name: 'Bitwarden (Recommended) — one password, works everywhere',
+        value: 'bitwarden' as SecretBackend,
+        description: 'Cross-machine. Cloud-backed. Install any agent on any machine with just your master password.',
+      },
+      {
+        name: 'Local encrypted store — secured on this machine',
+        value: 'local' as SecretBackend,
+        description: 'AES-256 encrypted, survives reinstalls. macOS Keychain for password-free access.',
+      },
+      {
+        name: 'None — I\'ll manage secrets manually',
+        value: 'manual' as SecretBackend,
+        description: 'You\'ll paste tokens each time you install.',
+      },
+    ],
+  });
+
+  if (choice === 'bitwarden') {
+    // Check if bw CLI is installed
+    const bwCheck = mgr.isBitwardenReady();
+    if (!bwCheck) {
+      console.log();
+      console.log(pc.yellow('  Bitwarden CLI (bw) is not installed or vault is locked.'));
+      console.log(pc.dim('  Install: brew install bitwarden-cli'));
+      console.log(pc.dim('  Then: bw login && bw unlock'));
+      console.log();
+      const fallback = await select({
+        message: 'What would you like to do?',
+        choices: [
+          { name: 'Use local encrypted store instead', value: 'local' },
+          { name: 'Skip for now (manual)', value: 'manual' },
+        ],
+      });
+      mgr.configureBackend(fallback as SecretBackend);
+    } else {
+      mgr.configureBackend('bitwarden');
+    }
+  } else {
+    mgr.configureBackend(choice);
+  }
+
+  if (mgr.getBackend() === 'local') {
+    // Initialize local store with keychain (preferred) or password
+    const { GlobalSecretStore } = await import('../core/GlobalSecretStore.js');
+    const store = new GlobalSecretStore();
+    if (!store.autoInit()) {
+      // Keychain not available — ask for password
+      const password = await input({
+        message: 'Create a password to encrypt your local secret store',
+        validate: (v) => v.length >= 8 ? true : 'Password must be at least 8 characters',
+      });
+      store.initWithPassword(password);
+      console.log(`  ${pc.green('✓')} Local encrypted store initialized`);
+      console.log(pc.dim('  You\'ll need this password if the macOS Keychain is unavailable.'));
+    } else {
+      console.log(`  ${pc.green('✓')} Local encrypted store initialized (macOS Keychain backed)`);
+    }
+  }
+
+  const label = choice === 'bitwarden' ? 'Bitwarden' : choice === 'local' ? 'local encrypted store' : 'manual';
+  console.log(`  ${pc.green('✓')} Secret management: ${pc.cyan(label)}`);
+  console.log();
+  return mgr;
+}
+
+/**
+ * Try to restore Telegram config from the secret store.
+ * Returns the config if found and validated, null otherwise.
+ */
+async function tryRestoreTelegramFromSecrets(secretMgr: SecretManager): Promise<{ token: string; chatId: string } | null> {
+  const restored = secretMgr.restoreTelegramConfig();
+  if (!restored) return null;
+
+  // Validate the token is still working
+  console.log(pc.dim('  Found saved Telegram credentials — validating...'));
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${restored.token}/getMe`);
+    const data = await response.json() as { ok: boolean; result?: { username: string } };
+    if (data.ok) {
+      console.log(`  ${pc.green('✓')} Telegram bot @${data.result?.username} — token valid`);
+      console.log(`  ${pc.green('✓')} Chat ID: ${pc.cyan(restored.chatId)}`);
+      console.log();
+      return restored;
+    }
+  } catch {
+    // Token invalid or network error
+  }
+
+  console.log(pc.yellow('  Saved token is invalid or expired — need to reconfigure.'));
+  console.log();
+  return null;
+}
 
 /**
  * Full Telegram walkthrough. Returns config or null if skipped.
