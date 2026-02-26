@@ -8,7 +8,7 @@
  *   topic message → find/spawn session → inject message → session replies via [telegram:N]
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -1019,7 +1019,33 @@ export async function startServer(options: StartOptions): Promise<void> {
       // Topic history is the primary context for every session.
       topicMemory = new TopicMemory(config.stateDir);
       try {
-        await topicMemory.open();
+        try {
+          await topicMemory.open();
+        } catch (openErr) {
+          // Detect native binding error — happens when Node.js version changed since instar was installed
+          // (common with asdf, nvm, or homebrew Node.js version management)
+          const reason = openErr instanceof Error ? openErr.message : String(openErr);
+          const isBindingError = reason.includes('Could not locate the bindings file') ||
+            reason.includes('better-sqlite3') ||
+            reason.includes('was compiled against a different Node.js version');
+
+          if (!isBindingError) throw openErr;
+
+          // Auto-rebuild: recompile better-sqlite3 for the current Node.js version
+          console.log(pc.yellow('  TopicMemory: native binding mismatch — auto-rebuilding better-sqlite3...'));
+          const globalInstarDir = execSync('npm root -g', { encoding: 'utf-8', timeout: 10000 }).trim() + '/instar';
+          execSync('npm rebuild better-sqlite3', {
+            cwd: globalInstarDir,
+            encoding: 'utf-8',
+            timeout: 60000,
+            stdio: 'pipe',
+          });
+          console.log(pc.green('  TopicMemory: better-sqlite3 rebuilt successfully, retrying...'));
+
+          // Retry opening after rebuild
+          topicMemory = new TopicMemory(config.stateDir);
+          await topicMemory.open();
+        }
 
         // Import existing messages from JSONL (idempotent — only inserts new ones)
         const jsonlPath = path.join(config.stateDir, 'telegram-messages.jsonl');
@@ -1050,26 +1076,13 @@ export async function startServer(options: StartOptions): Promise<void> {
       } catch (err) {
         // @silent-fallback-ok — already uses DegradationReporter
         const reason = err instanceof Error ? err.message : String(err);
-        // Reset to undefined so the JSONL fallback is used for session context
-        // and API routes return clear 503 "not initialized" errors instead of
-        // silently returning empty data from a broken instance.
         topicMemory = undefined;
 
-        // Detect native binding error — happens when Node.js version changed since instar was installed
-        // (common with asdf, nvm, or homebrew Node.js version management)
-        const isBindingError = reason.includes('Could not locate the bindings file') ||
-          reason.includes('better-sqlite3') ||
-          reason.includes('was compiled against a different Node.js version');
-        const fixHint = isBindingError
-          ? ` To fix: cd $(npm root -g)/instar && npm rebuild better-sqlite3 (then restart instar server).`
-          : '';
-
-        // Report degradation — this is a bug, not "non-critical"
         degradationReporter.report({
           feature: 'TopicMemory',
           primary: 'SQLite-backed conversational memory with summaries and FTS5 search',
           fallback: 'JSONL-based last 20 messages (no summaries, no search)',
-          reason: `TopicMemory init failed: ${reason}${fixHint}`,
+          reason: `TopicMemory init failed: ${reason}`,
           impact: 'Sessions start without conversation summaries. Search unavailable. Context limited to last 20 raw messages.',
         });
       }
