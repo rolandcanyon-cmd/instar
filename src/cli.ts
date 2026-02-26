@@ -482,6 +482,55 @@ memoryCmd
     return memoryStatus(opts);
   });
 
+// ── Knowledge Base ────────────────────────────────────────────────
+
+const knowledgeCmd = program
+  .command('knowledge')
+  .description('Ingest URLs, documents, and transcripts into a searchable knowledge base');
+
+knowledgeCmd
+  .command('ingest <content>')
+  .description('Ingest content into the knowledge base')
+  .requiredOption('-t, --title <title>', 'Title for the content')
+  .option('-u, --url <url>', 'Source URL')
+  .option('--type <type>', 'Content type: article, transcript, doc (default: article)')
+  .option('--tags <tags>', 'Comma-separated tags')
+  .option('-s, --summary <summary>', 'Brief summary')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (content, opts) => {
+    const { knowledgeIngest } = await import('./commands/knowledge.js');
+    return knowledgeIngest(content, opts);
+  });
+
+knowledgeCmd
+  .command('list')
+  .description('List all ingested knowledge sources')
+  .option('--tag <tag>', 'Filter by tag')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { knowledgeList } = await import('./commands/knowledge.js');
+    return knowledgeList(opts);
+  });
+
+knowledgeCmd
+  .command('search <query>')
+  .description('Search knowledge base (scoped to knowledge/ sources)')
+  .option('-l, --limit <count>', 'Max results (default: 10)', (v: string) => parseInt(v, 10))
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (query, opts) => {
+    const { knowledgeSearch } = await import('./commands/knowledge.js');
+    return knowledgeSearch(query, opts);
+  });
+
+knowledgeCmd
+  .command('remove <sourceId>')
+  .description('Remove a source from the knowledge base')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (sourceId, opts) => {
+    const { knowledgeRemove } = await import('./commands/knowledge.js');
+    return knowledgeRemove(sourceId, opts);
+  });
+
 // ── Intent ────────────────────────────────────────────────────────
 
 const intentCmd = program
@@ -1039,5 +1088,14 @@ program
   .description('Diagnose multi-machine health and connectivity')
   .option('-d, --dir <path>', 'Project directory')
   .action(doctor);
+
+program
+  .command('nuke <name>')
+  .description('Completely remove a standalone agent and all its data')
+  .option('--yes', 'Skip confirmation prompts')
+  .action(async (name, opts) => {
+    const { nukeAgent } = await import('./commands/nuke.js');
+    await nukeAgent(name, { skipConfirm: opts.yes });
+  });
 
 program.parse();
