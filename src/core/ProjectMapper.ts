@@ -221,7 +221,9 @@ export class ProjectMapper {
       if (fs.existsSync(jsonPath)) {
         return JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
       }
-    } catch { /* corrupt file */ }
+    } catch {
+      // @silent-fallback-ok — corrupt map, caller regenerates
+    }
     return null;
   }
 
@@ -246,7 +248,9 @@ export class ProjectMapper {
           const match = content.match(/^#\s+(.+)/m);
           if (match) return match[1].trim();
         }
-      } catch { /* ignore */ }
+      } catch {
+        // @silent-fallback-ok — CLAUDE.md parse fallback
+      }
     }
 
     return path.basename(this.config.projectDir);
@@ -261,6 +265,7 @@ export class ProjectMapper {
       });
       return result.trim() || null;
     } catch {
+      // @silent-fallback-ok — git remote detection
       return null;
     }
   }
@@ -274,6 +279,7 @@ export class ProjectMapper {
       });
       return result.trim() || null;
     } catch {
+      // @silent-fallback-ok — git branch detection
       return null;
     }
   }

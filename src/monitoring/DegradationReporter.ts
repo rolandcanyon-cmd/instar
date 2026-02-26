@@ -205,6 +205,7 @@ export class DegradationReporter {
         });
         event.reported = true;
       } catch (err) {
+        // @silent-fallback-ok — self-referential (cannot report own failures)
         // Don't fail on reporting failures — the console log is the safety net
         console.error(`[DEGRADATION] Failed to submit feedback: ${err instanceof Error ? err.message : err}`);
       }

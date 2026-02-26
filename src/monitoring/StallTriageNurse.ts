@@ -506,6 +506,7 @@ export class StallTriageNurse extends EventEmitter {
         userMessage: String(parsed.userMessage || fallback.userMessage),
       };
     } catch {
+      // @silent-fallback-ok — JSON parse in heuristic path
       return fallback;
     }
   }
@@ -600,7 +601,7 @@ export class StallTriageNurse extends EventEmitter {
         this.history = saved.slice(-StallTriageNurse.MAX_HISTORY);
       }
     } catch {
-      // State not available yet — no problem
+      // @silent-fallback-ok — state load during early startup
     }
   }
 
@@ -609,7 +610,7 @@ export class StallTriageNurse extends EventEmitter {
     try {
       this.state.set(StallTriageNurse.STATE_KEY, this.history);
     } catch {
-      // Non-critical
+      // @silent-fallback-ok — state persistence is best-effort
     }
   }
 

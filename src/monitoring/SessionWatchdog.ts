@@ -295,6 +295,7 @@ export class SessionWatchdog extends EventEmitter {
       const pid = parseInt(claudePidStr, 10);
       return isNaN(pid) ? null : pid;
     } catch {
+      // @silent-fallback-ok — process detection returns null
       return null;
     }
   }
@@ -324,6 +325,7 @@ export class SessionWatchdog extends EventEmitter {
       }
       return results;
     } catch {
+      // @silent-fallback-ok — process enumeration returns empty
       return [];
     }
   }
@@ -358,6 +360,7 @@ export class SessionWatchdog extends EventEmitter {
     try {
       process.kill(pid, signal as NodeJS.Signals);
     } catch (err: any) {
+      // @silent-fallback-ok — ESRCH expected for dead processes
       if (err.code !== 'ESRCH') {
         console.error(`[Watchdog] Failed to send ${signal} to ${pid}:`, err);
       }
@@ -369,6 +372,7 @@ export class SessionWatchdog extends EventEmitter {
       process.kill(pid, 0);
       return true;
     } catch {
+      // @silent-fallback-ok — signal 0 check
       return false;
     }
   }

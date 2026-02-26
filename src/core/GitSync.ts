@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { MachineIdentityManager } from './MachineIdentity.js';
 import type { SecurityLog } from './SecurityLog.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -116,6 +117,7 @@ export class GitSyncManager {
       const signing = this.gitConfigGet('commit.gpgsign');
       return format === 'ssh' && signing === 'true';
     } catch {
+      // @silent-fallback-ok — git config read, signing detection
       return false;
     }
   }
@@ -154,6 +156,13 @@ export class GitSyncManager {
         result.conflicts = this.detectConflicts();
         this.resolveConflicts(result);
       }
+      DegradationReporter.getInstance().report({
+        feature: 'GitSync.pull',
+        primary: 'Clean git pull',
+        fallback: 'Attempt auto-resolution of conflicts',
+        reason: `Why: ${errMsg}`,
+        impact: 'Conflicts may not auto-resolve correctly',
+      });
     }
 
     // 2. Verify pulled commits
@@ -209,6 +218,7 @@ export class GitSyncManager {
 
       return true;
     } catch {
+      // @silent-fallback-ok — push failure boolean return
       return false;
     }
   }
@@ -322,6 +332,7 @@ export class GitSyncManager {
       const status = this.gitExec(['diff', '--name-only', '--diff-filter=U']);
       return status.trim().split('\n').filter(l => l.trim());
     } catch {
+      // @silent-fallback-ok — conflict list returns empty
       return [];
     }
   }
@@ -385,7 +396,14 @@ export class GitSyncManager {
       fs.writeFileSync(filePath, JSON.stringify(merged, null, 2));
       this.gitExec(['add', filePath]);
       return true;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'GitSync.resolveRelationshipConflict',
+        primary: 'Auto-resolve relationship file conflicts',
+        fallback: 'Leave conflict unresolved',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Relationship data may be inconsistent',
+      });
       return false;
     }
   }
@@ -408,7 +426,14 @@ export class GitSyncManager {
       fs.writeFileSync(filePath, winner);
       this.gitExec(['add', filePath]);
       return true;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'GitSync.resolveNewerWins',
+        primary: 'Auto-resolve via newer-wins strategy',
+        fallback: 'Leave conflict unresolved',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'File may remain in conflict state',
+      });
       return false;
     }
   }
@@ -436,7 +461,14 @@ export class GitSyncManager {
         return true;
       }
       return false;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'GitSync.resolveUnionById',
+        primary: 'Auto-resolve via union-by-ID',
+        fallback: 'Leave conflict unresolved',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Array-based files may remain in conflict state',
+      });
       return false;
     }
   }

@@ -35,6 +35,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SessionManager } from './SessionManager.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -134,6 +135,7 @@ export class DispatchExecutor {
       if (!Array.isArray(parsed.steps) || parsed.steps.length === 0) return null;
       return parsed as ActionPayload;
     } catch {
+      // @silent-fallback-ok — malformed JSON rejected
       return null;
     }
   }
@@ -372,6 +374,13 @@ export class DispatchExecutor {
         output: `Spawned agentic session: ${tmuxSession}`,
       };
     } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'DispatchExecutor.executeStep',
+        primary: 'Spawn agentic session for dispatch action',
+        fallback: 'Return error to user',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Dispatch action failed — user notified but no system alert',
+      });
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
   }

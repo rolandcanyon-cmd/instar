@@ -131,7 +131,7 @@ export class CaffeinateManager extends EventEmitter {
       try {
         process.kill(this.pid, 'SIGTERM');
       } catch {
-        // Already dead
+        // @silent-fallback-ok — process already dead
       }
     }
     this.process = null;
@@ -147,6 +147,7 @@ export class CaffeinateManager extends EventEmitter {
         process.kill(this.pid, 0);
         return; // Still alive
       } catch {
+        // @silent-fallback-ok — signal 0 detection
         console.warn(`[CaffeinateManager] caffeinate PID ${this.pid} is dead`);
         this.process = null;
         this.pid = null;

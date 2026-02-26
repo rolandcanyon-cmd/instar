@@ -50,6 +50,7 @@ function hasHomebrew(): boolean {
     execFileSync('which', ['brew'], { encoding: 'utf-8', stdio: 'pipe' });
     return true;
   } catch {
+    // @silent-fallback-ok — homebrew detection
     return false;
   }
 }
@@ -62,6 +63,7 @@ function getTmuxVersion(tmuxPath: string): string | undefined {
     const output = execFileSync(tmuxPath, ['-V'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     return output.replace('tmux ', '');
   } catch {
+    // @silent-fallback-ok — tmux version detection
     return undefined;
   }
 }
@@ -78,6 +80,7 @@ function getClaudeVersion(claudePath: string): string | undefined {
     }).trim();
     return output || undefined;
   } catch {
+    // @silent-fallback-ok — claude version detection
     return undefined;
   }
 }
@@ -208,6 +211,7 @@ function installPrerequisite(result: PrerequisiteResult): boolean {
     });
     return true;
   } catch {
+    // @silent-fallback-ok — install failure communicated via return
     return false;
   }
 }

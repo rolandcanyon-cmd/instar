@@ -28,7 +28,9 @@ export function getInstarVersion(): string {
       }
       dir = path.dirname(dir);
     }
-  } catch { /* ignore */ }
+  } catch {
+    // @silent-fallback-ok — version detection defaults to 0.0.0
+  }
   return '0.0.0';
 }
 
@@ -48,7 +50,7 @@ export function detectTmuxPath(): string | null {
     const result = execFileSync('which', ['tmux'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
     if (result && fs.existsSync(result)) return result;
   } catch {
-    // tmux not found
+    // @silent-fallback-ok — tmux path detection loop
   }
 
   return null;
@@ -68,7 +70,9 @@ export function detectClaudePath(): string | null {
     if (npmPrefix) {
       candidates.push(path.join(npmPrefix, 'bin', 'claude'));
     }
-  } catch { /* ignore */ }
+  } catch {
+    // @silent-fallback-ok — claude path detection loop
+  }
 
   // Check nvm/fnm managed paths
   if (process.env.NVM_BIN) {
@@ -84,7 +88,7 @@ export function detectClaudePath(): string | null {
     const result = execFileSync('which', ['claude'], { encoding: 'utf-8', stdio: 'pipe' }).trim();
     if (result && fs.existsSync(result)) return result;
   } catch {
-    // claude not found
+    // @silent-fallback-ok — claude path detection loop
   }
 
   return null;

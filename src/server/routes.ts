@@ -2015,6 +2015,13 @@ export function createRoutes(ctx: RouteContext): Router {
       const page = await ctx.publisher.editPage(pagePath, title, markdown);
       res.json(page);
     } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'routes.editPage',
+        primary: 'Edit page via API',
+        fallback: 'Return 500 error',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Page edit failed — user sees error but no system alert for pattern detection',
+      });
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
@@ -2280,6 +2287,13 @@ export function createRoutes(ctx: RouteContext): Router {
         ctx.telegram.onTopicMessage(message);
         res.json({ ok: true, forwarded: true });
       } catch (err) {
+        DegradationReporter.getInstance().report({
+          feature: 'routes.onTopicMessage',
+          primary: 'Route Telegram message to handler',
+          fallback: 'Return 500 — message routing failed',
+          reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+          impact: 'User message may not reach session, no system alert',
+        });
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }
     } else if (ctx.sessionManager) {
@@ -2340,7 +2354,7 @@ export function createRoutes(ctx: RouteContext): Router {
             const reg = fs.existsSync(registryPath) ? JSON.parse(fs.readFileSync(registryPath, 'utf-8')) : { topicToSession: {}, topicToName: {} };
             reg.topicToSession[String(topicId)] = newSessionName;
             fs.writeFileSync(registryPath, JSON.stringify(reg, null, 2));
-          } catch { /* non-critical */ }
+          } catch { /* @silent-fallback-ok — registry write non-critical */ }
           console.log(`[telegram-forward] Spawned "${newSessionName}" for topic ${topicId}`);
         }).catch((err) => {
           console.error(`[telegram-forward] Spawn failed:`, err);
@@ -2936,6 +2950,7 @@ export function createRoutes(ctx: RouteContext): Router {
               const entry = JSON.parse(line);
               return entry.sourceMachineId === machineId;
             } catch {
+              // @silent-fallback-ok — JSONL parse, skip corrupted
               return false;
             }
           }).length;

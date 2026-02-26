@@ -258,7 +258,7 @@ export class FeedbackManager {
           succeeded++;
         }
       } catch {
-        // Skip, will retry next time
+        // @silent-fallback-ok — retry on next attempt
       }
     }
 

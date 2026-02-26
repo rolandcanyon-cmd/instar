@@ -178,7 +178,7 @@ export class GitStateManager {
           this.push();
         }
       } catch {
-        // Auto-commit failures are non-fatal
+        // @silent-fallback-ok — auto-commit non-fatal
       }
       this.debounceTimer = null;
     }, debounceMs);
@@ -221,6 +221,7 @@ export class GitStateManager {
       this.git('remote', 'get-url', 'origin');
       this.git('remote', 'set-url', 'origin', remote);
     } catch {
+      // @silent-fallback-ok — remote URL set, try add instead
       this.git('remote', 'add', 'origin', remote);
     }
 
@@ -257,6 +258,7 @@ export class GitStateManager {
       this.git('remote', 'get-url', 'origin');
       this.git('remote', 'set-url', 'origin', remote);
     } catch {
+      // @silent-fallback-ok — remote URL set, try add instead
       this.git('remote', 'add', 'origin', remote);
     }
 
@@ -281,6 +283,7 @@ export class GitStateManager {
         return { hash, message, author, date };
       });
     } catch {
+      // @silent-fallback-ok — async pane fallback
       return [];
     }
   }
@@ -337,7 +340,7 @@ export class GitStateManager {
         ahead = parseInt(aheadStr, 10) || 0;
       }
     } catch {
-      // No upstream configured — that's fine
+      // @silent-fallback-ok — no upstream configured
     }
 
     // Get current branch
@@ -345,7 +348,7 @@ export class GitStateManager {
     try {
       branch = this.git('rev-parse', '--abbrev-ref', 'HEAD').trim();
     } catch {
-      // Fallback to config
+      // @silent-fallback-ok — head detection fallback to config
     }
 
     return {

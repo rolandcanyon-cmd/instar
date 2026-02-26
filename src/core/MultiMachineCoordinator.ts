@@ -295,7 +295,7 @@ export class MultiMachineCoordinator extends EventEmitter {
           try {
             this.identityManager.touchMachine(this._identity.machineId);
           } catch {
-            // Non-critical
+            // @silent-fallback-ok — lastSeen update non-critical
           }
         }
       }

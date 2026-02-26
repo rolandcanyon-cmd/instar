@@ -19,6 +19,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -88,6 +89,7 @@ export class MasterKeyManager {
     try {
       return this.readKeychain() !== null;
     } catch {
+      // @silent-fallback-ok — keychain unavailable, file fallback
       return false;
     }
   }
@@ -122,6 +124,7 @@ export class MasterKeyManager {
       ], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
       return Buffer.from(result, 'base64');
     } catch {
+      // @silent-fallback-ok — platform keychain read
       return null;
     }
   }
@@ -135,7 +138,9 @@ export class MasterKeyManager {
           '-s', KEYCHAIN_SERVICE,
           '-a', KEYCHAIN_ACCOUNT,
         ], { stdio: 'pipe', timeout: 5000 });
-      } catch { /* OK — entry might not exist */ }
+      } catch {
+        // @silent-fallback-ok — entry may not exist
+      }
 
       execFileSync('security', [
         'add-generic-password',
@@ -144,7 +149,14 @@ export class MasterKeyManager {
         '-w', key.toString('base64'),
       ], { stdio: 'pipe', timeout: 5000 });
       return true;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'SecretStore.writeMacOSKeychain',
+        primary: 'Persist master key to macOS keychain',
+        fallback: 'Key only in memory — lost on restart',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Master key not persisted, may be lost',
+      });
       return false;
     }
   }
@@ -158,6 +170,7 @@ export class MasterKeyManager {
       ], { encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
       return Buffer.from(result, 'base64');
     } catch {
+      // @silent-fallback-ok — linux keychain read
       return null;
     }
   }
@@ -175,7 +188,14 @@ export class MasterKeyManager {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       return true;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'SecretStore.writeLinuxKeychain',
+        primary: 'Persist master key to Linux keychain',
+        fallback: 'Key only in memory — lost on restart',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Master key not persisted, may be lost',
+      });
       return false;
     }
   }

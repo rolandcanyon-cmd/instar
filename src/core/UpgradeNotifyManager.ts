@@ -267,6 +267,7 @@ export class UpgradeNotifyManager {
       const content = fs.readFileSync(this.config.pendingGuidePath, 'utf-8');
       return content.trim() || null;
     } catch {
+      // @silent-fallback-ok — pending guide returns null
       return null;
     }
   }

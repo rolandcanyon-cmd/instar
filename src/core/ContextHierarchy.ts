@@ -235,7 +235,9 @@ export class ContextHierarchy {
           if (content && !content.startsWith('<!--') || content.includes('\n\n')) {
             parts.push(content);
           }
-        } catch { /* corrupt file */ }
+        } catch {
+          // @silent-fallback-ok — segment load, empty string
+        }
       }
     }
 
@@ -254,7 +256,9 @@ export class ContextHierarchy {
       if (fs.existsSync(filePath)) {
         return fs.readFileSync(filePath, 'utf-8');
       }
-    } catch { /* corrupt file */ }
+    } catch {
+      // @silent-fallback-ok — segment load returns null
+    }
     return null;
   }
 

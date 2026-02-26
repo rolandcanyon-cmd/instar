@@ -475,6 +475,7 @@ export class DispatchManager {
     try {
       return fs.readFileSync(this.contextFile, 'utf-8');
     } catch {
+      // @silent-fallback-ok — context file returns empty
       return '';
     }
   }
@@ -645,6 +646,7 @@ export class DispatchManager {
       const data = JSON.parse(fs.readFileSync(this.lastCheckFile, 'utf-8'));
       return data.lastCheck || null;
     } catch {
+      // @silent-fallback-ok — last check returns null
       return null;
     }
   }

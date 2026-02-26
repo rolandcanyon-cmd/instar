@@ -250,7 +250,9 @@ export class CoherenceGate {
         this.config.topicProjects = data;
         return data;
       }
-    } catch { /* corrupt file */ }
+    } catch {
+      // @silent-fallback-ok — corrupt bindings, empty map
+    }
     return {};
   }
 
@@ -450,6 +452,7 @@ export class CoherenceGate {
         stdio: 'pipe',
       }).trim() || null;
     } catch {
+      // @silent-fallback-ok — git remote detection
       return null;
     }
   }

@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Session, JobState, ActivityEvent } from './types.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 export class StateManager {
   private stateDir: string;
@@ -53,8 +54,15 @@ export class StateManager {
     if (!fs.existsSync(filePath)) return null;
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    } catch {
+    } catch (err) {
       console.warn(`[StateManager] Corrupted session file: ${filePath}`);
+      DegradationReporter.getInstance().report({
+        feature: 'StateManager.getSession',
+        primary: 'Load valid session state from JSON',
+        fallback: 'Return null — session unavailable',
+        reason: `Corrupted session file: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Session data lost, may affect job scheduling',
+      });
       return null;
     }
   }
@@ -75,8 +83,15 @@ export class StateManager {
     for (const f of files) {
       try {
         sessions.push(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')));
-      } catch {
+      } catch (err) {
         console.warn(`[StateManager] Corrupted session file: ${f}`);
+        DegradationReporter.getInstance().report({
+          feature: 'StateManager.listSessions',
+          primary: 'List all sessions from state files',
+          fallback: 'Skip corrupted session file',
+          reason: `Corrupted session file ${f}: ${err instanceof Error ? err.message : String(err)}`,
+          impact: 'Some sessions invisible to scheduler',
+        });
       }
     }
 
@@ -94,8 +109,15 @@ export class StateManager {
     if (!fs.existsSync(filePath)) return null;
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    } catch {
+    } catch (err) {
       console.warn(`[StateManager] Corrupted job state file: ${filePath}`);
+      DegradationReporter.getInstance().report({
+        feature: 'StateManager.getJobState',
+        primary: 'Load job state from JSON',
+        fallback: 'Return null — job state unavailable',
+        reason: `Corrupted job state file: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Job scheduling may use stale data',
+      });
       return null;
     }
   }
@@ -118,6 +140,7 @@ export class StateManager {
       const filePath = path.join(dir, `activity-${date}.jsonl`);
       fs.appendFileSync(filePath, JSON.stringify(event) + '\n');
     } catch (err) {
+      // @silent-fallback-ok — activity log write non-critical
       console.error(`[StateManager] Failed to append event: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
@@ -148,6 +171,7 @@ export class StateManager {
         try {
           event = JSON.parse(line);
         } catch {
+          // @silent-fallback-ok — JSONL line parse, skip corrupted
           continue; // Skip corrupted lines
         }
 
@@ -173,8 +197,15 @@ export class StateManager {
     if (!fs.existsSync(filePath)) return null;
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    } catch {
+    } catch (err) {
       console.warn(`[StateManager] Corrupted state file: ${filePath}`);
+      DegradationReporter.getInstance().report({
+        feature: 'StateManager.get',
+        primary: 'Load generic state file',
+        fallback: 'Return null — state unavailable',
+        reason: `Corrupted state file: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Feature depending on this state may malfunction',
+      });
       return null;
     }
   }

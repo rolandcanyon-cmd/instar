@@ -143,7 +143,7 @@ function matchPatterns(output: string, patterns: string[]): string | null {
         return pattern;
       }
     } catch {
-      // If regex is invalid, try simple string match
+      // @silent-fallback-ok — regex fallback to string match
       if (output.includes(pattern.toLowerCase())) {
         return pattern;
       }

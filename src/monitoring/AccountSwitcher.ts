@@ -246,6 +246,7 @@ export class AccountSwitcher {
       if (!fs.existsSync(this.registryPath)) return null;
       return JSON.parse(fs.readFileSync(this.registryPath, 'utf-8'));
     } catch {
+      // @silent-fallback-ok — defensive registry loading
       return null;
     }
   }

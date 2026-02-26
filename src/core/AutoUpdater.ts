@@ -24,6 +24,7 @@ import path from 'node:path';
 import type { UpdateChecker } from './UpdateChecker.js';
 import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
 import type { StateManager } from './StateManager.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 export interface AutoUpdaterConfig {
   /** How often to check for updates, in minutes. Default: 30 */
@@ -354,7 +355,7 @@ export class AutoUpdater {
       if (fs.existsSync(candidate) && !isStaleSource(candidate)) {
         return { bin: candidate, method: 'npm-prefix-g' };
       }
-    } catch { /* npm prefix failed */ }
+    } catch { /* @silent-fallback-ok — npm prefix, try next strategy */ }
 
     // Strategy 4: Nuclear — find the installed package's main entry point directly.
     // This bypasses the bin symlink and runs the module's CLI entry with node.
@@ -367,7 +368,8 @@ export class AutoUpdater {
       if (fs.existsSync(mainEntry)) {
         return { bin: mainEntry, method: 'npm-root-g-direct', useNode: true };
       }
-    } catch { /* npm root failed */ }
+    } catch { // @silent-fallback-ok — npm root lookup, try next strategy
+    }
 
     // Strategy 5: process.argv fallback — only if it's not from a stale source
     const scriptPath = process.argv[1] || '';
@@ -439,6 +441,13 @@ export class AutoUpdater {
     } catch (err) {
       console.error(`[AutoUpdater] Self-restart failed: ${err}`);
       console.error('[AutoUpdater] Update was applied but manual restart is needed.');
+      DegradationReporter.getInstance().report({
+        feature: 'AutoUpdater.selfRestart',
+        primary: 'Restart agent after auto-update',
+        fallback: 'Old code continues running until manual restart',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Updated code not active — agent runs stale version',
+      });
     }
   }
 
@@ -455,6 +464,7 @@ export class AutoUpdater {
       const files = fs.readdirSync(plistDir);
       return files.some(f => f.startsWith('ai.instar.') && f.endsWith('.plist'));
     } catch {
+      // @silent-fallback-ok — launchd check returns false
       return false;
     }
   }
@@ -474,6 +484,7 @@ export class AutoUpdater {
           return;
         }
       } catch (err) {
+        // @silent-fallback-ok — notification fallback to console
         console.error(`[AutoUpdater] Telegram notification failed: ${err}`);
       }
     }
@@ -520,6 +531,7 @@ export class AutoUpdater {
       const guidePath = path.join(moduleDir, 'upgrades', `${version}.md`);
       return fs.existsSync(guidePath);
     } catch {
+      // @silent-fallback-ok — logging should never break gate
       return false;
     }
   }

@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DecisionJournalEntry } from './types.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 export interface DecisionJournalStats {
   /** Total number of entries */
@@ -146,11 +147,19 @@ export class DecisionJournal {
         try {
           return JSON.parse(line) as DecisionJournalEntry;
         } catch {
+          // @silent-fallback-ok — JSONL line parse, skip corrupted
           return null;
         }
       }).filter(Boolean) as DecisionJournalEntry[];
     } catch (error) {
       console.error(`[DecisionJournal] Failed to read ${this.journalFile}:`, error);
+      DegradationReporter.getInstance().report({
+        feature: 'DecisionJournal.readLines',
+        primary: 'Read decision journal from JSONL',
+        fallback: 'Return empty array — no history',
+        reason: `Failed to read journal: ${error instanceof Error ? error.message : String(error)}`,
+        impact: 'Alignment analysis lacks decision data',
+      });
       return [];
     }
   }

@@ -480,7 +480,7 @@ export class ExternalOperationGate {
       // If LLM response is unparseable, default to cautious
       return 'show-plan';
     } catch {
-      // If LLM fails, don't block — fall back to programmatic decision
+      // @silent-fallback-ok — LLM fails, proceed (fail-open)
       return 'proceed';
     }
   }
@@ -521,7 +521,7 @@ export class ExternalOperationGate {
       }
       fs.appendFileSync(this.logPath, JSON.stringify(entry) + '\n');
     } catch {
-      // Logging should never break the gate
+      // @silent-fallback-ok — logging non-critical
     }
   }
 
@@ -540,6 +540,7 @@ export class ExternalOperationGate {
         .slice(-limit)
         .map(line => JSON.parse(line) as OperationLogEntry);
     } catch {
+      // @silent-fallback-ok — log read returns empty
       return [];
     }
   }

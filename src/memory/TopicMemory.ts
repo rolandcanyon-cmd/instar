@@ -501,7 +501,7 @@ export class TopicMemory {
             sessionName: entry.sessionName ?? null,
           });
         }
-      } catch { /* skip malformed */ }
+      } catch { /* @silent-fallback-ok — JSONL parse, skip corrupted */ }
     }
 
     return this.insertMessages(messages);
@@ -559,7 +559,7 @@ export class TopicMemory {
     let dbSize = 0;
     try {
       dbSize = fs.statSync(this.dbPath).size;
-    } catch { /* file may not exist yet */ }
+    } catch { /* @silent-fallback-ok — stat returns 0, non-critical */ }
 
     return {
       totalMessages: msgCount,

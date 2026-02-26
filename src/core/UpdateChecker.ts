@@ -17,6 +17,7 @@ import path from 'node:path';
 import type { UpdateInfo, UpdateResult } from './types.js';
 import { PostUpdateMigrator } from './PostUpdateMigrator.js';
 import type { MigratorConfig } from './PostUpdateMigrator.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/SageMindAI/instar/releases';
 
@@ -101,7 +102,7 @@ export class UpdateChecker {
       try {
         info.changeSummary = await this.fetchChangelog(latestVersion);
       } catch {
-        // Non-critical — proceed without changelog
+        // @silent-fallback-ok — changelog fetch optional
       }
     }
 
@@ -216,6 +217,13 @@ export class UpdateChecker {
         } catch (fallbackErr) {
           migrationSummary = ` Post-update migration failed: ${err instanceof Error ? err.message : String(err)}.`;
         }
+        DegradationReporter.getInstance().report({
+          feature: 'UpdateChecker.postUpdateMigration',
+          primary: 'Run post-update migrations',
+          fallback: 'Migration skipped — data may not be upgraded',
+          reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+          impact: 'Agent configuration may be stale after update',
+        });
       }
     }
 
@@ -301,6 +309,7 @@ export class UpdateChecker {
     try {
       return JSON.parse(fs.readFileSync(this.rollbackFile, 'utf-8'));
     } catch {
+      // @silent-fallback-ok — rollback info optional
       return null;
     }
   }
@@ -330,7 +339,7 @@ export class UpdateChecker {
         if (release.name) return release.name;
       }
     } catch {
-      // Non-critical — try commit fallback
+      // @silent-fallback-ok — changelog fetch optional
     }
 
     // Fallback: fetch recent commits from GitHub
@@ -360,7 +369,7 @@ export class UpdateChecker {
         }
       }
     } catch {
-      // Non-critical
+      // @silent-fallback-ok — GitHub commits API optional
     }
 
     return undefined;
@@ -374,6 +383,7 @@ export class UpdateChecker {
     try {
       return JSON.parse(fs.readFileSync(this.stateFile, 'utf-8'));
     } catch {
+      // @silent-fallback-ok — last check state, will re-check
       return null;
     }
   }
@@ -392,7 +402,7 @@ export class UpdateChecker {
         const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
         return pkg.version || '0.0.0';
       }
-    } catch { /* fallback below */ }
+    } catch { /* @silent-fallback-ok — version read defaults to 0.0.0 */ }
 
     return '0.0.0';
   }

@@ -62,6 +62,7 @@ function isProcessAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch {
+    // @silent-fallback-ok — signal 0 process check
     return false;
   }
 }

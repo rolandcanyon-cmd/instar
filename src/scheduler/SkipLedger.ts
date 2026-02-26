@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SkipEvent, SkipReason, WorkloadSignal } from '../core/types.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 const RETENTION_DAYS = 30;
 
@@ -183,11 +184,19 @@ export class SkipLedger {
         try {
           return JSON.parse(line) as T;
         } catch {
+          // @silent-fallback-ok — JSONL line parse, skip corrupted
           return null;
         }
       }).filter(Boolean) as T[];
     } catch (error) {
       console.error(`[SkipLedger] Failed to read ${file}:`, error);
+      DegradationReporter.getInstance().report({
+        feature: 'SkipLedger.readLines',
+        primary: 'Read skip/workload ledger',
+        fallback: 'Return empty — no historical data',
+        reason: `Failed to read ledger: ${error instanceof Error ? error.message : String(error)}`,
+        impact: 'Auto-tune engine lacks historical context',
+      });
       return [];
     }
   }

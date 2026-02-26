@@ -147,6 +147,7 @@ export function checkGitVersion(): { version: string; safe: boolean; minimum: st
     const safe = compareVersions(version, minimum) >= 0;
     return { version, safe, minimum };
   } catch {
+    // @silent-fallback-ok — legacy migration, empty registry safe
     return { version: 'not found', safe: false, minimum };
   }
 }

@@ -601,7 +601,7 @@ export class JobScheduler {
       });
       return true;
     } catch {
-      // Non-zero exit = nothing to do, skip silently
+      // @silent-fallback-ok — gate command non-zero exit means skip
       this.state.appendEvent({
         type: 'job_gate_skip',
         summary: `Job "${job.slug}" skipped — gate check returned nothing to do`,

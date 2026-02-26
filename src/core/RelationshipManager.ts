@@ -268,7 +268,7 @@ Respond with ONLY one of:
         return null;
       }
     } catch {
-      // LLM call failed — fall back to heuristic behavior
+      // @silent-fallback-ok — LLM fallback to heuristic
     }
 
     // Default to heuristic: single unambiguous match → link, else new
@@ -308,7 +308,8 @@ Respond with ONLY: YES or NO`;
       const response = await intelligence.evaluate(prompt, { model: 'fast', maxTokens: 10, temperature: 0 });
       return response.trim().toUpperCase().startsWith('YES');
     } catch {
-      return false; // Fail safe: don't confirm on error
+      // @silent-fallback-ok — fail-closed on LLM error
+      return false;
     }
   }
 

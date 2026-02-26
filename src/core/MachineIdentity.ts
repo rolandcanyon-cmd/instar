@@ -407,6 +407,7 @@ export class MachineIdentityManager {
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     } catch {
+      // @silent-fallback-ok — remote identity returns null
       return null;
     }
   }

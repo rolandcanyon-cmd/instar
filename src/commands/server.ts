@@ -116,6 +116,7 @@ async function spawnSessionForTopic(
     try {
       contextContent = topicMemory.formatContextForSession(topicId, 30);
     } catch (err) {
+      // @silent-fallback-ok — TopicMemory format, JSONL fallback
       console.error(`[telegram→session] TopicMemory context failed, falling back to JSONL:`, err);
     }
   }
@@ -253,6 +254,7 @@ function wireTelegramCallbacks(
       });
       return true;
     } catch {
+      // @silent-fallback-ok — interrupt boolean return
       return false;
     }
   };
@@ -366,6 +368,7 @@ function wireTelegramCallbacks(
       const classification = classifySessionDeath(output, quotaState);
       return { cause: classification.cause, detail: classification.detail };
     } catch {
+      // @silent-fallback-ok — classify death returns null
       return null;
     }
   };
@@ -384,7 +387,7 @@ function wireTelegramCallbacks(
       // Kill any existing login session
       try {
         execFileSync(tmuxPath, ['kill-session', '-t', `=${loginSession}`], { stdio: 'ignore' });
-      } catch { /* not running */ }
+      } catch { /* @silent-fallback-ok — kill login session, may be dead */ }
 
       // Start login command in tmux
       const cliPath = claudePath || 'claude';
@@ -646,13 +649,13 @@ function cleanupTelegramTempFiles(): void {
           fs.unlinkSync(filepath);
           cleaned++;
         }
-      } catch { /* skip individual file errors */ }
+      } catch { /* @silent-fallback-ok — temp file cleanup */ }
     }
     if (cleaned > 0) {
       console.log(`[cleanup] Removed ${cleaned} stale temp files from ${tmpDir}`);
     }
   } catch {
-    // Non-critical — don't fail startup on cleanup errors
+    // @silent-fallback-ok — temp dir cleanup
   }
 }
 
@@ -665,7 +668,14 @@ function getInstalledVersion(): string {
   try {
     const pkgPath = path.resolve(new URL(import.meta.url).pathname, '../../../package.json');
     return JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version || '';
-  } catch {
+  } catch (err) {
+    DegradationReporter.getInstance().report({
+      feature: 'server.getInstalledVersion',
+      primary: 'Read installed package version from package.json',
+      fallback: 'Return empty string — version unknown',
+      reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+      impact: 'Version display and upgrade guide notifications may use blank version',
+    });
     return '';
   }
 }
@@ -823,7 +833,7 @@ export async function startServer(options: StartOptions): Promise<void> {
         if (fs.existsSync(keyPath)) {
           localSigningKeyPem = fs.readFileSync(keyPath, 'utf-8');
         }
-      } catch { /* Non-critical if key not found */ }
+      } catch { /* @silent-fallback-ok — signing key optional */ }
     }
 
     // Git sync for multi-machine (awake machines only — standby pulls via cron or manual)
@@ -850,6 +860,7 @@ export async function startServer(options: StartOptions): Promise<void> {
           console.log(pc.green(`  Git sync: pulled ${syncResult.commitsPulled} commit(s)`));
         }
       } catch (err) {
+        // @silent-fallback-ok — git sync disabled gracefully
         console.log(pc.yellow(`  Git sync setup: ${err instanceof Error ? err.message : String(err)}`));
       }
     }
@@ -995,6 +1006,7 @@ export async function startServer(options: StartOptions): Promise<void> {
           }
         };
       } catch (err) {
+        // @silent-fallback-ok — already uses DegradationReporter
         const reason = err instanceof Error ? err.message : String(err);
         // Reset to undefined so the JSONL fallback is used for session context
         // and API routes return clear 503 "not initialized" errors instead of
@@ -1150,7 +1162,7 @@ export async function startServer(options: StartOptions): Promise<void> {
           if (topicId) {
             telegram.sendToTopic(topicId,
               `✅ Watchdog: session recovered (was at escalation level ${fromLevel})`
-            ).catch(() => {});
+            ).catch(() => { /* @silent-fallback-ok — notification loss */ });
           }
         }
       });
@@ -1364,7 +1376,7 @@ export async function startServer(options: StartOptions): Promise<void> {
         if (attentionTopicId) {
           telegram.sendToTopic(attentionTopicId,
             `Memory ${to}: ${memState.pressurePercent.toFixed(1)}% used, ${memState.freeGB.toFixed(1)}GB free (trend: ${memState.trend})`
-          ).catch(() => {});
+          ).catch(() => { /* @silent-fallback-ok — notification loss */ });
         }
       }
     });
@@ -1422,7 +1434,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       if (telegram) {
         const attentionTopicId = state.get<number>('agent-attention-topic');
         if (attentionTopicId) {
-          telegram.sendToTopic(attentionTopicId, `Wake detected after ~${event.sleepDurationSeconds}s sleep. Sessions re-validated.`).catch(() => {});
+          telegram.sendToTopic(attentionTopicId, `Wake detected after ~${event.sleepDurationSeconds}s sleep. Sessions re-validated.`).catch(() => { /* @silent-fallback-ok — notification loss */ });
         }
       }
     });
@@ -1434,6 +1446,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       projectMapper.generateAndSave();
       console.log(pc.green('  Project map generated'));
     } catch (err) {
+      // @silent-fallback-ok — project map non-critical
       console.error(`  Project map generation failed (non-critical): ${err instanceof Error ? err.message : err}`);
     }
 
@@ -1546,7 +1559,7 @@ export async function startServer(options: StartOptions): Promise<void> {
         }
       }
     } catch (err) {
-      // Non-critical — don't crash the server over autostart
+      // @silent-fallback-ok — auto-start non-critical
       console.error(`  Auto-start check failed: ${err instanceof Error ? err.message : err}`);
     }
 
@@ -1606,7 +1619,7 @@ export async function startServer(options: StartOptions): Promise<void> {
                     const logFile = path.join(logDir, `activity-${today}.jsonl`);
                     const entry = { ...event, timestamp: new Date().toISOString() };
                     fs.appendFileSync(logFile, JSON.stringify(entry) + '\n');
-                  } catch { /* non-critical */ }
+                  } catch { /* @silent-fallback-ok — activity log non-critical */ }
                 },
               );
 
@@ -1619,12 +1632,26 @@ export async function startServer(options: StartOptions): Promise<void> {
               }
             } catch (err) {
               console.error(`[UpgradeGuide] Failed to spawn notification session: ${err instanceof Error ? err.message : err}`);
+              DegradationReporter.getInstance().report({
+                feature: 'server.deliverUpgradeGuide',
+                primary: 'Spawn session to deliver upgrade guide',
+                fallback: 'Guide not delivered',
+                reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+                impact: 'User misses upgrade instructions',
+              });
             }
           }, 15_000); // 15 second delay — let everything settle
         }
       }
-    } catch {
+    } catch (err) {
       // Non-critical — don't crash the server over upgrade guide processing
+      DegradationReporter.getInstance().report({
+        feature: 'server.upgradeGuideProcessing',
+        primary: 'Check for and process pending upgrade guide',
+        fallback: 'Upgrade guide check skipped entirely',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Pending upgrade guide not detected — user may miss upgrade instructions until next restart',
+      });
     }
 
     // Graceful shutdown
@@ -1722,6 +1749,7 @@ export async function stopServer(options: { dir?: string }): Promise<void> {
         execFileSync(tmuxPath, ['has-session', '-t', `=${serverSessionName}`], { stdio: 'ignore' });
         // Still running
       } catch {
+        // @silent-fallback-ok — session check
         stopped = true;
         break;
       }
@@ -1735,7 +1763,7 @@ export async function stopServer(options: { dir?: string }): Promise<void> {
 
     console.log(pc.green(`Server stopped (session: ${serverSessionName})`));
   } catch {
-    // Fallback: force kill
+    // @silent-fallback-ok — graceful shutdown fallback to force
     try {
       execFileSync(tmuxPath, ['kill-session', '-t', `=${serverSessionName}`], { stdio: 'ignore' });
       console.log(pc.green(`Server stopped (forced kill: ${serverSessionName})`));

@@ -203,6 +203,7 @@ export class OrgIntentManager {
     try {
       return fs.readFileSync(this.orgIntentPath, 'utf-8');
     } catch {
+      // @silent-fallback-ok — ORG-INTENT read returns null
       return null;
     }
   }

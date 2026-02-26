@@ -185,6 +185,7 @@ export class UpgradeGuideProcessor {
     try {
       return fs.readFileSync(this.pendingGuidePath, 'utf-8');
     } catch {
+      // @silent-fallback-ok — pending guide returns null
       return null;
     }
   }
@@ -213,7 +214,7 @@ export class UpgradeGuideProcessor {
         return upgradesDir;
       }
     } catch {
-      // Module resolution failed
+      // @silent-fallback-ok — upgrades dir returns null
     }
     return null;
   }
@@ -237,6 +238,7 @@ export class UpgradeGuideProcessor {
         }
       }
     } catch {
+      // @silent-fallback-ok — dir read returns empty
       return [];
     }
 
@@ -255,6 +257,7 @@ export class UpgradeGuideProcessor {
       const data = JSON.parse(fs.readFileSync(this.processedFile, 'utf-8'));
       return data.processedVersions || [];
     } catch {
+      // @silent-fallback-ok — processed versions reset
       return [];
     }
   }
@@ -294,7 +297,7 @@ export class UpgradeGuideProcessor {
         fs.unlinkSync(this.pendingGuidePath);
       }
     } catch {
-      // Non-fatal
+      // @silent-fallback-ok — cleanup, file persists
     }
   }
 

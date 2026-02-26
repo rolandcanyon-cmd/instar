@@ -411,6 +411,7 @@ export class TelegramAdapter implements MessagingAdapter {
         console.log(`[telegram] Created Lifeline topic: ${topic.topicId}`);
         return topic.topicId;
       } catch (err) {
+        // @silent-fallback-ok — lifeline topic creation, logged
         console.error(`[telegram] Failed to create Lifeline topic: ${err}`);
         return null;
       }
@@ -491,6 +492,7 @@ export class TelegramAdapter implements MessagingAdapter {
         }
       }
     } catch (err) {
+      // @silent-fallback-ok — config persistence, in-memory ok
       console.warn(`[telegram] Failed to persist lifelineTopicId: ${err}`);
     }
   }
@@ -506,6 +508,7 @@ export class TelegramAdapter implements MessagingAdapter {
       });
       return true;
     } catch {
+      // @silent-fallback-ok — forum close boolean return
       return false;
     }
   }
@@ -638,17 +641,18 @@ export class TelegramAdapter implements MessagingAdapter {
           if (this.onStartMiniOnboarding) {
             await this.sendToTopic(GENERAL_TOPIC_ID,
               `Hi ${firstName}! Welcome! Setting up your account...`,
-            ).catch(() => {});
+            ).catch(() => { /* @silent-fallback-ok — supplementary notification */ });
             await this.onStartMiniOnboarding(telegramUserId, firstName, username).catch(err => {
+              // @silent-fallback-ok — supplementary notification
               console.error(`[telegram] Failed to start mini-onboarding: ${err}`);
               this.sendToTopic(GENERAL_TOPIC_ID,
                 `Sorry ${firstName}, there was an issue setting up your account. Please try again later.`,
-              ).catch(() => {});
+              ).catch(() => { /* @silent-fallback-ok — error notification, primary logged */ });
             });
           } else {
             await this.sendToTopic(GENERAL_TOPIC_ID,
               `Hi ${firstName}! Registration is currently being set up. Please try again later.`,
-            ).catch(() => {});
+            ).catch(() => { /* @silent-fallback-ok — unavailable notification */ });
           }
           break;
         }
@@ -805,10 +809,12 @@ export class TelegramAdapter implements MessagingAdapter {
             timestamp: entry.timestamp || new Date().toISOString(),
           };
         } catch {
+          // @silent-fallback-ok — JSONL parse, skip corrupted
           return null;
         }
       }).filter(Boolean) as Array<{ topicId: number; text: string; fromUser: boolean; timestamp: string }>;
     } catch {
+      // @silent-fallback-ok — log read, empty array safe
       return [];
     }
   }
@@ -923,6 +929,13 @@ export class TelegramAdapter implements MessagingAdapter {
             }
           } catch (err) {
             console.warn(`[telegram] Promise triage error:`, err);
+            DegradationReporter.getInstance().report({
+              feature: 'TelegramAdapter.onStallDetected',
+              primary: 'LLM-based stall triage diagnosis',
+              fallback: 'Stall goes undiagnosed',
+              reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+              impact: 'Stalled session persists without recovery attempt',
+            });
           }
         }
 
@@ -1303,11 +1316,12 @@ export class TelegramAdapter implements MessagingAdapter {
       const email = loginMatch[1]?.trim() || null;
       if (this.onLoginRequest) {
         this.onLoginRequest(email, topicId).catch(err => {
+          // @silent-fallback-ok — login error, user notified
           console.error('[telegram] Login flow failed:', err);
-          this.sendToTopic(topicId, `Login failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
+          this.sendToTopic(topicId, `Login failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => { /* @silent-fallback-ok — secondary notification */ });
         });
       } else {
-        await this.sendToTopic(topicId, 'Login not available.').catch(() => {});
+        await this.sendToTopic(topicId, 'Login not available.').catch(() => { /* @silent-fallback-ok — secondary notification */ });
       }
       return true;
     }
@@ -1449,7 +1463,7 @@ export class TelegramAdapter implements MessagingAdapter {
         console.log(`[telegram] Rotated message log: ${lines.length} -> ${kept.length} lines`);
       }
     } catch {
-      // Non-critical — don't fail on rotation errors
+      // @silent-fallback-ok — log rotation non-critical
     }
   }
 
@@ -1513,6 +1527,13 @@ export class TelegramAdapter implements MessagingAdapter {
       await this.apiCall('sendMessage', sendParams);
     } catch (err) {
       console.error(`[telegram] Failed to create attention topic for "${item.title}": ${err}`);
+      DegradationReporter.getInstance().report({
+        feature: 'TelegramAdapter.createAttentionItem',
+        primary: 'Send attention/escalation notification',
+        fallback: 'Attention item never delivered',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'User not notified of important escalation',
+      });
     }
 
     this.attentionItems.set(item.id, attention);

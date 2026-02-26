@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 const execFileAsync = promisify(execFile);
 import type { Session, SessionManagerConfig, SessionStatus, ModelTier } from './types.js';
@@ -103,7 +104,9 @@ export class SessionManager extends EventEmitter {
             console.warn(`[SessionManager] Session "${session.name}" exceeded timeout (${Math.round(elapsed)}m > ${maxMinutes}m). Killing.`);
             try {
               await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
-            } catch { /* ignore */ }
+            } catch {
+              // @silent-fallback-ok — tmux kill, session may be dead
+            }
             session.status = 'killed';
             session.endedAt = new Date().toISOString();
             this.state.saveSession(session);
@@ -237,7 +240,7 @@ export class SessionManager extends EventEmitter {
       // For any other command, assume alive (could be a Claude subprocess)
       return true;
     } catch {
-      // If we can't check, fall back to tmux session existence
+      // @silent-fallback-ok — pane inspection, assumes alive
       return true;
     }
   }
@@ -257,6 +260,7 @@ export class SessionManager extends EventEmitter {
         timeout: 5000,
       });
     } catch {
+      // @silent-fallback-ok — session existence check
       return false;
     }
 
@@ -322,6 +326,7 @@ export class SessionManager extends EventEmitter {
         { encoding: 'utf-8', timeout: 5000 }
       );
     } catch {
+      // @silent-fallback-ok — capture output, null handled by caller
       return null;
     }
   }
@@ -345,6 +350,7 @@ export class SessionManager extends EventEmitter {
       );
       return true;
     } catch {
+      // @silent-fallback-ok — send-keys boolean return
       return false;
     }
   }
@@ -363,6 +369,7 @@ export class SessionManager extends EventEmitter {
       );
       return true;
     } catch {
+      // @silent-fallback-ok — send-key boolean return
       return false;
     }
   }
@@ -606,6 +613,13 @@ export class SessionManager extends EventEmitter {
       }
     } catch (err) {
       console.error(`[SessionManager] Failed to inject message into ${tmuxSession}: ${err}`);
+      DegradationReporter.getInstance().report({
+        feature: 'SessionManager.injectMessage',
+        primary: 'Inject Telegram message into tmux session',
+        fallback: 'Message lost — user input never reaches Claude',
+        reason: `Failed to inject message: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'User message silently dropped',
+      });
     }
   }
 
@@ -646,6 +660,7 @@ export class SessionManager extends EventEmitter {
       });
       return true;
     } catch {
+      // @silent-fallback-ok — session existence check
       return false;
     }
   }

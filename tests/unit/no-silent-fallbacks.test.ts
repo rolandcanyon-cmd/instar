@@ -152,7 +152,7 @@ describe('No Silent Fallbacks', () => {
     // When you fix a silent fallback (add DegradationReporter.report()
     // or add @silent-fallback-ok exemption), lower this number.
     // ═══════════════════════════════════════════════════════════
-    const BASELINE = silentFallbacks.length;
+    const BASELINE = 0;
 
     if (silentFallbacks.length > 0) {
       const report = silentFallbacks.map(fb =>
@@ -182,8 +182,8 @@ describe('No Silent Fallbacks', () => {
       }
     }
 
-    // We wired DegradationReporter into at least 4 files during the audit
-    expect(filesWithReport.length).toBeGreaterThanOrEqual(4);
+    // We wired DegradationReporter into 15+ files during the full audit
+    expect(filesWithReport.length).toBeGreaterThanOrEqual(12);
   });
 
   it('DegradationReporter.ts exports required interface', () => {

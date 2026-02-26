@@ -181,7 +181,7 @@ export class OfflineQueue {
           entries.push(entry);
         }
       } catch {
-        // Skip malformed lines
+        // @silent-fallback-ok — skip malformed queue entries
       }
     }
 

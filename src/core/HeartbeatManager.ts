@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MachineRole } from './types.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -128,7 +129,14 @@ export class HeartbeatManager {
     if (!fs.existsSync(this.heartbeatPath)) return null;
     try {
       return JSON.parse(fs.readFileSync(this.heartbeatPath, 'utf-8'));
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'HeartbeatManager.readHeartbeat',
+        primary: 'Read heartbeat file for multi-machine coordination',
+        fallback: 'Return null — heartbeat unknown',
+        reason: `Failed to read heartbeat: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'May cause false failovers in multi-machine setup',
+      });
       return null;
     }
   }
