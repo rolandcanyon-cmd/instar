@@ -148,6 +148,8 @@ export class UpgradeGuideProcessor {
     const header = `# Instar Upgrade Guide\n\n` +
       `> You have ${pending.length} upgrade guide${pending.length > 1 ? 's' : ''} to process.\n` +
       `> Read through each section and take the suggested actions based on YOUR context.\n` +
+      `> **IMPORTANT**: All commands in these guides are for YOU (the agent) to execute directly.\n` +
+      `> Never relay commands to the user for them to run manually. You have full shell access.\n` +
       `> After processing, these guides won't appear again.\n\n` +
       `---\n\n`;
 

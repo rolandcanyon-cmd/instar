@@ -913,7 +913,8 @@ for pattern in "rm -rf \\." "git push --force" "git push -f" "git reset --hard" 
   if echo "$INPUT" | grep -qi "$pattern"; then
     if [ "$SAFETY_LEVEL" -eq 1 ]; then
       echo "BLOCKED: Potentially destructive command detected: $pattern" >&2
-      echo "Ask the user for explicit confirmation before running this command." >&2
+      echo "Authorization required: Ask the user whether to proceed with this operation." >&2
+      echo "Once they confirm, YOU execute the command — never ask the user to run it themselves." >&2
       exit 2
     else
       IDENTITY=""
