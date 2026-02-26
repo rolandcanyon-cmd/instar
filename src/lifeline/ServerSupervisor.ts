@@ -8,16 +8,22 @@
  * and monitors it via health checks.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { detectTmuxPath } from '../core/Config.js';
 
+/** Execute a shell command safely, returning stdout. */
+function shellExec(cmd: string, timeout = 5000): string {
+  return spawnSync('/bin/sh', ['-c', cmd], { encoding: 'utf-8', timeout }).stdout ?? '';
+}
+
 export interface SupervisorEvents {
   serverUp: [];
   serverDown: [reason: string];
   serverRestarting: [attempt: number];
+  circuitBroken: [totalFailures: number, lastCrashOutput: string];
 }
 
 export class ServerSupervisor extends EventEmitter {
@@ -39,6 +45,14 @@ export class ServerSupervisor extends EventEmitter {
   private consecutiveFailures = 0; // Hysteresis: require 2 consecutive failures before marking unhealthy
   private readonly unhealthyThreshold = 2;
   private stateDir: string | null;
+
+  // Circuit breaker — permanent give-up after too many total failures
+  private totalFailures = 0;
+  private totalFailureWindowStart = 0;
+  private readonly circuitBreakerThreshold = 20; // Total failures before giving up
+  private readonly circuitBreakerWindowMs = 60 * 60_000; // 1-hour window
+  private circuitBroken = false;
+  private lastCrashOutput = ''; // Last captured crash output for diagnostics
 
   constructor(options: {
     projectDir: string;
@@ -122,6 +136,9 @@ export class ServerSupervisor extends EventEmitter {
     serverSession: string;
     coolingDown: boolean;
     cooldownRemainingMs: number;
+    circuitBroken: boolean;
+    totalFailures: number;
+    lastCrashOutput: string;
   } {
     const coolingDown = this.maxRetriesExhaustedAt > 0;
     const cooldownRemainingMs = coolingDown
@@ -135,7 +152,23 @@ export class ServerSupervisor extends EventEmitter {
       serverSession: this.serverSessionName,
       coolingDown,
       cooldownRemainingMs,
+      circuitBroken: this.circuitBroken,
+      totalFailures: this.totalFailures,
+      lastCrashOutput: this.lastCrashOutput,
     };
+  }
+
+  /**
+   * Reset the circuit breaker — allows restart attempts to resume.
+   * Call this after fixing the underlying issue (e.g., via /lifeline restart).
+   */
+  resetCircuitBreaker(): void {
+    this.circuitBroken = false;
+    this.totalFailures = 0;
+    this.totalFailureWindowStart = 0;
+    this.restartAttempts = 0;
+    this.maxRetriesExhaustedAt = 0;
+    console.log('[Supervisor] Circuit breaker reset');
   }
 
   private spawnServer(): boolean {
@@ -240,6 +273,9 @@ export class ServerSupervisor extends EventEmitter {
   }
 
   private handleUnhealthy(): void {
+    // Circuit breaker — if we've given up, don't even try
+    if (this.circuitBroken) return;
+
     // Check if this is a planned restart (e.g., auto-update in progress).
     // If so, suppress the "server down" alert and don't auto-restart —
     // the replacement process will come up on its own.
@@ -256,6 +292,24 @@ export class ServerSupervisor extends EventEmitter {
       this.emit('serverDown', 'Health check failed');
     }
     this.consecutiveFailures = 0; // Reset after triggering action
+
+    // Track total failures for circuit breaker
+    const now = Date.now();
+    if (this.totalFailureWindowStart === 0 || (now - this.totalFailureWindowStart) > this.circuitBreakerWindowMs) {
+      // Reset window
+      this.totalFailureWindowStart = now;
+      this.totalFailures = 0;
+    }
+    this.totalFailures++;
+
+    // Circuit breaker: too many total failures in the window → give up
+    if (this.totalFailures >= this.circuitBreakerThreshold) {
+      this.circuitBroken = true;
+      console.error(`[Supervisor] CIRCUIT BREAKER: ${this.totalFailures} failures in ${Math.round(this.circuitBreakerWindowMs / 60000)}m window. Stopping auto-restart.`);
+      console.error(`[Supervisor] Last crash output:\n${this.lastCrashOutput}`);
+      this.emit('circuitBroken', this.totalFailures, this.lastCrashOutput);
+      return;
+    }
 
     // After max retries exhausted, wait for cooldown before trying again.
     // This prevents permanent death from transient issues (port conflicts, etc.)
@@ -283,8 +337,10 @@ export class ServerSupervisor extends EventEmitter {
     this.emit('serverRestarting', this.restartAttempts);
 
     setTimeout(() => {
-      // Kill stale session if it exists
+      // Capture crash output BEFORE killing the tmux session
       if (this.tmuxPath && this.isServerSessionAlive()) {
+        this.captureCrashOutput();
+        this.cleanupChildProcesses();
         try {
           execFileSync(this.tmuxPath, ['kill-session', '-t', `=${this.serverSessionName}`], {
             stdio: 'ignore',
@@ -294,6 +350,72 @@ export class ServerSupervisor extends EventEmitter {
 
       this.spawnServer();
     }, delay);
+  }
+
+  /**
+   * Capture the last 50 lines of tmux output before killing the session.
+   * This surfaces the actual error (EADDRINUSE, missing module, etc.)
+   * instead of just "health check failed."
+   */
+  private captureCrashOutput(): void {
+    if (!this.tmuxPath) return;
+    try {
+      const output = execFileSync(this.tmuxPath, [
+        'capture-pane', '-t', `=${this.serverSessionName}:`, '-p', '-S', '-50',
+      ], { encoding: 'utf-8', timeout: 5000 });
+      this.lastCrashOutput = output.trim();
+      if (this.lastCrashOutput) {
+        console.log(`[Supervisor] Crash output from "${this.serverSessionName}":\n${this.lastCrashOutput.slice(-500)}`);
+      }
+    } catch { // @silent-fallback-ok — capture may fail if session already dead
+      // Session already dead
+    }
+  }
+
+  /**
+   * Kill child processes (cloudflared, etc.) that were spawned by the server
+   * but will become orphans when the tmux session is killed.
+   */
+  private cleanupChildProcesses(): void {
+    if (!this.tmuxPath) return;
+    try {
+      // Get the pane PID of the server tmux session
+      const panePid = execFileSync(this.tmuxPath, [
+        'list-panes', '-t', `=${this.serverSessionName}`, '-F', '#{pane_pid}',
+      ], { encoding: 'utf-8', timeout: 5000 }).trim().split('\n')[0];
+
+      if (!panePid) return;
+
+      // Find all descendant processes
+      const descendants = shellExec(
+        `pgrep -P ${panePid} 2>/dev/null; pgrep -g ${panePid} 2>/dev/null`,
+      ).trim().split('\n').filter(Boolean).map(Number).filter(n => !isNaN(n));
+
+      // Deduplicate
+      const unique = [...new Set(descendants)].filter(pid => pid !== parseInt(panePid));
+
+      if (unique.length > 0) {
+        console.log(`[Supervisor] Cleaning up ${unique.length} child process(es) before restart: ${unique.join(', ')}`);
+        for (const pid of unique) {
+          try {
+            process.kill(pid, 'SIGTERM');
+          } catch { // @silent-fallback-ok — process may already be dead
+            // Already dead
+          }
+        }
+        // Give them a moment, then SIGKILL any survivors
+        setTimeout(() => {
+          for (const pid of unique) {
+            try {
+              process.kill(pid, 0); // Check if alive
+              process.kill(pid, 'SIGKILL');
+            } catch { /* dead */ }
+          }
+        }, 3000);
+      }
+    } catch { // @silent-fallback-ok — cleanup is best-effort
+      // Best effort
+    }
   }
 
   // ── Update restart flag ──────────────────────────────────────────

@@ -112,6 +112,8 @@ export class TelegramLifeline {
   private replayInterval: ReturnType<typeof setInterval> | null = null;
   private lifelineTopicId: number | null = null;
   private lockPath: string;
+  private consecutive409s = 0;
+  private pollBackoffMs = 2000; // Grows on 409 errors
 
   constructor(projectDir?: string) {
     this.projectConfig = loadConfig(projectDir);
@@ -150,6 +152,11 @@ export class TelegramLifeline {
 
     this.supervisor.on('serverRestarting', (attempt: number) => {
       console.log(`[Lifeline] Server restarting (attempt ${attempt})`);
+    });
+
+    this.supervisor.on('circuitBroken', (totalFailures: number, lastCrashOutput: string) => {
+      console.error(`[Lifeline] Circuit breaker triggered after ${totalFailures} failures`);
+      this.notifyCircuitBroken(totalFailures, lastCrashOutput);
     });
 
     this.loadOffset();
@@ -258,6 +265,9 @@ export class TelegramLifeline {
         this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);
       }
       if (updates.length > 0) this.saveOffset();
+      // Success — reset 409 backoff
+      this.consecutive409s = 0;
+      this.pollBackoffMs = this.config.pollIntervalMs ?? 2000;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes('401') || errMsg.includes('Unauthorized')) {
@@ -265,14 +275,21 @@ export class TelegramLifeline {
         this.polling = false;
         return;
       }
-      // Non-fatal error — continue polling
-      if (!errMsg.includes('abort')) {
+      // Handle 409 Conflict (multiple bot instances polling)
+      if (errMsg.includes('409') && errMsg.includes('Conflict')) {
+        this.consecutive409s++;
+        // Exponential backoff: 4s, 8s, 16s, 32s, max 60s
+        this.pollBackoffMs = Math.min(60_000, 2000 * Math.pow(2, this.consecutive409s));
+        if (this.consecutive409s === 1 || this.consecutive409s % 10 === 0) {
+          console.warn(`[Lifeline] Telegram 409 Conflict (${this.consecutive409s}x) — another bot instance is polling. Backing off to ${this.pollBackoffMs / 1000}s`);
+        }
+      } else if (!errMsg.includes('abort')) {
+        // Non-fatal error — continue polling
         console.error(`[Lifeline] Poll error: ${errMsg}`);
       }
     }
 
-    const interval = this.config.pollIntervalMs ?? 2000;
-    this.pollTimeout = setTimeout(() => this.poll(), interval);
+    this.pollTimeout = setTimeout(() => this.poll(), this.pollBackoffMs);
   }
 
   private async processUpdate(update: TelegramUpdate): Promise<void> {
@@ -464,25 +481,44 @@ export class TelegramLifeline {
       const status = this.supervisor.getStatus();
       const queueSize = this.queue.length;
       let serverLine = status.healthy ? '● healthy' : status.running ? '○ unhealthy' : '✗ down';
-      if (status.coolingDown) {
+      if (status.circuitBroken) {
+        serverLine += ' (CIRCUIT BROKEN)';
+      } else if (status.coolingDown) {
         serverLine += ` (cooldown: ${Math.ceil(status.cooldownRemainingMs / 1000)}s)`;
       }
       const lines = [
         `Lifeline Status:`,
         `  Server: ${serverLine}`,
         `  Restart attempts: ${status.restartAttempts}`,
+        `  Total failures: ${status.totalFailures}`,
         `  Queued messages: ${queueSize}`,
         `  Last healthy: ${status.lastHealthy ? new Date(status.lastHealthy).toISOString().slice(11, 19) : 'never'}`,
       ];
+      if (status.circuitBroken) {
+        lines.push(`  Circuit breaker: TRIPPED — use /lifeline reset to retry`);
+        if (status.lastCrashOutput) {
+          lines.push(`  Last crash: ${status.lastCrashOutput.split('\n').pop()?.slice(0, 100) ?? 'unknown'}`);
+        }
+      }
       await this.sendToTopic(topicId, lines.join('\n'));
       return;
     }
 
     if (cmd === '/lifeline restart') {
       await this.sendToTopic(topicId, 'Restarting server...');
+      this.supervisor.resetCircuitBreaker();
       await this.supervisor.stop();
       const started = await this.supervisor.start();
       await this.sendToTopic(topicId, started ? 'Server restarted.' : 'Server failed to restart.');
+      return;
+    }
+
+    if (cmd === '/lifeline reset') {
+      this.supervisor.resetCircuitBreaker();
+      await this.sendToTopic(topicId, 'Circuit breaker reset. Restarting server...');
+      await this.supervisor.stop();
+      const started = await this.supervisor.start();
+      await this.sendToTopic(topicId, started ? 'Server restarted after reset.' : 'Server failed to restart after reset.');
       return;
     }
 
@@ -504,11 +540,14 @@ export class TelegramLifeline {
         'Lifeline Commands:',
         '  /lifeline — Show status',
         '  /lifeline restart — Restart the server',
+        '  /lifeline reset — Reset circuit breaker and restart',
         '  /lifeline queue — Show queued messages',
         '  /lifeline help — Show this help',
         '',
         'The lifeline keeps your Telegram connection alive even when the server is down.',
         'Messages sent while the server is down are queued and replayed on recovery.',
+        'If the server fails too many times, the circuit breaker stops auto-restart.',
+        'Use /lifeline reset to re-enable auto-restart after fixing the issue.',
       ];
       await this.sendToTopic(topicId, lines.join('\n'));
       return;
@@ -565,6 +604,20 @@ export class TelegramLifeline {
     const topicId = this.lifelineTopicId ?? 1;
     await this.sendToTopic(topicId,
       `Server went down: ${reason}\n\nYour messages will be queued until recovery. Use /lifeline status to check.`
+    ).catch(() => {});
+  }
+
+  private async notifyCircuitBroken(totalFailures: number, lastCrashOutput: string): Promise<void> {
+    const topicId = this.lifelineTopicId ?? 1;
+    const crashSnippet = lastCrashOutput
+      ? `\n\nLast crash output:\n${lastCrashOutput.slice(-300)}`
+      : '';
+    await this.sendToTopic(topicId,
+      `CIRCUIT BREAKER TRIPPED\n\n` +
+      `Server failed ${totalFailures} times in the last hour. Auto-restart has been disabled to prevent resource waste.` +
+      crashSnippet +
+      `\n\nTo investigate: check the crash output above.\n` +
+      `To retry: /lifeline reset (resets circuit breaker and restarts)`
     ).catch(() => {});
   }
 
