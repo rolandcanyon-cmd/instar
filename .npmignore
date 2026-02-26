@@ -13,11 +13,10 @@ vitest.config.ts
 vitest.e2e.config.ts
 vitest.integration.config.ts
 
-# Claude Code config (dev-only, except setup-wizard skill)
-.claude/*
-!.claude/skills/
-.claude/skills/*
-!.claude/skills/setup-wizard/
+# Claude Code config (dev-only)
+# NOTE: The package.json "files" field is the sole authority for what ships.
+# .npmignore is IGNORED when "files" is present. To include new assets,
+# add them to package.json "files" — NOT here.
 CLAUDE.md
 
 # Landing page site
