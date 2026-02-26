@@ -47,6 +47,7 @@ import type { OperationMutability, OperationReversibility } from '../core/Extern
 import type { MessageSentinel } from '../core/MessageSentinel.js';
 import type { AdaptiveTrust } from '../core/AdaptiveTrust.js';
 import type { MemoryPressureMonitor } from '../monitoring/MemoryPressureMonitor.js';
+import type { SemanticMemory } from '../memory/SemanticMemory.js';
 
 export interface RouteContext {
   config: InstarConfig;
@@ -78,6 +79,7 @@ export interface RouteContext {
   adaptiveTrust: AdaptiveTrust | null;
   memoryMonitor: MemoryPressureMonitor | null;
   orphanReaper: OrphanProcessReaper | null;
+  semanticMemory: SemanticMemory | null;
   startTime: Date;
 }
 
@@ -434,6 +436,188 @@ export function createRoutes(ctx: RouteContext): Router {
 
 
 
+  // ── Semantic Memory ─────────────────────────────────────────────
+
+  const VALID_ENTITY_TYPES = new Set(['fact', 'person', 'project', 'tool', 'pattern', 'decision', 'lesson']);
+  const VALID_RELATION_TYPES = new Set([
+    'related_to', 'built_by', 'learned_from', 'depends_on', 'supersedes',
+    'contradicts', 'part_of', 'used_in', 'knows_about', 'caused', 'verified_by',
+  ]);
+
+  router.post('/semantic/remember', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    const { type, name, content, confidence, source, sourceSession, tags, domain, expiresAt } = req.body;
+    if (!type || !name || !content || confidence === undefined || !source) {
+      res.status(400).json({ error: 'Missing required fields: type, name, content, confidence, source' }); return;
+    }
+    if (!VALID_ENTITY_TYPES.has(type)) {
+      res.status(400).json({ error: `Invalid entity type: ${type}` }); return;
+    }
+    try {
+      const id = ctx.semanticMemory.remember({
+        type, name, content, confidence,
+        lastVerified: new Date().toISOString(),
+        source, sourceSession, tags: tags || [], domain, expiresAt,
+      });
+      res.json({ id });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to remember' });
+    }
+  });
+
+  router.get('/semantic/recall/:id', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const result = ctx.semanticMemory.recall(req.params.id);
+      if (!result) { res.status(404).json({ error: 'Entity not found' }); return; }
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to recall' });
+    }
+  });
+
+  router.delete('/semantic/forget/:id', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      ctx.semanticMemory.forget(req.params.id, req.body?.reason);
+      res.json({ deleted: true });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to forget' });
+    }
+  });
+
+  router.post('/semantic/connect', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    const { fromId, toId, relation, context, weight } = req.body;
+    if (!fromId || !toId || !relation) {
+      res.status(400).json({ error: 'Missing required fields: fromId, toId, relation' }); return;
+    }
+    if (!VALID_RELATION_TYPES.has(relation)) {
+      res.status(400).json({ error: `Invalid relation type: ${relation}` }); return;
+    }
+    try {
+      const edgeId = ctx.semanticMemory.connect(fromId, toId, relation, context, weight);
+      res.json({ edgeId });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to connect' });
+    }
+  });
+
+  router.get('/semantic/search', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const query = String(req.query.q || '');
+      const limit = parseInt(req.query.limit as string, 10) || 20;
+      const types = req.query.types ? String(req.query.types).split(',').filter(t => VALID_ENTITY_TYPES.has(t)) : undefined;
+      const domain = req.query.domain as string | undefined;
+      const minConfidence = req.query.minConfidence ? parseFloat(req.query.minConfidence as string) : undefined;
+
+      const results = ctx.semanticMemory.search(query, { types: types as any, domain, minConfidence, limit });
+      res.json({ query, results, totalResults: results.length });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Search failed' });
+    }
+  });
+
+  router.get('/semantic/explore/:id', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const maxDepth = parseInt(req.query.maxDepth as string, 10) || 2;
+      const relations = req.query.relations ? String(req.query.relations).split(',') : undefined;
+      const results = ctx.semanticMemory.explore(req.params.id, { maxDepth, relations: relations as any });
+      res.json({ results });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Explore failed' });
+    }
+  });
+
+  router.post('/semantic/verify/:id', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      ctx.semanticMemory.verify(req.params.id, req.body?.confidence);
+      res.json({ verified: true });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Verify failed' });
+    }
+  });
+
+  router.post('/semantic/supersede', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    const { oldId, newId, reason } = req.body;
+    if (!oldId || !newId) {
+      res.status(400).json({ error: 'Missing required fields: oldId, newId' }); return;
+    }
+    try {
+      ctx.semanticMemory.supersede(oldId, newId, reason);
+      res.json({ superseded: true });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Supersede failed' });
+    }
+  });
+
+  router.post('/semantic/decay', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const report = ctx.semanticMemory.decayAll();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Decay failed' });
+    }
+  });
+
+  router.get('/semantic/stale', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const maxConfidence = req.query.maxConfidence ? parseFloat(req.query.maxConfidence as string) : undefined;
+      const olderThan = req.query.olderThan as string | undefined;
+      const limit = parseInt(req.query.limit as string, 10) || 50;
+      const results = ctx.semanticMemory.findStale({ maxConfidence, olderThan, limit });
+      res.json({ results });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Stale query failed' });
+    }
+  });
+
+  router.get('/semantic/export', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      res.json(ctx.semanticMemory.export());
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Export failed' });
+    }
+  });
+
+  router.post('/semantic/import', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const report = ctx.semanticMemory.import(req.body);
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Import failed' });
+    }
+  });
+
+  router.get('/semantic/stats', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      res.json(ctx.semanticMemory.stats());
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Stats failed' });
+    }
+  });
+
+  router.get('/semantic/context', (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const query = String(req.query.q || '');
+      const maxTokens = parseInt(req.query.maxTokens as string, 10) || 2000;
+      const context = ctx.semanticMemory.getRelevantContext(query, { maxTokens });
+      res.json({ context });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Context generation failed' });
+    }
+  });
+
   // ── Status ──────────────────────────────────────────────────────
 
   router.get('/status', (_req, res) => {
@@ -671,6 +855,7 @@ export function createRoutes(ctx: RouteContext): Router {
           { context: 'User says to stop, cancel, or abort', action: 'MessageSentinel intercepts these automatically. For manual classification: POST /sentinel/classify.' },
           { context: 'User says "you don\'t need to ask me about X"', action: 'Grant trust explicitly (POST /trust/grant). Trust persists across sessions.' },
           { context: 'User asks to adjust memory warning thresholds or stop memory alerts', action: 'Update thresholds (PATCH /monitoring/memory/thresholds with {warning, elevated, critical}). Check current state (GET /monitoring/memory).' },
+          { context: 'User asks about Instar features, architecture, multi-user, or multi-machine setup', action: 'STOP — do NOT answer from memory. Run GET /capabilities first, then check `instar --help` for CLI commands, then GET /context/dispatch for the full context map. Answer ONLY from what these return.' },
         ],
       },
     });
