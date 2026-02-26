@@ -275,7 +275,7 @@ export class OrphanProcessReaper extends EventEmitter {
       }
 
       return processes;
-    } catch {
+    } catch { // @silent-fallback-ok — process listing may fail if ps is unavailable
       return [];
     }
   }
@@ -449,7 +449,7 @@ export class OrphanProcessReaper extends EventEmitter {
       const output = shellExec(`ps -o ppid= -p ${pid} 2>/dev/null`).trim();
       const ppid = parseInt(output, 10);
       return isNaN(ppid) ? null : ppid;
-    } catch {
+    } catch { // @silent-fallback-ok — process may not exist
       return null;
     }
   }
@@ -458,7 +458,7 @@ export class OrphanProcessReaper extends EventEmitter {
     try {
       const output = shellExec(`ps -o command= -p ${pid} 2>/dev/null`).trim();
       return output || null;
-    } catch {
+    } catch { // @silent-fallback-ok — process may not exist
       return null;
     }
   }
@@ -472,12 +472,12 @@ export class OrphanProcessReaper extends EventEmitter {
           process.kill(pid, 0); // Check if still alive
           process.kill(pid, 'SIGKILL');
           console.log(`[OrphanReaper] SIGKILL sent to PID ${pid} (SIGTERM wasn't enough)`);
-        } catch {
+        } catch { // @silent-fallback-ok — process already dead (expected)
           // Already dead — good
         }
       }, 5000);
       return true;
-    } catch (err: any) {
+    } catch (err: any) { // @silent-fallback-ok — kill may fail if process already exited
       if (err.code !== 'ESRCH') {
         console.error(`[OrphanReaper] Failed to kill PID ${pid}:`, err);
       }
