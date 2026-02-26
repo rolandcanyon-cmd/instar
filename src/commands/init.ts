@@ -2036,7 +2036,7 @@ Exit silently if continuity is healthy.`,
       priority: 'high',
       expectedDurationMinutes: 5,
       model: 'haiku',
-      enabled: false,
+      enabled: true,
       gate: 'bash .claude/scripts/git-sync-gate.sh',
       execute: {
         type: 'prompt',
@@ -2133,6 +2133,24 @@ function refreshJobs(stateDir: string): void {
       if (!existingSlugs.has(job.slug)) {
         existingJobs.push(job);
         added++;
+      }
+    }
+
+    // Auto-enable git-sync if git + remote are available (migration from disabled default)
+    const gitSyncJob = existingJobs.find(j => j.slug === 'git-sync') as Record<string, unknown> | undefined;
+    if (gitSyncJob && !gitSyncJob.enabled) {
+      const projectDir = path.dirname(stateDir);
+      const hasGit = fs.existsSync(path.join(projectDir, '.git'));
+      let hasRemote = false;
+      if (hasGit) {
+        try {
+          const remote = execFileSync('git', ['remote'], { cwd: projectDir, stdio: 'pipe' }).toString().trim();
+          hasRemote = remote.length > 0;
+        } catch { /* no git or no remote */ }
+      }
+      if (hasGit && hasRemote) {
+        gitSyncJob.enabled = true;
+        added++; // force write
       }
     }
 
@@ -2480,8 +2498,10 @@ function installGitSyncGate(projectDir: string): void {
     'SEVERITY_FILE="/tmp/instar-git-sync-severity"',
     'echo "clean" > "$SEVERITY_FILE"',
     '',
-    '# Must be in a git repo',
+    '# Must be in a git repo with a remote',
     '[ ! -d ".git" ] && exit 1',
+    'REMOTE=$(git remote | head -1)',
+    '[ -z "$REMOTE" ] && exit 1',
     '',
     '# Check for local changes',
     'LOCAL_CHANGES=$(git status --porcelain 2>/dev/null | head -1)',

@@ -15,8 +15,13 @@
 SEVERITY_FILE="/tmp/instar-git-sync-severity"
 echo "clean" > "$SEVERITY_FILE"
 
-# Ensure we're in a git repo
+# Ensure we're in a git repo with a remote
 if [ ! -d ".git" ]; then
+  exit 1
+fi
+
+REMOTE=$(git remote | head -1)
+if [ -z "$REMOTE" ]; then
   exit 1
 fi
 
