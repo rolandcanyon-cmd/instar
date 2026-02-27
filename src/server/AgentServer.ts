@@ -80,6 +80,7 @@ export class AgentServer {
     memoryMonitor?: import('../monitoring/MemoryPressureMonitor.js').MemoryPressureMonitor;
     orphanReaper?: import('../monitoring/OrphanProcessReaper.js').OrphanProcessReaper;
     coherenceMonitor?: import('../monitoring/CoherenceMonitor.js').CoherenceMonitor;
+    commitmentTracker?: import('../monitoring/CommitmentTracker.js').CommitmentTracker;
     semanticMemory?: import('../memory/SemanticMemory.js').SemanticMemory;
     coordinator?: MultiMachineCoordinator;
     localSigningKeyPem?: string;
@@ -213,6 +214,7 @@ export class AgentServer {
       memoryMonitor: options.memoryMonitor ?? null,
       orphanReaper: options.orphanReaper ?? null,
       coherenceMonitor: options.coherenceMonitor ?? null,
+      commitmentTracker: options.commitmentTracker ?? null,
       semanticMemory: options.semanticMemory ?? null,
       startTime: this.startTime,
     });

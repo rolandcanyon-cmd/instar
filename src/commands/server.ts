@@ -1593,6 +1593,37 @@ export async function startServer(options: StartOptions): Promise<void> {
     coherenceMonitor.start();
     console.log(pc.green('  Coherence monitor enabled'));
 
+    // Commitment Tracker — durable promise enforcement for agent commitments.
+    // When users ask agents to change settings/behavior, this ensures it sticks.
+    const { CommitmentTracker } = await import('../monitoring/CommitmentTracker.js');
+    const commitmentTracker = new CommitmentTracker({
+      stateDir: config.stateDir,
+      liveConfig,
+      onViolation: (commitment, detail) => {
+        notify('IMMEDIATE', 'commitment',
+          `Commitment violated [${commitment.id}]: "${commitment.userRequest}"\n${detail}`
+        );
+      },
+      onVerified: (commitment) => {
+        console.log(`[CommitmentTracker] First verification passed: ${commitment.id} "${commitment.userRequest}"`);
+      },
+    });
+    commitmentTracker.start();
+    console.log(pc.green('  Commitment tracker enabled'));
+
+    // Commitment Sentinel — LLM-powered scanner that finds unregistered commitments.
+    let commitmentSentinel: import('../monitoring/CommitmentSentinel.js').CommitmentSentinel | undefined;
+    if (sharedIntelligence) {
+      const { CommitmentSentinel } = await import('../monitoring/CommitmentSentinel.js');
+      commitmentSentinel = new CommitmentSentinel({
+        stateDir: config.stateDir,
+        intelligence: sharedIntelligence,
+        commitmentTracker,
+      });
+      commitmentSentinel.start();
+      console.log(pc.green('  Commitment sentinel enabled (LLM-powered)'));
+    }
+
     // Start CaffeinateManager (prevents macOS system sleep)
     const { CaffeinateManager } = await import('../core/CaffeinateManager.js');
     const caffeinateManager = new CaffeinateManager({ stateDir: config.stateDir });
@@ -1720,7 +1751,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Sentinel wired into Telegram message flow'));
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
@@ -1913,6 +1944,8 @@ export async function startServer(options: StartOptions): Promise<void> {
       gitSync?.stop();
       coordinator.stop();
       coherenceMonitor.stop();
+      commitmentTracker.stop();
+      commitmentSentinel?.stop();
       await notificationBatcher.flushAll(); // Drain pending notifications before exit
       notificationBatcher.stop();
       memoryMonitor.stop();

@@ -48,6 +48,7 @@ import type { MessageSentinel } from '../core/MessageSentinel.js';
 import type { AdaptiveTrust } from '../core/AdaptiveTrust.js';
 import type { MemoryPressureMonitor } from '../monitoring/MemoryPressureMonitor.js';
 import type { CoherenceMonitor } from '../monitoring/CoherenceMonitor.js';
+import type { CommitmentTracker } from '../monitoring/CommitmentTracker.js';
 import type { SemanticMemory } from '../memory/SemanticMemory.js';
 
 export interface RouteContext {
@@ -81,6 +82,7 @@ export interface RouteContext {
   memoryMonitor: MemoryPressureMonitor | null;
   orphanReaper: OrphanProcessReaper | null;
   coherenceMonitor: CoherenceMonitor | null;
+  commitmentTracker: CommitmentTracker | null;
   semanticMemory: SemanticMemory | null;
   startTime: Date;
 }
@@ -3667,6 +3669,121 @@ export function createRoutes(ctx: RouteContext): Router {
       updated: true,
       thresholds: ctx.memoryMonitor.getThresholds(),
       currentState: ctx.memoryMonitor.getState(),
+    });
+  });
+
+  // ── Commitment Tracking ──────────────────────────────────────────
+
+  /**
+   * Get all commitments with optional status filter.
+   */
+  router.get('/commitments', (req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.json({ enabled: false, commitments: [] });
+      return;
+    }
+    const status = req.query.status as string | undefined;
+    if (status === 'active') {
+      res.json({ enabled: true, commitments: ctx.commitmentTracker.getActive() });
+    } else {
+      res.json({ enabled: true, commitments: ctx.commitmentTracker.getAll() });
+    }
+  });
+
+  /**
+   * Get a single commitment by ID.
+   */
+  router.get('/commitments/:id', (req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const commitment = ctx.commitmentTracker.get(req.params.id);
+    if (!commitment) {
+      res.status(404).json({ error: `Commitment ${req.params.id} not found` });
+      return;
+    }
+    res.json(commitment);
+  });
+
+  /**
+   * Record a new commitment.
+   */
+  router.post('/commitments', (req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const { type, userRequest, agentResponse, topicId, source,
+            configPath, configExpectedValue, behavioralRule,
+            expiresAt, verificationMethod, verificationPath } = req.body;
+
+    if (!type || !userRequest || !agentResponse) {
+      res.status(400).json({ error: 'type, userRequest, and agentResponse are required' });
+      return;
+    }
+    if (!['config-change', 'behavioral', 'one-time-action'].includes(type)) {
+      res.status(400).json({ error: 'type must be config-change, behavioral, or one-time-action' });
+      return;
+    }
+
+    try {
+      const commitment = ctx.commitmentTracker.record({
+        type, userRequest, agentResponse, topicId, source,
+        configPath, configExpectedValue, behavioralRule,
+        expiresAt, verificationMethod, verificationPath,
+      });
+      res.status(201).json(commitment);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to record' });
+    }
+  });
+
+  /**
+   * Withdraw a commitment.
+   */
+  router.post('/commitments/:id/withdraw', (req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const { reason } = req.body;
+    if (!reason) {
+      res.status(400).json({ error: 'reason is required' });
+      return;
+    }
+    const success = ctx.commitmentTracker.withdraw(req.params.id, reason);
+    if (!success) {
+      res.status(404).json({ error: `Commitment ${req.params.id} not found or already resolved` });
+      return;
+    }
+    res.json({ withdrawn: true, id: req.params.id });
+  });
+
+  /**
+   * Trigger verification of all active commitments.
+   */
+  router.post('/commitments/verify', (_req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const report = ctx.commitmentTracker.verify();
+    res.json(report);
+  });
+
+  /**
+   * Get behavioral context for session injection.
+   */
+  router.get('/commitments/context', (_req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.json({ enabled: false, context: '' });
+      return;
+    }
+    res.json({
+      enabled: true,
+      context: ctx.commitmentTracker.getBehavioralContext(),
+      health: ctx.commitmentTracker.getHealth(),
     });
   });
 

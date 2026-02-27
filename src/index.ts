@@ -152,6 +152,10 @@ export { SessionMonitor } from './monitoring/SessionMonitor.js';
 export type { SessionMonitorConfig, SessionMonitorDeps, SessionMonitorEvents } from './monitoring/SessionMonitor.js';
 export { CoherenceMonitor } from './monitoring/CoherenceMonitor.js';
 export type { CoherenceCheckResult as CoherenceMonitorCheckResult, CoherenceReport, CoherenceMonitorConfig } from './monitoring/CoherenceMonitor.js';
+export { CommitmentTracker } from './monitoring/CommitmentTracker.js';
+export type { Commitment, CommitmentType, CommitmentStatus, CommitmentStore, CommitmentVerificationReport, CommitmentTrackerConfig } from './monitoring/CommitmentTracker.js';
+export { CommitmentSentinel } from './monitoring/CommitmentSentinel.js';
+export type { CommitmentSentinelConfig } from './monitoring/CommitmentSentinel.js';
 export { SleepWakeDetector } from './core/SleepWakeDetector.js';
 
 // Messaging
