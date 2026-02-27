@@ -13,6 +13,32 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+/** Diagnostics for a single running session */
+export interface SessionDiagnostic {
+  name: string;
+  id: string;
+  jobSlug?: string;
+  ageMinutes: number;
+  maxDurationMinutes?: number;
+  isStale: boolean;
+  staleReason?: string;
+}
+
+/** System memory pressure levels */
+export type MemoryPressure = 'low' | 'moderate' | 'high' | 'critical';
+
+/** Full diagnostics snapshot for intelligent scheduling decisions */
+export interface SessionDiagnostics {
+  sessions: SessionDiagnostic[];
+  maxSessions: number;
+  staleSessions: SessionDiagnostic[];
+  memoryPressure: MemoryPressure;
+  memoryUsedPercent: number;
+  freeMemoryMB: number;
+  totalMemoryMB: number;
+  suggestions: string[];
+}
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 const execFileAsync = promisify(execFile);
@@ -381,6 +407,92 @@ export class SessionManager extends EventEmitter {
   listRunningSessions(): Session[] {
     const sessions = this.state.listSessions({ status: 'running' });
     return sessions.filter(s => this.isSessionAlive(s.tmuxSession));
+  }
+
+  /**
+   * Get diagnostics for all running sessions, including staleness detection
+   * and memory pressure. Used by the scheduler to build intelligent notifications
+   * when jobs are blocked by session limits.
+   */
+  getSessionDiagnostics(): SessionDiagnostics {
+    const running = this.listRunningSessions();
+    const now = Date.now();
+
+    const sessions: SessionDiagnostic[] = running.map(s => {
+      const ageMinutes = s.startedAt
+        ? Math.round((now - new Date(s.startedAt).getTime()) / 60000)
+        : 0;
+      const maxDuration = s.maxDurationMinutes || DEFAULT_MAX_DURATION_MINUTES;
+
+      // A session is stale if it's exceeded its expected duration
+      let isStale = false;
+      let staleReason: string | undefined;
+
+      if (ageMinutes > maxDuration) {
+        isStale = true;
+        staleReason = `Running ${ageMinutes}m, expected max ${maxDuration}m`;
+      } else if (s.maxDurationMinutes && ageMinutes > s.maxDurationMinutes * 0.9) {
+        // Near its limit — flag as approaching stale
+        isStale = true;
+        staleReason = `Near timeout (${ageMinutes}m / ${s.maxDurationMinutes}m)`;
+      }
+
+      return {
+        name: s.name,
+        id: s.id,
+        jobSlug: s.jobSlug,
+        ageMinutes,
+        maxDurationMinutes: s.maxDurationMinutes,
+        isStale,
+        staleReason,
+      };
+    });
+
+    const staleSessions = sessions.filter(s => s.isStale);
+
+    // Memory pressure assessment
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedPercent = Math.round(((totalMem - freeMem) / totalMem) * 100);
+    const freeMemMB = Math.round(freeMem / 1048576);
+    const totalMemMB = Math.round(totalMem / 1048576);
+
+    let memoryPressure: MemoryPressure;
+    if (usedPercent >= 90) memoryPressure = 'critical';
+    else if (usedPercent >= 75) memoryPressure = 'high';
+    else if (usedPercent >= 60) memoryPressure = 'moderate';
+    else memoryPressure = 'low';
+
+    // Build actionable suggestions
+    const suggestions: string[] = [];
+
+    if (staleSessions.length > 0) {
+      for (const s of staleSessions) {
+        suggestions.push(`Kill stale session "${s.name}" (${s.staleReason})`);
+      }
+    }
+
+    if (memoryPressure === 'critical' || memoryPressure === 'high') {
+      if (staleSessions.length > 0) {
+        suggestions.push(`Memory pressure is ${memoryPressure} (${usedPercent}% used) — killing stale sessions would free resources`);
+      } else {
+        suggestions.push(`Memory pressure is ${memoryPressure} (${usedPercent}% used) — avoid increasing maxSessions`);
+      }
+    } else if (staleSessions.length === 0) {
+      // No stale sessions and memory is fine — suggest increasing the limit
+      suggestions.push(`All ${running.length} sessions are active and healthy. Consider increasing maxSessions from ${this.config.maxSessions} to ${this.config.maxSessions + 1}`);
+    }
+
+    return {
+      sessions,
+      maxSessions: this.config.maxSessions,
+      staleSessions,
+      memoryPressure,
+      memoryUsedPercent: usedPercent,
+      freeMemoryMB: freeMemMB,
+      totalMemoryMB: totalMemMB,
+      suggestions,
+    };
   }
 
   /**

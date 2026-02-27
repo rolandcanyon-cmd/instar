@@ -6,6 +6,7 @@
 
 // Core
 export { SessionManager } from './core/SessionManager.js';
+export type { SessionDiagnostic, SessionDiagnostics, MemoryPressure } from './core/SessionManager.js';
 export { StateManager } from './core/StateManager.js';
 export { RelationshipManager } from './core/RelationshipManager.js';
 export { ClaudeCliIntelligenceProvider } from './core/ClaudeCliIntelligenceProvider.js';

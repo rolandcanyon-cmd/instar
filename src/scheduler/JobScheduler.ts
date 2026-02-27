@@ -644,12 +644,25 @@ export class JobScheduler {
    * Critical/high priority jobs alert after 2 failures.
    * Medium/low priority jobs alert after 3 failures.
    * Only alerts at the threshold (not every failure after).
+   *
+   * When the failure is a session limit issue (not a job execution error),
+   * the notification is reframed as "Job Blocked" with intelligent diagnostics:
+   * running session list with ages, stale session flags, memory pressure,
+   * and actionable suggestions.
    */
   private alertOnConsecutiveFailures(job: JobDefinition, failures: number, error: string): void {
     const threshold = (job.priority === 'critical' || job.priority === 'high') ? 2 : 3;
     if (failures !== threshold) return;
 
-    const alertText = `*Job Alert: ${job.name}*\n\n${failures} consecutive failures.\nLast error: ${error}\nPriority: ${job.priority}`;
+    const isSessionBlocked = error.includes('Max sessions') && error.includes('reached');
+
+    let alertText: string;
+
+    if (isSessionBlocked) {
+      alertText = this.buildSessionBlockedAlert(job, failures, error);
+    } else {
+      alertText = `*Job Alert: ${job.name}*\n\n${failures} consecutive failures.\nLast error: ${error}\nPriority: ${job.priority}`;
+    }
 
     // Send to job's topic if available
     if (this.telegram && job.topicId) {
@@ -661,6 +674,55 @@ export class JobScheduler {
         console.error(`[scheduler] Failed to send failure alert: ${err}`);
       });
     }
+  }
+
+  /**
+   * Build an intelligent "Job Blocked" notification when a job can't start
+   * because all session slots are occupied. Includes session diagnostics,
+   * staleness detection, memory pressure, and actionable suggestions.
+   */
+  private buildSessionBlockedAlert(job: JobDefinition, failures: number, error: string): string {
+    const diagnostics = this.sessionManager.getSessionDiagnostics();
+
+    const lines: string[] = [];
+    lines.push(`*Job Blocked: ${job.name}*`);
+    lines.push('');
+    lines.push(`Could not start — all ${diagnostics.maxSessions} session slots are in use.`);
+    lines.push(`(${failures} consecutive attempts blocked)`);
+    lines.push('');
+
+    // Session list with ages
+    lines.push('*Running sessions:*');
+    for (const s of diagnostics.sessions) {
+      const age = s.ageMinutes >= 60
+        ? `${Math.floor(s.ageMinutes / 60)}h ${s.ageMinutes % 60}m`
+        : `${s.ageMinutes}m`;
+      const staleFlag = s.isStale ? ' ⚠️' : '';
+      const jobTag = s.jobSlug ? ` (${s.jobSlug})` : '';
+      lines.push(`• ${s.name}${jobTag} — ${age}${staleFlag}`);
+      if (s.staleReason) {
+        lines.push(`  └ ${s.staleReason}`);
+      }
+    }
+    lines.push('');
+
+    // Memory pressure
+    const memEmoji = diagnostics.memoryPressure === 'critical' ? '🔴'
+      : diagnostics.memoryPressure === 'high' ? '🟠'
+      : diagnostics.memoryPressure === 'moderate' ? '🟡'
+      : '🟢';
+    lines.push(`Memory: ${memEmoji} ${diagnostics.memoryUsedPercent}% used (${diagnostics.freeMemoryMB} MB free)`);
+    lines.push('');
+
+    // Suggestions
+    if (diagnostics.suggestions.length > 0) {
+      lines.push('*Suggestions:*');
+      for (const suggestion of diagnostics.suggestions) {
+        lines.push(`→ ${suggestion}`);
+      }
+    }
+
+    return lines.join('\n');
   }
 
   private checkMissedJobs(enabledJobs: JobDefinition[]): void {
