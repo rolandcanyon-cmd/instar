@@ -296,6 +296,7 @@ export class AutoUpdater {
       requestedBy: 'auto-updater',
       targetVersion: newVersion,
       previousVersion: this.updateChecker.getInstalledVersion(),
+      plannedRestart: true, // Signals lifeline/supervisor: this is maintenance, not a crash
       expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(), // 1 hour TTL (was 10 min — too short for foreground mode)
       pid: process.pid,
     };

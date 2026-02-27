@@ -14,6 +14,7 @@ import type { JobScheduler } from '../scheduler/JobScheduler.js';
 import type { HealthStatus, ComponentHealth, InstarConfig } from '../core/types.js';
 import type { SessionWatchdog } from './SessionWatchdog.js';
 import type { StallTriageNurse } from './StallTriageNurse.js';
+import type { MemoryPressureMonitor } from './MemoryPressureMonitor.js';
 
 export class HealthChecker {
   private config: InstarConfig;
@@ -21,6 +22,7 @@ export class HealthChecker {
   private scheduler: JobScheduler | null;
   private watchdog: SessionWatchdog | null;
   private triageNurse: StallTriageNurse | null;
+  private memoryMonitor: MemoryPressureMonitor | null;
   private checkInterval: ReturnType<typeof setInterval> | null = null;
   private lastStatus: HealthStatus | null = null;
 
@@ -30,12 +32,14 @@ export class HealthChecker {
     scheduler: JobScheduler | null = null,
     watchdog: SessionWatchdog | null = null,
     triageNurse: StallTriageNurse | null = null,
+    memoryMonitor: MemoryPressureMonitor | null = null,
   ) {
     this.config = config;
     this.sessionManager = sessionManager;
     this.scheduler = scheduler;
     this.watchdog = watchdog;
     this.triageNurse = triageNurse;
+    this.memoryMonitor = memoryMonitor;
   }
 
   /**
@@ -195,11 +199,25 @@ export class HealthChecker {
   private checkMemory(): ComponentHealth {
     const now = new Date().toISOString();
     try {
-      const totalBytes = os.totalmem();
-      const freeBytes = os.freemem();
-      const totalGB = totalBytes / (1024 ** 3);
-      const freeGB = freeBytes / (1024 ** 3);
-      const usedPercent = ((totalBytes - freeBytes) / totalBytes) * 100;
+      // Prefer MemoryPressureMonitor's vm_stat-based calculation on macOS.
+      // os.freemem() only counts "Pages free" and ignores reclaimable
+      // inactive/purgeable pages, reporting wildly pessimistic numbers.
+      let totalGB: number;
+      let freeGB: number;
+      let usedPercent: number;
+
+      if (this.memoryMonitor) {
+        const memState = this.memoryMonitor.getState();
+        totalGB = memState.totalGB;
+        freeGB = memState.freeGB;
+        usedPercent = memState.pressurePercent;
+      } else {
+        const totalBytes = os.totalmem();
+        const freeBytes = os.freemem();
+        totalGB = totalBytes / (1024 ** 3);
+        freeGB = freeBytes / (1024 ** 3);
+        usedPercent = ((totalBytes - freeBytes) / totalBytes) * 100;
+      }
 
       if (usedPercent >= 90) {
         return { status: 'unhealthy', message: `Memory critical: ${usedPercent.toFixed(0)}% used (${freeGB.toFixed(1)}GB free)`, lastCheck: now };

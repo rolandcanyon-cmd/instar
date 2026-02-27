@@ -98,14 +98,15 @@ describe('AutoUpdater — failure paths', () => {
       expect(data.requestedBy).toBe('auto-updater');
       expect(data.targetVersion).toBe('0.9.9');
       expect(data.previousVersion).toBe('0.9.8');
+      expect(data.plannedRestart).toBe(true);
       expect(data.expiresAt).toBeDefined();
       expect(data.pid).toBe(process.pid);
 
-      // TTL should be ~10 minutes in the future
+      // TTL should be ~1 hour in the future (was 10 min — extended for foreground mode)
       const expires = new Date(data.expiresAt).getTime();
       const now = Date.now();
       expect(expires).toBeGreaterThan(now);
-      expect(expires).toBeLessThanOrEqual(now + 11 * 60 * 1000);
+      expect(expires).toBeLessThanOrEqual(now + 61 * 60 * 1000);
     });
 
     it('does not crash when state dir is read-only', async () => {

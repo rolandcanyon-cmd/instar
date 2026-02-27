@@ -481,7 +481,9 @@ export class TelegramLifeline {
       const status = this.supervisor.getStatus();
       const queueSize = this.queue.length;
       let serverLine = status.healthy ? '● healthy' : status.running ? '○ unhealthy' : '✗ down';
-      if (status.circuitBroken) {
+      if (status.inMaintenanceWait) {
+        serverLine += ` (planned restart — ${Math.round(status.maintenanceWaitElapsedMs / 1000)}s)`;
+      } else if (status.circuitBroken) {
         serverLine += ' (CIRCUIT BROKEN)';
       } else if (status.coolingDown) {
         serverLine += ` (cooldown: ${Math.ceil(status.cooldownRemainingMs / 1000)}s)`;

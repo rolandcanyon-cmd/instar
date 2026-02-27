@@ -161,14 +161,25 @@ export function createRoutes(ctx: RouteContext): Router {
         heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
       };
 
-      // System-wide memory state
-      const totalMem = os.totalmem();
-      const freeMem = os.freemem();
-      base.systemMemory = {
-        totalGB: Math.round(totalMem / (1024 ** 3) * 10) / 10,
-        freeGB: Math.round(freeMem / (1024 ** 3) * 10) / 10,
-        usedPercent: Math.round(((totalMem - freeMem) / totalMem) * 1000) / 10,
-      };
+      // System-wide memory state (prefer MemoryPressureMonitor's vm_stat-based
+      // calculation on macOS — os.freemem() only counts "Pages free" and ignores
+      // reclaimable inactive/purgeable pages, reporting wildly pessimistic numbers)
+      if (ctx.memoryMonitor) {
+        const memState = ctx.memoryMonitor.getState();
+        base.systemMemory = {
+          totalGB: Math.round(memState.totalGB * 10) / 10,
+          freeGB: Math.round(memState.freeGB * 10) / 10,
+          usedPercent: Math.round(memState.pressurePercent * 10) / 10,
+        };
+      } else {
+        const totalMem = os.totalmem();
+        const freeMem = os.freemem();
+        base.systemMemory = {
+          totalGB: Math.round(totalMem / (1024 ** 3) * 10) / 10,
+          freeGB: Math.round(freeMem / (1024 ** 3) * 10) / 10,
+          usedPercent: Math.round(((totalMem - freeMem) / totalMem) * 1000) / 10,
+        };
+      }
 
       // Memory pressure state from MemoryPressureMonitor (macOS-accurate via vm_stat).
       // On macOS, os.freemem() is misleading — wired+compressed+app memory leaves little

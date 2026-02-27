@@ -1556,11 +1556,17 @@ export async function startServer(options: StartOptions): Promise<void> {
     const restartWatcher = new ForegroundRestartWatcher({
       stateDir: config.stateDir,
       onRestartDetected: async (request) => {
-        // IMMEDIATE tier sends directly — no batching delay
-        notify('IMMEDIATE', 'system',
-          `Update installed: v${request.previousVersion} → v${request.targetVersion}\n` +
-          `Restarting now to load new code...`
-        );
+        // Only notify if there are active sessions — silent restart otherwise.
+        // Phase 1C of GRACEFUL_UPDATES: reduce noise for routine maintenance.
+        const runningSessions = sessionManager.listRunningSessions();
+        if (runningSessions.length > 0) {
+          notify('IMMEDIATE', 'system',
+            `Updating to v${request.targetVersion} — restarting in a few seconds. ` +
+            `${runningSessions.length} session(s) will resume after restart.`
+          );
+        } else {
+          console.log(`[ForegroundRestartWatcher] Silent restart — no active sessions (v${request.previousVersion} → v${request.targetVersion})`);
+        }
       },
     });
     restartWatcher.start();

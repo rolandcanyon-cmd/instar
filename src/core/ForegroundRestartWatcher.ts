@@ -26,6 +26,7 @@ export interface RestartRequest {
   requestedBy: string;
   targetVersion: string;
   previousVersion: string;
+  plannedRestart?: boolean;
   expiresAt?: string;
   pid?: number;
 }
@@ -98,6 +99,21 @@ export class ForegroundRestartWatcher extends EventEmitter {
 
       // Clear the flag to prevent re-triggering on next startup
       try { fs.unlinkSync(this.flagPath); } catch { /* ignore */ }
+
+      // Write a planned-exit marker so the supervisor (if running) knows this
+      // was a planned restart, not a crash. Solves the race condition where we
+      // consume restart-requested.json before the supervisor sees it.
+      if (data.plannedRestart) {
+        const markerPath = path.join(path.dirname(this.flagPath), 'planned-exit-marker.json');
+        try {
+          fs.writeFileSync(markerPath, JSON.stringify({
+            exitedAt: new Date().toISOString(),
+            targetVersion: data.targetVersion,
+            previousVersion: data.previousVersion,
+            pid: process.pid,
+          }));
+        } catch { /* best effort */ }
+      }
 
       this.isShuttingDown = true;
       this.emit('restartDetected', data);

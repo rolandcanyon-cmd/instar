@@ -53,6 +53,10 @@ export class ServerSupervisor extends EventEmitter {
   private readonly unhealthyThreshold = 2;
   private stateDir: string | null;
 
+  // Planned restart / maintenance wait — suppress alerts during expected downtime
+  private maintenanceWaitStartedAt = 0;
+  private maintenanceWaitMs = 5 * 60_000; // 5 minutes default (configurable via maintenanceWaitMinutes)
+
   // Circuit breaker — give up after too many total failures, but retry periodically
   private totalFailures = 0;
   private totalFailureWindowStart = 0;
@@ -70,6 +74,8 @@ export class ServerSupervisor extends EventEmitter {
     projectName: string;
     port: number;
     stateDir?: string;
+    /** How long to wait for server recovery during a planned restart before alerting. Default: 5 minutes. */
+    maintenanceWaitMinutes?: number;
   }) {
     super();
     this.projectDir = options.projectDir;
@@ -78,6 +84,10 @@ export class ServerSupervisor extends EventEmitter {
     this.stateDir = options.stateDir ?? null;
     this.tmuxPath = detectTmuxPath();
     this.serverSessionName = `${this.projectName}-server`;
+
+    if (options.maintenanceWaitMinutes !== undefined) {
+      this.maintenanceWaitMs = options.maintenanceWaitMinutes * 60_000;
+    }
   }
 
   /**
@@ -152,11 +162,14 @@ export class ServerSupervisor extends EventEmitter {
     lastCrashOutput: string;
     circuitBreakerRetryCount: number;
     maxCircuitBreakerRetries: number;
+    inMaintenanceWait: boolean;
+    maintenanceWaitElapsedMs: number;
   } {
     const coolingDown = this.maxRetriesExhaustedAt > 0;
     const cooldownRemainingMs = coolingDown
       ? Math.max(0, this.retryCooldownMs - (Date.now() - this.maxRetriesExhaustedAt))
       : 0;
+    const inMaintenanceWait = this.maintenanceWaitStartedAt > 0;
     return {
       running: this.isRunning,
       healthy: this.healthy,
@@ -170,6 +183,8 @@ export class ServerSupervisor extends EventEmitter {
       lastCrashOutput: this.lastCrashOutput,
       circuitBreakerRetryCount: this.circuitBreakerRetryCount,
       maxCircuitBreakerRetries: this.maxCircuitBreakerRetries,
+      inMaintenanceWait,
+      maintenanceWaitElapsedMs: inMaintenanceWait ? Date.now() - this.maintenanceWaitStartedAt : 0,
     };
   }
 
@@ -288,7 +303,17 @@ export class ServerSupervisor extends EventEmitter {
         const healthy = await this.checkHealth();
         if (healthy) {
           if (!this.isRunning) {
-            this.emit('serverUp');
+            if (this.maintenanceWaitStartedAt > 0) {
+              // Recovering from planned restart — quiet recovery, no notification
+              const elapsedMs = Date.now() - this.maintenanceWaitStartedAt;
+              console.log(`[Supervisor] Server recovered after planned restart (${Math.round(elapsedMs / 1000)}s downtime)`);
+              this.maintenanceWaitStartedAt = 0;
+              this.clearPlannedExitMarker();
+              // Still replay queued messages (important!) but skip serverDown notification
+              this.emit('serverUp');
+            } else {
+              this.emit('serverUp');
+            }
           }
           this.isRunning = true;
           this.lastHealthy = Date.now();
@@ -366,11 +391,20 @@ export class ServerSupervisor extends EventEmitter {
 
       console.log(`[Supervisor] Restart requested by ${data.requestedBy} for v${data.targetVersion}`);
 
+      // Enter maintenance wait if this is a planned restart (suppress serverDown alerts)
+      if (data.plannedRestart) {
+        this.maintenanceWaitStartedAt = Date.now();
+        console.log(`[Supervisor] Planned restart — entering maintenance wait (${Math.round(this.maintenanceWaitMs / 60_000)}m window)`);
+      }
+
       // Clear the flag BEFORE restarting to prevent re-triggering
       try { fs.unlinkSync(flagPath); } catch { /* ignore */ }
 
       // Also clean up legacy flag if present
       this.clearLegacyRestartFlag();
+
+      // Clean up any planned-exit marker from ForegroundRestartWatcher
+      this.clearPlannedExitMarker();
 
       // Initiate graceful restart
       this.performGracefulRestart(`update to v${data.targetVersion}`);
@@ -425,6 +459,21 @@ export class ServerSupervisor extends EventEmitter {
       console.log('[Supervisor] Health check failed but legacy update-restart flag is active — suppressing alert');
       this.consecutiveFailures = 0;
       this.spawnedAt = Date.now();
+      return;
+    }
+
+    // Check for planned restart (new AutoUpdater with plannedRestart: true, or
+    // ForegroundRestartWatcher exit marker). Suppress serverDown during the
+    // maintenance wait window — this is expected downtime, not a crash.
+    if (this.isPendingPlannedRestart()) {
+      if (!this.isServerSessionAlive()) {
+        console.log('[Supervisor] Planned restart in progress — server session dead. Respawning.');
+        this.consecutiveFailures = 0;
+        this.spawnServer();
+        return;
+      }
+      console.log('[Supervisor] Health check failed during planned restart — suppressing alert');
+      this.consecutiveFailures = 0;
       return;
     }
 
@@ -594,6 +643,60 @@ export class ServerSupervisor extends EventEmitter {
       if (fs.existsSync(flagPath)) {
         fs.unlinkSync(flagPath);
         console.log('[Supervisor] Cleared legacy update-restart flag');
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ── Planned restart detection ──────────────────────────────
+
+  /**
+   * Check if a planned restart is in progress.
+   *
+   * Two sources of truth (covers both race scenarios):
+   * 1. Internal state: set by checkRestartRequest() when it sees plannedRestart: true
+   * 2. Planned-exit marker: written by ForegroundRestartWatcher before process.exit()
+   *    when it consumed the restart-requested.json before us
+   *
+   * Auto-expires after maintenanceWaitMs (default 5 min). If the server doesn't
+   * come back within the window, fall back to normal alerting.
+   */
+  private isPendingPlannedRestart(): boolean {
+    // Source 1: Internal state (supervisor saw the flag directly)
+    if (this.maintenanceWaitStartedAt > 0) {
+      const elapsed = Date.now() - this.maintenanceWaitStartedAt;
+      if (elapsed > this.maintenanceWaitMs) {
+        console.warn(`[Supervisor] Maintenance wait expired after ${Math.round(elapsed / 1000)}s — falling back to normal alerting`);
+        this.maintenanceWaitStartedAt = 0;
+        return false;
+      }
+      return true;
+    }
+
+    // Source 2: Planned-exit marker (ForegroundRestartWatcher consumed the flag first)
+    if (!this.stateDir) return false;
+    const markerPath = path.join(this.stateDir, 'state', 'planned-exit-marker.json');
+    try {
+      if (!fs.existsSync(markerPath)) return false;
+      const data = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
+
+      // Marker exists — enter maintenance wait mode
+      console.log(`[Supervisor] Found planned-exit marker (target: v${data.targetVersion}) — entering maintenance wait`);
+      this.maintenanceWaitStartedAt = new Date(data.exitedAt).getTime() || Date.now();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Clean up the planned-exit marker written by ForegroundRestartWatcher.
+   */
+  private clearPlannedExitMarker(): void {
+    if (!this.stateDir) return;
+    const markerPath = path.join(this.stateDir, 'state', 'planned-exit-marker.json');
+    try {
+      if (fs.existsSync(markerPath)) {
+        fs.unlinkSync(markerPath);
       }
     } catch { /* ignore */ }
   }
