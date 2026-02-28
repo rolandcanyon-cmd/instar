@@ -116,7 +116,7 @@ export class StaleProcessGuard {
     try {
       currentValue = snapshot.currentValueFn();
     } catch {
-      // If we can't read current value, don't report drift
+      // @silent-fallback-ok — if current value is unreadable, drift check is not meaningful; skip
       return null;
     }
 

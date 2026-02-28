@@ -316,8 +316,8 @@ export class SyncOrchestrator extends EventEmitter {
       fs.unlinkSync(lockPath);
       return true;
     } catch {
-      // If we can't read it, try to remove it anyway
-      try { fs.unlinkSync(lockPath); } catch { /* best effort */ }
+      // @silent-fallback-ok — corrupted lock file; attempt removal as cleanup
+      try { fs.unlinkSync(lockPath); } catch { /* @silent-fallback-ok — lock file removal is best-effort cleanup */ }
       return true;
     }
   }
@@ -333,6 +333,7 @@ export class SyncOrchestrator extends EventEmitter {
       const lock: SyncLock = JSON.parse(fs.readFileSync(lockPath, 'utf-8'));
       return new Date(lock.expiresAt).getTime() > Date.now();
     } catch {
+      // @silent-fallback-ok — corrupted lock file treated as unlocked; safe default
       return false;
     }
   }
@@ -347,6 +348,7 @@ export class SyncOrchestrator extends EventEmitter {
     try {
       return JSON.parse(fs.readFileSync(lockPath, 'utf-8'));
     } catch {
+      // @silent-fallback-ok — lock file may not exist or be corrupted; null signals no lock holder
       return null;
     }
   }
@@ -1090,7 +1092,7 @@ export class SyncOrchestrator extends EventEmitter {
       try {
         await this.periodicSync(opts);
       } catch {
-        // Periodic sync errors are non-fatal
+        // @silent-fallback-ok — periodic sync errors are non-fatal; next cycle will retry
       }
     }, this.syncIntervalMs);
 
@@ -1118,7 +1120,7 @@ export class SyncOrchestrator extends EventEmitter {
     this.gitSync.stop();
 
     if (this.agentBus) {
-      try { this.agentBus.stopPolling(); } catch { /* best effort */ }
+      try { this.agentBus.stopPolling(); } catch { /* @silent-fallback-ok — polling stop is best-effort shutdown cleanup */ }
     }
   }
 
@@ -1136,6 +1138,7 @@ export class SyncOrchestrator extends EventEmitter {
     try {
       return this.gitExecSafe(['rev-parse', '--abbrev-ref', 'HEAD']);
     } catch {
+      // @silent-fallback-ok — branch detection may fail outside a git repo; null is the expected fallback
       return null;
     }
   }

@@ -690,7 +690,13 @@ export class TelegramAdapter implements MessagingAdapter {
         console.log(`[telegram] Created Dashboard topic: ${topic.topicId}`);
         return topic.topicId;
       } catch (err) {
-        console.error(`[telegram] Failed to create Dashboard topic: ${err}`);
+        DegradationReporter.getInstance().report({
+          feature: 'TelegramAdapter.ensureDashboardTopic',
+          primary: 'Create Dashboard forum topic for status messages',
+          fallback: 'Dashboard topic unavailable, status messages have no destination',
+          reason: `Failed to create Dashboard topic: ${err instanceof Error ? err.message : String(err)}`,
+          impact: 'Dashboard status messages and pinned URLs will not be delivered',
+        });
         return null;
       }
     }
@@ -709,6 +715,7 @@ export class TelegramAdapter implements MessagingAdapter {
       }
       return this.config.dashboardTopicId;
     } catch (err) {
+      // @silent-fallback-ok — self-healing: attempts topic recreation on deletion, returns existing ID for transient errors
       const errStr = String(err);
       if (errStr.includes('thread not found') || errStr.includes('TOPIC_DELETED') ||
           errStr.includes('TOPIC_CLOSED') || errStr.includes('not found')) {
@@ -718,7 +725,14 @@ export class TelegramAdapter implements MessagingAdapter {
           this.config.dashboardTopicId = topic.topicId;
           this.persistDashboardTopicId(topic.topicId);
           return topic.topicId;
-        } catch {
+        } catch (recreateErr) {
+          DegradationReporter.getInstance().report({
+            feature: 'TelegramAdapter.ensureDashboardTopic',
+            primary: 'Recreate deleted Dashboard forum topic',
+            fallback: 'No dashboard topic available, returning null',
+            reason: `Recreation failed: ${recreateErr instanceof Error ? recreateErr.message : String(recreateErr)}`,
+            impact: 'Dashboard status messages and pinned URLs will not be delivered until next restart',
+          });
           return null;
         }
       }

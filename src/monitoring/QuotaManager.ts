@@ -21,6 +21,7 @@ import { SessionCredentialManager } from './SessionCredentialManager.js';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { JobScheduler } from '../scheduler/JobScheduler.js';
 import type { QuotaState } from '../core/types.js';
+import { DegradationReporter } from './DegradationReporter.js';
 
 // ── Event types ──────────────────────────────────────────────────────
 
@@ -377,6 +378,13 @@ export class QuotaManager extends EventEmitter {
       try {
         await this.runCollectionCycle();
       } catch (err) {
+        DegradationReporter.getInstance().report({
+          feature: 'QuotaManager.scheduleNextCollection',
+          primary: 'Run periodic quota collection cycle',
+          fallback: 'Collection skipped, will retry at next interval',
+          reason: `Collection cycle error: ${err instanceof Error ? err.message : String(err)}`,
+          impact: 'Quota data may be stale until next successful collection',
+        });
         console.error('[QuotaManager] Collection cycle error:', err);
       }
 
@@ -403,6 +411,13 @@ export class QuotaManager extends EventEmitter {
           await this.postCollectionChecks(state, 'oauth', 'authoritative');
         }
       } catch (err) {
+        DegradationReporter.getInstance().report({
+          feature: 'QuotaManager.scheduleTrackerPoll',
+          primary: 'Poll quota tracker for state updates',
+          fallback: 'Tracker poll skipped, will retry at next interval',
+          reason: `Tracker poll error: ${err instanceof Error ? err.message : String(err)}`,
+          impact: 'Threshold notifications and migration checks delayed',
+        });
         console.error('[QuotaManager] Tracker poll error:', err);
       }
       this.scheduleTrackerPoll();
@@ -437,6 +452,13 @@ export class QuotaManager extends EventEmitter {
     try {
       await this.notifier.checkAndNotify(state);
     } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'QuotaManager.postCollectionChecks.notify',
+        primary: 'Check quota thresholds and send notifications',
+        fallback: 'Notifications skipped for this collection cycle',
+        reason: `Notification check failed: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'User may not receive quota threshold alerts',
+      });
       console.error('[QuotaManager] Notification check failed:', err);
     }
 
@@ -460,6 +482,13 @@ export class QuotaManager extends EventEmitter {
           console.log('[QuotaManager] Migration triggered after collection');
         }
       } catch (err) {
+        DegradationReporter.getInstance().report({
+          feature: 'QuotaManager.postCollectionChecks.migrate',
+          primary: 'Check if account migration is needed based on quota thresholds',
+          fallback: 'Migration check skipped, will retry at next collection',
+          reason: `Migration check failed: ${err instanceof Error ? err.message : String(err)}`,
+          impact: 'Auto-migration may be delayed if quota thresholds are breached',
+        });
         console.error('[QuotaManager] Migration check failed:', err);
       }
     }

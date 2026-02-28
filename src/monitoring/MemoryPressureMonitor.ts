@@ -17,6 +17,7 @@ import { EventEmitter } from 'node:events';
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import os from 'node:os';
+import { DegradationReporter } from './DegradationReporter.js';
 
 export type MemoryPressureState = 'normal' | 'warning' | 'elevated' | 'critical';
 
@@ -155,6 +156,13 @@ export class MemoryPressureMonitor extends EventEmitter {
         updatedAt: new Date().toISOString(),
       }, null, 2) + '\n');
     } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'MemoryPressureMonitor.persistThresholds',
+        primary: 'Persist updated memory thresholds to disk',
+        fallback: 'Thresholds active in-memory only, will revert to defaults on restart',
+        reason: `Write failed: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Custom memory thresholds will not survive a server restart',
+      });
       console.error(`[MemoryPressureMonitor] Failed to persist thresholds:`, err);
     }
   }
@@ -173,6 +181,7 @@ export class MemoryPressureMonitor extends EventEmitter {
       }
       return result;
     } catch {
+      // @silent-fallback-ok — persisted thresholds may be corrupt; falling back to defaults is safe
       return {};
     }
   }

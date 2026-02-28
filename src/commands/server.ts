@@ -766,7 +766,9 @@ function resolvePackageJsonPath(): string | null {
   try {
     const pkgPath = path.resolve(new URL(import.meta.url).pathname, '../../../package.json');
     if (fs.existsSync(pkgPath)) return pkgPath;
-  } catch { /* fallback */ }
+  } catch {
+    // @silent-fallback-ok — best-effort path resolution for package.json; null return is the documented default
+  }
   return null;
 }
 
@@ -1444,7 +1446,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       semanticMemory = undefined;
-      degradationReporter.report({
+      DegradationReporter.getInstance().report({
         feature: 'SemanticMemory',
         primary: 'SQLite-backed knowledge graph with FTS5 + vector hybrid search',
         fallback: 'Legacy memory systems (MEMORY.md, CanonicalState, MemoryIndex)',

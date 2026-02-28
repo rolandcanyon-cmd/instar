@@ -121,6 +121,7 @@ export class LedgerAuth {
         signedFields: signedFields as string[],
       };
     } catch (err) {
+      // @silent-fallback-ok — signing failure returns structured error to caller; not a silent degradation
       return {
         success: false,
         error: `Signing failed: ${err instanceof Error ? err.message : String(err)}`,

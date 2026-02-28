@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { IntelligenceProvider } from '../core/types.js';
 import type { CommitmentTracker, CommitmentType } from './CommitmentTracker.js';
+import { DegradationReporter } from './DegradationReporter.js';
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -165,6 +166,13 @@ export class CommitmentSentinel {
       return detected;
     } catch (err) {
       this.isScanning = false;
+      DegradationReporter.getInstance().report({
+        feature: 'CommitmentSentinel.scan',
+        primary: 'Scan messages for unregistered commitments',
+        fallback: 'Scan skipped, returning 0 detected',
+        reason: `Scan error: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Unregistered commitments may go undetected until next successful scan',
+      });
       console.error(`[CommitmentSentinel] Scan error:`, err);
       return 0;
     }
@@ -196,12 +204,19 @@ export class CommitmentSentinel {
 
           messages.push(msg);
         } catch {
-          // Skip malformed lines
+          // @silent-fallback-ok — skip individual malformed JSONL lines, other lines still parsed
         }
       }
 
       return messages.reverse(); // Chronological order
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'CommitmentSentinel.readNewMessages',
+        primary: 'Read new Telegram messages from JSONL log',
+        fallback: 'Returning empty array, no messages processed',
+        reason: `Read failed: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Commitment detection skipped for this cycle',
+      });
       return [];
     }
   }

@@ -588,7 +588,14 @@ export class GitSyncManager {
       const relativePath = path.relative(this.projectDir, filePath);
 
       return { filePath, relativePath, oursContent, theirsContent, conflictedContent };
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'GitSync.buildConflictFile',
+        primary: 'Extract ours/theirs content for conflict resolution',
+        fallback: 'Conflict file skipped — cannot read merge stages',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'This file will be excluded from LLM conflict resolution',
+      });
       return null;
     }
   }
@@ -634,7 +641,7 @@ export class GitSyncManager {
           if (pmv) {
             validationConfig = { ...validationConfig, ...pmv };
           }
-        } catch { /* use defaults */ }
+        } catch { /* @silent-fallback-ok — malformed config file; built-in defaults are safe */ }
       }
 
       if (!validationConfig.enabled) return true;
@@ -648,6 +655,7 @@ export class GitSyncManager {
             stdio: ['pipe', 'pipe', 'pipe'],
           });
         } catch {
+          // @silent-fallback-ok — build failure is an expected validation result; false signals merge should not proceed
           return false;
         }
       }
@@ -661,6 +669,7 @@ export class GitSyncManager {
             stdio: ['pipe', 'pipe', 'pipe'],
           });
         } catch {
+          // @silent-fallback-ok — test failure is an expected validation result; false signals merge should not proceed
           return false;
         }
       }

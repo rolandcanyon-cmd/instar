@@ -410,6 +410,7 @@ export class AuditTrail {
         .filter(line => line.trim())
         .map(line => JSON.parse(line) as AuditEntry);
     } catch {
+      // @silent-fallback-ok — log file may not exist yet; empty array is the natural default
       return [];
     }
   }

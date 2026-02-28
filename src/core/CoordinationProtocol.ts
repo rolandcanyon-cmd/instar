@@ -514,6 +514,7 @@ export class CoordinationProtocol {
       const content = fs.readFileSync(filePath, 'utf-8');
       return JSON.parse(content) as LeadershipState;
     } catch {
+      // @silent-fallback-ok — leadership file may not exist yet; null signals no leadership state
       return null;
     }
   }

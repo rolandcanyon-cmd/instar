@@ -25,6 +25,7 @@ import type { QuotaState } from '../core/types.js';
 import type { CredentialProvider, ClaudeCredentials } from './CredentialProvider.js';
 import { redactToken, redactEmail } from './CredentialProvider.js';
 import type { QuotaTracker } from './QuotaTracker.js';
+import { DegradationReporter } from './DegradationReporter.js';
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -605,6 +606,13 @@ export class QuotaCollector extends EventEmitter {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           errors.push(`OAuth collection failed: ${msg}`);
+          DegradationReporter.getInstance().report({
+            feature: 'QuotaCollector.collect.oauth',
+            primary: 'Collect quota data from Anthropic OAuth API',
+            fallback: 'Falling back to JSONL-based estimation (lower confidence)',
+            reason: `OAuth failed: ${msg}`,
+            impact: 'Quota data may be estimated rather than authoritative',
+          });
 
           // 401 means token expired — emit event
           if (msg.includes('401')) {
@@ -632,6 +640,13 @@ export class QuotaCollector extends EventEmitter {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           errors.push(`JSONL fallback failed: ${msg}`);
+          DegradationReporter.getInstance().report({
+            feature: 'QuotaCollector.collect.jsonlFallback',
+            primary: 'Collect quota data from JSONL conversation files',
+            fallback: 'No quota data available from any source',
+            reason: `JSONL fallback failed: ${msg}`,
+            impact: 'Quota tracking unavailable — spawn gating and migration cannot operate',
+          });
           this.emit('jsonl_parse_error', { path: this.getJsonlDir(), error: msg });
         }
       }

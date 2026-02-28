@@ -30,6 +30,7 @@ import type { Session } from '../core/types.js';
 import type { IntelligenceProvider } from '../core/types.js';
 import { EpisodicMemory, type ActivityDigest, type SessionSynthesis, type SentinelState } from '../memory/EpisodicMemory.js';
 import { ActivityPartitioner, type TelegramLogEntry, type ActivityUnit } from '../memory/ActivityPartitioner.js';
+import { DegradationReporter } from './DegradationReporter.js';
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -127,6 +128,13 @@ export class SessionActivitySentinel {
           };
         }
       } catch (err: any) {
+        DegradationReporter.getInstance().report({
+          feature: 'SessionActivitySentinel.scan',
+          primary: `Digest activity for session ${session.id}`,
+          fallback: 'Session activity undigested, will retry next scan',
+          reason: `Scan error: ${err instanceof Error ? err.message : String(err)}`,
+          impact: `Activity for session ${session.id} may be lost if not retried`,
+        });
         report.errors.push({ sessionId: session.id, error: err.message });
       }
     }
@@ -330,6 +338,7 @@ export class SessionActivitySentinel {
         themes: Array.isArray(parsed.themes) ? parsed.themes.map(String) : [],
       };
     } catch {
+      // @silent-fallback-ok — LLM response may not be valid JSON; caller handles null gracefully
       return null;
     }
   }

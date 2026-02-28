@@ -12,6 +12,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -314,7 +315,14 @@ export class BranchManager {
       }
 
       return true;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'BranchManager.abandonBranch',
+        primary: 'Abandon task branch and update state',
+        fallback: 'Branch abandon failed silently',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Stale branch may persist and not be cleaned up',
+      });
       return false;
     }
   }
@@ -377,7 +385,7 @@ export class BranchManager {
         }
       }
     } catch {
-      // Can't list git branches — skip orphan check
+      // @silent-fallback-ok — orphan detection is best-effort; git branch listing may fail in bare repos
     }
 
     return warnings;
@@ -424,6 +432,7 @@ export class BranchManager {
       }
       return { success: true, conflicts: [] };
     } catch (err) {
+      // @silent-fallback-ok — merge failure is expected control flow; conflicts are returned to caller for resolution
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes('CONFLICT') || errMsg.includes('Merge conflict')) {
         const conflicts = this.detectConflicts();
@@ -438,6 +447,7 @@ export class BranchManager {
       const status = this.git('diff', '--name-only', '--diff-filter=U');
       return status.split('\n').filter(l => l.trim());
     } catch {
+      // @silent-fallback-ok — git diff for conflict detection is best-effort; empty list is safe default
       return [];
     }
   }
@@ -450,7 +460,7 @@ export class BranchManager {
         this.git('commit', '-m', message);
       }
     } catch {
-      // Nothing to commit
+      // @silent-fallback-ok — nothing to commit or git not available; commit is best-effort
     }
   }
 
@@ -458,14 +468,14 @@ export class BranchManager {
     try {
       this.git('branch', '-D', branchName);
     } catch {
-      // Branch may not exist
+      // @silent-fallback-ok — branch may not exist; deletion is best-effort cleanup
     }
 
     // Also try to delete remote tracking branch (non-fatal)
     try {
       this.git('push', 'origin', '--delete', branchName);
     } catch {
-      // No remote or branch not pushed
+      // @silent-fallback-ok — no remote configured or branch not pushed; remote cleanup is optional
     }
   }
 
@@ -476,6 +486,7 @@ export class BranchManager {
         .map(l => l.replace(/^\*?\s+/, '').trim())
         .filter(l => l.length > 0);
     } catch {
+      // @silent-fallback-ok — git branch listing may fail if not in a repo; empty list is safe default
       return [];
     }
   }
@@ -493,6 +504,7 @@ export class BranchManager {
       const data = JSON.parse(content);
       return data.branches ?? [];
     } catch {
+      // @silent-fallback-ok — state file may not exist yet; empty array is the natural initial state
       return [];
     }
   }

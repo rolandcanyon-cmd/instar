@@ -517,6 +517,7 @@ export class MessageRouter implements IMessageRouter {
         return { valid: false, reason: 'signature verification failed' };
       }
     } catch (err) {
+      // @silent-fallback-ok — returns structured error with reason; caller handles validation failure
       return { valid: false, reason: `signature error: ${err instanceof Error ? err.message : String(err)}` };
     }
 

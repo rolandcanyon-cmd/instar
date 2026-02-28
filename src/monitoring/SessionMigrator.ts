@@ -19,6 +19,7 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DegradationReporter } from './DegradationReporter.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -399,6 +400,13 @@ export class SessionMigrator extends EventEmitter {
       return true;
 
     } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'SessionMigrator.executeMigration',
+        primary: 'Migrate sessions to alternative account on quota exhaustion',
+        fallback: 'Migration failed, sessions may remain on exhausted account',
+        reason: `Migration error: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Sessions may hit rate limits until migration succeeds or quota resets',
+      });
       console.error('[SessionMigrator] Migration error:', err);
       event.result = 'failed';
       event.error = err instanceof Error ? err.message : String(err);
@@ -412,7 +420,8 @@ export class SessionMigrator extends EventEmitter {
       }
 
       // Ensure scheduler is resumed even on error
-      try { this.deps!.resumeScheduler(); } catch { /* best-effort */ }
+      try { this.deps!.resumeScheduler(); } catch { // @silent-fallback-ok — best-effort scheduler resume after migration failure
+      }
 
       this.emit('migration_failed', event);
       this.recordMigration(event);
@@ -476,6 +485,13 @@ export class SessionMigrator extends EventEmitter {
       try {
         await this.deps.respawnJob(slug);
       } catch (err) {
+        DegradationReporter.getInstance().report({
+          feature: 'SessionMigrator.rollbackRestartSessions',
+          primary: `Restart session ${slug} during migration rollback`,
+          fallback: `Session ${slug} left halted after failed rollback`,
+          reason: `Rollback restart failed: ${err instanceof Error ? err.message : String(err)}`,
+          impact: `Job ${slug} is not running and requires manual restart`,
+        });
         console.error(`[SessionMigrator] Rollback restart failed for ${slug}:`, err);
       }
     }
@@ -612,7 +628,8 @@ export class SessionMigrator extends EventEmitter {
     this.saveMigrationState();
 
     // Resume scheduler if it was left paused
-    try { this.deps.resumeScheduler(); } catch { /* best-effort */ }
+    try { this.deps.resumeScheduler(); } catch { // @silent-fallback-ok — best-effort scheduler resume during crash recovery
+    }
   }
 
   // ── State Persistence ───────────────────────────────────────────────
@@ -621,6 +638,13 @@ export class SessionMigrator extends EventEmitter {
     try {
       fs.writeFileSync(this.statePath, JSON.stringify(this.migrationState, null, 2), { mode: 0o600 });
     } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'SessionMigrator.saveMigrationState',
+        primary: 'Persist migration state to disk for crash recovery',
+        fallback: 'Migration state exists in memory only',
+        reason: `Write failed: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Crash recovery will not be able to resume this migration',
+      });
       console.error('[SessionMigrator] Failed to save migration state:', err);
     }
   }
@@ -630,6 +654,7 @@ export class SessionMigrator extends EventEmitter {
       if (!fs.existsSync(this.statePath)) return null;
       return JSON.parse(fs.readFileSync(this.statePath, 'utf-8'));
     } catch {
+      // @silent-fallback-ok — corrupt state file treated as no state; fresh start is safe
       return null;
     }
   }

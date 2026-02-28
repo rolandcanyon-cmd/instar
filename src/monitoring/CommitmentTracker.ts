@@ -23,6 +23,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { LiveConfig } from '../config/LiveConfig.js';
 import type { ComponentHealth } from '../core/types.js';
+import { DegradationReporter } from './DegradationReporter.js';
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -547,6 +548,13 @@ export class CommitmentTracker extends EventEmitter {
         return true;
       }
     } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'CommitmentTracker.attemptAutoCorrection',
+        primary: `Auto-correct config drift for commitment ${commitment.id}`,
+        fallback: 'Config drift persists, violation remains unresolved',
+        reason: `Auto-correction failed: ${err instanceof Error ? err.message : String(err)}`,
+        impact: `Commitment "${commitment.userRequest}" remains violated until next cycle`,
+      });
       console.error(`[CommitmentTracker] Auto-correction failed for ${commitment.id}:`, err);
     }
 

@@ -13,6 +13,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 import type { WorkLedger, LedgerEntry } from './WorkLedger.js';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -332,6 +333,7 @@ export class HandoffManager {
       const content = fs.readFileSync(filePath, 'utf-8');
       return JSON.parse(content) as HandoffNote;
     } catch {
+      // @silent-fallback-ok — handoff file may not exist; null signals no pending handoff
       return null;
     }
   }
@@ -351,7 +353,7 @@ export class HandoffManager {
     try {
       fs.unlinkSync(filePath);
     } catch {
-      // File may not exist
+      // @silent-fallback-ok — file may not exist; clearing a nonexistent handoff note is a no-op
     }
   }
 
@@ -377,7 +379,14 @@ export class HandoffManager {
       this.git('add', '-A');
       this.git('commit', '-m', `wip(${this.machineId}): handoff — work in progress`);
       return true;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'HandoffManager.commitWip',
+        primary: 'Commit work-in-progress before handoff',
+        fallback: 'WIP commit failed — uncommitted changes may be lost during handoff',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Uncommitted work may not transfer to the receiving machine',
+      });
       return false;
     }
   }
@@ -428,6 +437,7 @@ export class HandoffManager {
         .map(l => l.replace(/^\*?\s+/, '').trim())
         .filter(l => l.length > 0);
     } catch {
+      // @silent-fallback-ok — git branch listing for task detection; empty list is safe default
       return [];
     }
   }
@@ -439,6 +449,7 @@ export class HandoffManager {
     try {
       return this.git('rev-parse', 'HEAD');
     } catch {
+      // @silent-fallback-ok — HEAD lookup for metadata; 'unknown' is acceptable fallback
       return 'unknown';
     }
   }
@@ -450,8 +461,14 @@ export class HandoffManager {
     try {
       this.git('push', '--all');
       return true;
-    } catch {
-      // Push may fail if no remote configured
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'HandoffManager.pushAll',
+        primary: 'Push all branches to remote before handoff',
+        fallback: 'Push failed — remote may not have latest work',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Receiving machine may not get latest commits until next successful push',
+      });
       return false;
     }
   }
@@ -463,7 +480,14 @@ export class HandoffManager {
     try {
       this.git('pull', '--rebase', '--autostash');
       return true;
-    } catch {
+    } catch (err) {
+      DegradationReporter.getInstance().report({
+        feature: 'HandoffManager.pullLatest',
+        primary: 'Pull latest changes from remote during resume',
+        fallback: 'Pull failed — working with potentially stale state',
+        reason: `Why: ${err instanceof Error ? err.message : String(err)}`,
+        impact: 'Machine may resume work without the latest remote changes',
+      });
       return false;
     }
   }

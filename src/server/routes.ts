@@ -2283,6 +2283,7 @@ export function createRoutes(ctx: RouteContext): Router {
         await ctx.autoUpdater.applyPendingUpdate();
         res.json(ctx.autoUpdater.getStatus());
       } catch (err) {
+        // @silent-fallback-ok — returns HTTP 500 with error details to caller; not a silent degradation
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
       }
       return;

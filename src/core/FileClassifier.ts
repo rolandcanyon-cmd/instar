@@ -299,7 +299,7 @@ export class FileClassifier {
             stdio: 'pipe',
           });
         } catch {
-          // Manifest checkout failed — continue with regen anyway
+          // @silent-fallback-ok — manifest checkout is pre-regen prep; regen will recreate it anyway
         }
       }
     }
@@ -450,6 +450,7 @@ export class FileClassifier {
       }
       return null;
     } catch {
+      // @silent-fallback-ok — git ls-files for blob hash lookup; null means stage not available
       return null;
     }
   }

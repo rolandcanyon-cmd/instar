@@ -495,7 +495,7 @@ export class LLMConflictResolver {
     try {
       fs.appendFileSync(this.logPath, JSON.stringify(event) + '\n');
     } catch {
-      // Logging is best-effort — don't let it break resolution
+      // @silent-fallback-ok — event logging is best-effort; resolution must not fail due to log write errors
     }
   }
 
@@ -508,6 +508,7 @@ export class LLMConflictResolver {
       const lines = content.trim().split('\n').filter(l => l.trim());
       return lines.slice(-limit).map(l => JSON.parse(l) as ResolutionEvent);
     } catch {
+      // @silent-fallback-ok — log file may not exist yet; empty array is the natural default for diagnostics
       return [];
     }
   }

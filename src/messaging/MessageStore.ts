@@ -259,7 +259,9 @@ export class MessageStore implements IMessageStore {
             fs.unlinkSync(filePath);
             deleted++;
           }
-        } catch { /* ignore */ }
+        } catch {
+          // @silent-fallback-ok — best-effort cleanup of expired dead-letter files
+        }
       }
     }
 

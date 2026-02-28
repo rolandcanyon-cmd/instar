@@ -152,7 +152,7 @@ describe('No Silent Fallbacks', () => {
     // When you fix a silent fallback (add DegradationReporter.report()
     // or add @silent-fallback-ok exemption), lower this number.
     // ═══════════════════════════════════════════════════════════
-    const BASELINE = 64;
+    const BASELINE = 0;
 
     if (silentFallbacks.length > 0) {
       const report = silentFallbacks.map(fb =>

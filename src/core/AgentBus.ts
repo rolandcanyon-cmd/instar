@@ -262,6 +262,7 @@ export class AgentBus extends EventEmitter {
           this.clearInbox();
         }
       } catch (err) {
+        // @silent-fallback-ok — error is emitted to listeners; polling continues on next tick
         this.emit('error', err instanceof Error ? err : new Error(String(err)));
       }
     }, this.pollIntervalMs);
@@ -391,7 +392,7 @@ export class AgentBus extends EventEmitter {
 
   private clearInbox(): void {
     const inboxPath = path.join(this.messagesDir, INBOX_FILE);
-    try { fs.writeFileSync(inboxPath, ''); } catch { /* ignore */ }
+    try { fs.writeFileSync(inboxPath, ''); } catch { /* @silent-fallback-ok — best-effort inbox cleanup */ }
   }
 
   private readJsonl(filePath: string): AgentMessage[] {
@@ -401,6 +402,7 @@ export class AgentBus extends EventEmitter {
         .filter(line => line.trim())
         .map(line => JSON.parse(line) as AgentMessage);
     } catch {
+      // @silent-fallback-ok — file may not exist yet; empty array is the natural default
       return [];
     }
   }
@@ -423,7 +425,7 @@ export class AgentBus extends EventEmitter {
       });
       return response.ok;
     } catch {
-      // HTTP delivery failed — will fall back to JSONL on next attempt
+      // @silent-fallback-ok — HTTP delivery failed; caller falls back to JSONL transport
       return false;
     }
   }
