@@ -23,6 +23,7 @@ import {
   createMockSessionManager,
 } from '../helpers/setup.js';
 import type { TempProject, MockSessionManager } from '../helpers/setup.js';
+import { generateAgentToken } from '../../src/messaging/AgentTokenManager.js';
 import type { InstarConfig } from '../../src/core/types.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -34,6 +35,7 @@ describe('Inter-Agent Messaging API routes', () => {
   let messageStore: MessageStore;
   let messageRouter: MessageRouter;
   let app: ReturnType<AgentServer['getApp']>;
+  let relayAgentToken: string;
   const AUTH_TOKEN = 'test-auth-messaging';
 
   beforeAll(async () => {
@@ -84,6 +86,9 @@ describe('Inter-Agent Messaging API routes', () => {
       users: [],
     };
 
+    // Generate agent token for relay-agent auth
+    relayAgentToken = generateAgentToken(config.projectName);
+
     server = new AgentServer({
       config,
       sessionManager: mockSM as any,
@@ -122,13 +127,14 @@ describe('Inter-Agent Messaging API routes', () => {
   // ── POST /messages/send ─────────────────────────────────────────
 
   describe('POST /messages/send', () => {
-    it('creates and sends a message (201)', async () => {
+    it('creates and sends a local message (201, phase=sent)', async () => {
+      // Send to a different session on the SAME agent → stays local, no routing
       const res = await request(app)
         .post('/messages/send')
         .set('Authorization', `Bearer ${AUTH_TOKEN}`)
         .send({
           from: { agent: 'test-agent', session: 'session-1', machine: 'test-machine' },
-          to: { agent: 'other-agent', session: 'best', machine: 'local' },
+          to: { agent: 'test-agent', session: 'session-2', machine: 'local' },
           type: 'info',
           priority: 'medium',
           subject: 'Test message',
@@ -138,6 +144,26 @@ describe('Inter-Agent Messaging API routes', () => {
 
       expect(res.body.messageId).toBeDefined();
       expect(res.body.phase).toBe('sent');
+    });
+
+    it('routes cross-agent message and queues when target offline (201, phase=queued)', async () => {
+      // Send to a DIFFERENT agent on the same machine → triggers cross-agent routing
+      // Since 'other-agent' is not in the registry, message gets dropped (queued)
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'session-1', machine: 'test-machine' },
+          to: { agent: 'other-agent', session: 'best', machine: 'local' },
+          type: 'info',
+          priority: 'medium',
+          subject: 'Cross-agent message',
+          body: 'Should be queued in drop directory',
+        })
+        .expect(201);
+
+      expect(res.body.messageId).toBeDefined();
+      expect(res.body.phase).toBe('queued');
     });
 
     it('returns 400 for missing required fields', async () => {
@@ -227,7 +253,7 @@ describe('Inter-Agent Messaging API routes', () => {
     it('accepts a valid relayed envelope', async () => {
       const res = await request(app)
         .post('/messages/relay-agent')
-        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .set('Authorization', `Bearer ${relayAgentToken}`)
         .send({
           schemaVersion: 1,
           message: {
@@ -261,7 +287,7 @@ describe('Inter-Agent Messaging API routes', () => {
     it('rejects loop (self in relay chain)', async () => {
       const res = await request(app)
         .post('/messages/relay-agent')
-        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .set('Authorization', `Bearer ${relayAgentToken}`)
         .send({
           schemaVersion: 1,
           message: {
@@ -291,9 +317,68 @@ describe('Inter-Agent Messaging API routes', () => {
     it('rejects invalid envelope', async () => {
       await request(app)
         .post('/messages/relay-agent')
-        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .set('Authorization', `Bearer ${relayAgentToken}`)
         .send({ invalid: true })
         .expect(400);
+    });
+
+    it('rejects relay-agent with wrong token', async () => {
+      const res = await request(app)
+        .post('/messages/relay-agent')
+        .set('Authorization', 'Bearer wrong-token-value')
+        .send({
+          schemaVersion: 1,
+          message: {
+            id: `auth-reject-${Date.now()}`,
+            from: { agent: 'remote', session: 'rs', machine: 'remote' },
+            to: { agent: 'test-agent', session: 'best', machine: 'local' },
+            type: 'info',
+            priority: 'low',
+            subject: 'Should be rejected',
+            body: 'Invalid token',
+            createdAt: new Date().toISOString(),
+            ttlMinutes: 30,
+          },
+          transport: {
+            relayChain: [],
+            originServer: 'http://remote:3000',
+            nonce: `${crypto.randomUUID()}:${new Date().toISOString()}`,
+            timestamp: new Date().toISOString(),
+          },
+          delivery: { phase: 'sent', transitions: [], attempts: 0 },
+        })
+        .expect(401);
+
+      expect(res.body.error).toContain('agent token');
+    });
+
+    it('rejects relay-agent with no auth header', async () => {
+      const res = await request(app)
+        .post('/messages/relay-agent')
+        .send({
+          schemaVersion: 1,
+          message: {
+            id: `no-auth-${Date.now()}`,
+            from: { agent: 'remote', session: 'rs', machine: 'remote' },
+            to: { agent: 'test-agent', session: 'best', machine: 'local' },
+            type: 'info',
+            priority: 'low',
+            subject: 'No auth',
+            body: 'Missing token',
+            createdAt: new Date().toISOString(),
+            ttlMinutes: 30,
+          },
+          transport: {
+            relayChain: [],
+            originServer: 'http://remote:3000',
+            nonce: `${crypto.randomUUID()}:${new Date().toISOString()}`,
+            timestamp: new Date().toISOString(),
+          },
+          delivery: { phase: 'sent', transitions: [], attempts: 0 },
+        })
+        .expect(401);
+
+      expect(res.body.error).toContain('agent token');
     });
   });
 

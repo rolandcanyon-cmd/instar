@@ -54,7 +54,11 @@ import type { SessionActivitySentinel } from '../monitoring/SessionActivitySenti
 import { ProcessIntegrity } from '../core/ProcessIntegrity.js';
 import type { MessageRouter } from '../messaging/MessageRouter.js';
 import type { MessageType, MessagePriority } from '../messaging/types.js';
+import { verifyAgentToken } from '../messaging/AgentTokenManager.js';
 import type { WorkingMemoryAssembler } from '../memory/WorkingMemoryAssembler.js';
+import type { QuotaManager } from '../monitoring/QuotaManager.js';
+import { ScopeCoherenceTracker } from '../core/ScopeCoherenceTracker.js';
+import type { ScopeCoherenceState } from '../core/ScopeCoherenceTracker.js';
 
 export interface RouteContext {
   config: InstarConfig;
@@ -92,6 +96,7 @@ export interface RouteContext {
   activitySentinel: SessionActivitySentinel | null;
   messageRouter: MessageRouter | null;
   workingMemory: WorkingMemoryAssembler | null;
+  quotaManager: QuotaManager | null;
   startTime: Date;
 }
 
@@ -1278,6 +1283,83 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // ── Active Job Context ──────────────────────────────────────────────
+  //
+  // Returns the currently active job (if any) for scope coherence checkpoints.
+
+  router.get('/context/active-job', (_req, res) => {
+    const activeJob = ctx.state.get<{
+      slug: string;
+      name: string;
+      description: string;
+      priority: string;
+      sessionName: string;
+      triggeredBy: string;
+      startedAt: string;
+      grounding: unknown;
+    }>('active-job');
+
+    if (!activeJob) {
+      res.json({ active: false });
+      return;
+    }
+
+    res.json({ active: true, job: activeJob });
+  });
+
+  // ── Scope Coherence ──────────────────────────────────────────────────
+  //
+  // Tracks implementation depth for the scope coherence checkpoint system.
+  // The 232nd Lesson: Implementation depth narrows scope.
+
+  router.get('/scope-coherence', (_req, res) => {
+    const tracker = new ScopeCoherenceTracker(ctx.state);
+    res.json(tracker.getState());
+  });
+
+  router.post('/scope-coherence/record', (req, res) => {
+    const { toolName, toolInput } = req.body || {};
+    if (!toolName || typeof toolName !== 'string') {
+      res.status(400).json({ error: 'toolName is required' });
+      return;
+    }
+    const tracker = new ScopeCoherenceTracker(ctx.state);
+    tracker.recordAction(toolName, toolInput || {});
+    res.json(tracker.getState());
+  });
+
+  router.get('/scope-coherence/check', (_req, res) => {
+    const tracker = new ScopeCoherenceTracker(ctx.state);
+    const result = tracker.shouldTriggerCheckpoint();
+
+    // Enrich with active job context if triggering
+    let jobContext = null;
+    if (result.trigger) {
+      const activeJob = ctx.state.get<{
+        slug: string;
+        name: string;
+        description: string;
+      }>('active-job');
+      if (activeJob) {
+        jobContext = {
+          slug: activeJob.slug,
+          name: activeJob.name,
+          description: activeJob.description,
+        };
+      }
+      tracker.recordCheckpointShown();
+    }
+
+    res.json({ ...result, jobContext });
+  });
+
+  router.post('/scope-coherence/reset', (_req, res) => {
+    const tracker = new ScopeCoherenceTracker(ctx.state);
+    tracker.reset();
+    res.json({ reset: true });
+  });
+
+  // NOTE: Must come AFTER all specific /context/* routes to avoid param capture.
   router.get('/context/:segmentId', (req, res) => {
     if (!ctx.contextHierarchy) {
       res.status(501).json({ error: 'ContextHierarchy not initialized' });
@@ -2513,6 +2595,39 @@ export function createRoutes(ctx: RouteContext): Router {
       ...(state ?? {}),
       recommendation: ctx.quotaTracker.getRecommendation(),
     });
+  });
+
+  // GET /quota/migration — Session migration state, history, and config
+  router.get('/quota/migration', (_req, res) => {
+    if (!ctx.quotaManager) {
+      res.json({ status: 'not_configured' });
+      return;
+    }
+    res.json(ctx.quotaManager.getMigrationStatus());
+  });
+
+  // POST /quota/migration/trigger — Manually trigger a migration
+  router.post('/quota/migration/trigger', async (req, res) => {
+    if (!ctx.quotaManager) {
+      res.status(503).json({ error: 'QuotaManager not configured' });
+      return;
+    }
+    try {
+      const { targetAccount, bypassCooldown } = req.body ?? {};
+      const result = await ctx.quotaManager.triggerMigration({ targetAccount, bypassCooldown });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // GET /quota/polling — Adaptive polling state
+  router.get('/quota/polling', (_req, res) => {
+    if (!ctx.quotaManager) {
+      res.json({ status: 'not_configured' });
+      return;
+    }
+    res.json(ctx.quotaManager.getPollingStatus());
   });
 
   // ── Publishing (Telegraph) ──────────────────────────────────────
@@ -4157,6 +4272,14 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
     try {
+      // Verify bearer token — the sender must present our agent's token
+      const authHeader = req.headers.authorization;
+      const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+      if (!bearerToken || !verifyAgentToken(ctx.config.projectName, bearerToken)) {
+        res.status(401).json({ error: 'Invalid or missing agent token' });
+        return;
+      }
+
       const envelope = req.body;
       if (!envelope?.message?.id) {
         res.status(400).json({ error: 'Invalid envelope' });

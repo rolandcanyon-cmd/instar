@@ -21,6 +21,7 @@ import { MessageFormatter } from '../../src/messaging/MessageFormatter.js';
 import { MessageDelivery } from '../../src/messaging/MessageDelivery.js';
 import { MessageRouter } from '../../src/messaging/MessageRouter.js';
 import { createMockSessionManager } from '../helpers/setup.js';
+import { generateAgentToken } from '../../src/messaging/AgentTokenManager.js';
 import type { InstarConfig } from '../../src/core/types.js';
 
 describe('E2E: Messaging lifecycle', () => {
@@ -30,6 +31,7 @@ describe('E2E: Messaging lifecycle', () => {
   let messageStore: MessageStore;
   let messageRouter: MessageRouter;
   let app: ReturnType<AgentServer['getApp']>;
+  let agentToken: string;
   const AUTH_TOKEN = 'e2e-messaging-token';
 
   beforeAll(async () => {
@@ -92,6 +94,9 @@ describe('E2E: Messaging lifecycle', () => {
       updates: {},
       users: [],
     };
+
+    // Generate agent token for relay-agent auth (uses ~/.instar/agent-tokens/)
+    agentToken = generateAgentToken(config.projectName);
 
     server = new AgentServer({
       config,
@@ -179,7 +184,7 @@ describe('E2E: Messaging lifecycle', () => {
   it('relay-agent endpoint returns 200, not 503', async () => {
     const res = await request(app)
       .post('/messages/relay-agent')
-      .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+      .set('Authorization', `Bearer ${agentToken}`)
       .send({
         schemaVersion: 1,
         message: {
@@ -215,7 +220,7 @@ describe('E2E: Messaging lifecycle', () => {
       .set('Authorization', `Bearer ${AUTH_TOKEN}`)
       .send({
         from: { agent: 'e2e-agent', session: 'lifecycle-test', machine: 'e2e-machine' },
-        to: { agent: 'other-agent', session: 'best', machine: 'local' },
+        to: { agent: 'e2e-agent', session: 'other-session', machine: 'local' },
         type: 'request',
         priority: 'high',
         subject: 'Full lifecycle test',

@@ -136,10 +136,11 @@ describe('MessageRouter', () => {
       expect(envelope!.message.ttlMinutes).toBe(999);
     });
 
-    it('sets delivery phase to sent after saving', async () => {
+    it('sets delivery phase to sent for local-agent messages', async () => {
+      // Same agent, different session → local delivery, stays as 'sent'
       const result = await router.send(
-        { agent: 'my-agent', session: 's', machine: 'm' },
-        { agent: 'target', session: 'best', machine: 'local' },
+        { agent: 'my-agent', session: 's', machine: 'my-machine' },
+        { agent: 'my-agent', session: 'other-session', machine: 'local' },
         'info',
         'medium',
         'Test',
@@ -147,6 +148,20 @@ describe('MessageRouter', () => {
       );
 
       expect(result.phase).toBe('sent');
+    });
+
+    it('sets delivery phase to queued for cross-agent messages to offline agent', async () => {
+      // Different agent on same machine → cross-agent routing → dropped (agent not registered)
+      const result = await router.send(
+        { agent: 'my-agent', session: 's', machine: 'my-machine' },
+        { agent: 'target', session: 'best', machine: 'local' },
+        'info',
+        'medium',
+        'Test',
+        'Body',
+      );
+
+      expect(result.phase).toBe('queued');
     });
 
     it('populates transport metadata', async () => {

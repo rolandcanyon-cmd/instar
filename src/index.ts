@@ -233,6 +233,10 @@ export { SessionCredentialManager } from './monitoring/SessionCredentialManager.
 export type { SessionCredentialAssignment } from './monitoring/SessionCredentialManager.js';
 export { QuotaCollector, RetryHelper, RequestBudget, ConcurrencyLimiter, AdaptivePoller, JsonlParser, classifyToken } from './monitoring/QuotaCollector.js';
 export type { CollectorConfig, RetryConfig, CollectionResult, OAuthUsageResponse, OAuthProfileResponse, PollingState, JsonlTokenCounts, TokenState } from './monitoring/QuotaCollector.js';
+export { SessionMigrator } from './monitoring/SessionMigrator.js';
+export type { SessionMigratorConfig, SessionMigratorDeps, MigrationThresholds, MigrationEvent, HaltableSession, AccountSnapshot } from './monitoring/SessionMigrator.js';
+export { QuotaManager } from './monitoring/QuotaManager.js';
+export type { QuotaManagerConfig, QuotaThresholdEvent, QuotaMigrationEvent, AccountSwitchEvent, PollingStatus } from './monitoring/QuotaManager.js';
 export { StallTriageNurse } from './monitoring/StallTriageNurse.js';
 export type { StallTriageConfig, TreatmentAction, TriageDiagnosis, TriageContext, TriageResult, TriageRecord, TriageEvents, TriageDeps } from './monitoring/StallTriageNurse.types.js';
 export { FeedbackAnomalyDetector } from './monitoring/FeedbackAnomalyDetector.js';
@@ -275,6 +279,8 @@ export {
   listAgentTokens,
   ensureTokenDir,
 } from './messaging/AgentTokenManager.js';
+export { pickupDroppedMessages } from './messaging/DropPickup.js';
+export type { DropPickupResult } from './messaging/DropPickup.js';
 export {
   VALID_TRANSITIONS,
   ALLOWED_INJECTION_PROCESSES,

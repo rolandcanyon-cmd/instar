@@ -41,6 +41,7 @@ import { SemanticMemory } from '../memory/SemanticMemory.js';
 import { QuotaTracker } from '../monitoring/QuotaTracker.js';
 import { AccountSwitcher } from '../monitoring/AccountSwitcher.js';
 import { QuotaNotifier } from '../monitoring/QuotaNotifier.js';
+import { QuotaManager } from '../monitoring/QuotaManager.js';
 import { classifySessionDeath } from '../monitoring/QuotaExhaustionDetector.js';
 import { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
 import { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
@@ -69,6 +70,7 @@ import { MessageDelivery } from '../messaging/MessageDelivery.js';
 import type { TmuxOperations } from '../messaging/MessageDelivery.js';
 import { MessageRouter } from '../messaging/MessageRouter.js';
 import { generateAgentToken } from '../messaging/AgentTokenManager.js';
+import { pickupDroppedMessages } from '../messaging/DropPickup.js';
 import type { PipelineMessage } from '../types/pipeline.js';
 import { toPipeline, toInjection, toLogEntry, formatHistoryLine } from '../types/pipeline.js';
 import type { Message, IntelligenceProvider } from '../core/types.js';
@@ -1119,6 +1121,7 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     // Set up quota tracking if enabled
     let quotaTracker: QuotaTracker | undefined;
+    let quotaManager: QuotaManager | undefined;
     if (config.monitoring?.quotaTracking) {
       const quotaFile = (config.monitoring as any).quotaStateFile
         || path.join(config.stateDir, 'quota-state.json');
@@ -1133,6 +1136,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     if (config.scheduler.enabled && coordinator.isAwake) {
       scheduler = new JobScheduler(config.scheduler, sessionManager, state, config.stateDir);
       if (quotaTracker) {
+        // Basic binding — QuotaManager will override this once wired
         scheduler.canRunJob = quotaTracker.canRunJob.bind(quotaTracker);
         scheduler.setQuotaTracker(quotaTracker);
       }
@@ -1193,17 +1197,56 @@ export async function startServer(options: StartOptions): Promise<void> {
         alertTopicId,
       );
 
-      // Periodic quota notification check (every 10 minutes)
+      // Set up QuotaManager orchestration hub (Phase 4)
       if (quotaTracker) {
-        setInterval(() => {
-          const quotaState = quotaTracker!.getState();
-          if (quotaState) {
-            quotaNotifier.checkAndNotify(quotaState).catch(err => {
-              console.error('[QuotaNotifier] Check failed:', err);
-            });
-          }
-        }, 10 * 60 * 1000);
-        console.log(pc.green('  Quota notifications enabled'));
+        // Try to set up the full collector-driven pipeline
+        let collector: InstanceType<typeof import('../monitoring/QuotaCollector.js').QuotaCollector> | null = null;
+        let migrator: InstanceType<typeof import('../monitoring/SessionMigrator.js').SessionMigrator> | null = null;
+
+        try {
+          const { QuotaCollector } = await import('../monitoring/QuotaCollector.js');
+          const { createDefaultProvider } = await import('../monitoring/CredentialProvider.js');
+          const provider = createDefaultProvider();
+          collector = new QuotaCollector(provider, quotaTracker);
+        } catch (err) {
+          console.log(pc.yellow(`  QuotaCollector not available: ${err instanceof Error ? err.message : err}`));
+        }
+
+        try {
+          const { SessionMigrator } = await import('../monitoring/SessionMigrator.js');
+          migrator = new SessionMigrator({ stateDir: config.stateDir });
+        } catch (err) {
+          console.log(pc.yellow(`  SessionMigrator not available: ${err instanceof Error ? err.message : err}`));
+        }
+
+        quotaManager = new QuotaManager(
+          { stateDir: config.stateDir },
+          {
+            tracker: quotaTracker,
+            collector,
+            switcher: accountSwitcher,
+            migrator,
+            notifier: quotaNotifier,
+          },
+        );
+
+        // Wire session manager and scheduler for migration support
+        quotaManager.setSessionManager(sessionManager);
+        if (scheduler) {
+          quotaManager.setScheduler(scheduler);
+        }
+
+        // Wire Telegram notifications
+        quotaManager.setNotificationSender(async (message) => {
+          const tier: NotificationTier = message.includes('❌') || message.includes('EXHAUSTED') ? 'IMMEDIATE' : 'SUMMARY';
+          notify(tier, 'quota', message);
+        });
+
+        // Start adaptive polling (replaces the 10-min setInterval)
+        quotaManager.start();
+        console.log(pc.green('  QuotaManager started (adaptive polling, auto-migration)'));
+      } else {
+        console.log(pc.yellow('  QuotaManager skipped (no quota tracker)'));
       }
 
       // Wire up topic → session routing and session management callbacks
@@ -1989,9 +2032,18 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     // Generate/persist agent token for cross-agent auth (idempotent — reuses existing token)
     const agentToken = generateAgentToken(config.projectName);
-    console.log(pc.green(`  Inter-agent messaging: enabled (token: ${agentToken.slice(0, 8)}...)`));
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    // Pick up any messages dropped while this agent was offline
+    const dropResult = await pickupDroppedMessages(config.projectName, messageStore);
+    const dropSummary = dropResult.ingested > 0
+      ? ` | picked up ${dropResult.ingested} dropped message(s)`
+      : '';
+    if (dropResult.rejected > 0) {
+      console.warn(pc.yellow(`  Messaging: rejected ${dropResult.rejected} dropped message(s): ${dropResult.rejections.map(r => r.reason).join(', ')}`));
+    }
+    console.log(pc.green(`  Inter-agent messaging: enabled (token: ${agentToken.slice(0, 8)}...)${dropSummary}`));
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.

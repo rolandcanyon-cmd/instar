@@ -38,6 +38,13 @@ export function authMiddleware(authToken?: string) {
       return;
     }
 
+    // Message relay endpoints use their own auth (agent tokens / machine-HMAC),
+    // not the general API bearer token. Auth is enforced in the route handlers.
+    if (req.path === '/messages/relay-agent' || req.path === '/messages/relay-machine') {
+      next();
+      return;
+    }
+
     // Internal endpoints: enforce localhost at the network layer (P0-4 defense-in-depth)
     if (req.path.startsWith('/internal/')) {
       const remote = req.socket.remoteAddress;
