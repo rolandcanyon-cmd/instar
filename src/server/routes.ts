@@ -4356,6 +4356,66 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  router.get('/messages/threads', async (req, res) => {
+    if (!ctx.messageRouter) {
+      res.status(503).json({ error: 'Messaging not available' });
+      return;
+    }
+    try {
+      const status = req.query.status as string | undefined;
+      const validStatuses = ['active', 'resolved', 'stale'];
+      if (status && !validStatuses.includes(status)) {
+        res.status(400).json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+        return;
+      }
+      const threads = await ctx.messageRouter.listThreads(status as any);
+      res.json({ threads, count: threads.length });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Thread list failed' });
+    }
+  });
+
+  router.get('/messages/thread/:threadId', async (req, res) => {
+    if (!ctx.messageRouter) {
+      res.status(503).json({ error: 'Messaging not available' });
+      return;
+    }
+    try {
+      const { threadId } = req.params;
+      if (!MSG_ID_RE.test(threadId)) {
+        res.status(400).json({ error: 'Invalid thread ID format' });
+        return;
+      }
+      const result = await ctx.messageRouter.getThread(threadId);
+      if (!result) {
+        res.status(404).json({ error: 'Thread not found' });
+        return;
+      }
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Thread query failed' });
+    }
+  });
+
+  router.post('/messages/thread/:threadId/resolve', async (req, res) => {
+    if (!ctx.messageRouter) {
+      res.status(503).json({ error: 'Messaging not available' });
+      return;
+    }
+    try {
+      const { threadId } = req.params;
+      if (!MSG_ID_RE.test(threadId)) {
+        res.status(400).json({ error: 'Invalid thread ID format' });
+        return;
+      }
+      await ctx.messageRouter.resolveThread(threadId);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(err instanceof Error && err.message.includes('not found') ? 404 : 500)
+        .json({ error: err instanceof Error ? err.message : 'Thread resolve failed' });
+    }
+  });
+
   router.get('/messages/stats', async (req, res) => {
     if (!ctx.messageRouter) {
       res.status(503).json({ error: 'Messaging not available' });

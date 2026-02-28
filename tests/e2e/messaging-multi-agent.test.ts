@@ -1000,4 +1000,92 @@ describe('E2E: Multi-Agent Messaging (same machine)', () => {
       expect(res.body).toHaveProperty('delivery');
     });
   });
+
+  // ── Phase 7: Thread lifecycle E2E ────────────────────────────
+
+  describe('thread lifecycle — cross-agent E2E', () => {
+    let threadId: string;
+
+    it('query message auto-creates thread', async () => {
+      const res = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'thread-e2e', machine: 'test-machine' },
+          to: { agent: agentA.name, session: 'thread-e2e-target', machine: 'local' },
+          type: 'query',
+          priority: 'medium',
+          subject: 'E2E thread test',
+          body: 'Testing full thread lifecycle',
+        })
+        .expect(201);
+      expect(res.body.threadId).toBeDefined();
+      threadId = res.body.threadId;
+    });
+
+    it('thread is queryable via GET /messages/thread/:id', async () => {
+      const res = await request(agentA.app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+      expect(res.body.thread.id).toBe(threadId);
+      expect(res.body.thread.status).toBe('active');
+      expect(res.body.thread.messageCount).toBe(1);
+    });
+
+    it('thread appears in GET /messages/threads listing', async () => {
+      const res = await request(agentA.app)
+        .get('/messages/threads')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+      const found = res.body.threads.find((t: any) => t.id === threadId);
+      expect(found).toBeDefined();
+    });
+
+    it('reply grows the thread', async () => {
+      await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'thread-e2e-target', machine: 'test-machine' },
+          to: { agent: agentA.name, session: 'thread-e2e', machine: 'local' },
+          type: 'response',
+          priority: 'medium',
+          subject: 'Re: E2E thread test',
+          body: 'Lifecycle confirmed',
+          options: { threadId },
+        })
+        .expect(201);
+
+      const res = await request(agentA.app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+      expect(res.body.thread.messageCount).toBe(2);
+    });
+
+    it('resolve closes and archives the thread', async () => {
+      await request(agentA.app)
+        .post(`/messages/thread/${threadId}/resolve`)
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      // Still queryable but resolved
+      const res = await request(agentA.app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+      expect(res.body.thread.status).toBe('resolved');
+    });
+
+    it('stats include thread counts', async () => {
+      const res = await request(agentA.app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+      expect(res.body.threads).toBeDefined();
+      expect(typeof res.body.threads.active).toBe('number');
+      expect(typeof res.body.threads.resolved).toBe('number');
+    });
+  });
 });

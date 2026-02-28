@@ -22,6 +22,8 @@ import path from 'node:path';
 import type {
   IMessageStore,
   MessageEnvelope,
+  MessageThread,
+  ThreadStatus,
   DeliveryState,
   MessageFilter,
   MessagingStats,
@@ -232,6 +234,64 @@ export class MessageStore implements IMessageStore {
     return fs.existsSync(this.messageFilePath(messageId));
   }
 
+  // ── Thread Management ──────────────────────────────────────────
+
+  async saveThread(thread: MessageThread): Promise<void> {
+    const filePath = path.join(this.basePath, 'threads', `${thread.id}.json`);
+    const tmpPath = `${filePath}.tmp.${process.pid}`;
+    fs.writeFileSync(tmpPath, JSON.stringify(thread, null, 2));
+    fs.renameSync(tmpPath, filePath);
+  }
+
+  async getThread(threadId: string): Promise<MessageThread | null> {
+    const filePath = path.join(this.basePath, 'threads', `${threadId}.json`);
+    try {
+      const data = fs.readFileSync(filePath, 'utf-8');
+      return JSON.parse(data) as MessageThread;
+    } catch {
+      // Check archive
+      const archivePath = path.join(this.basePath, 'threads', 'archive', `${threadId}.json`);
+      try {
+        const data = fs.readFileSync(archivePath, 'utf-8');
+        return JSON.parse(data) as MessageThread;
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  async listThreads(status?: ThreadStatus): Promise<MessageThread[]> {
+    const threadsDir = path.join(this.basePath, 'threads');
+    if (!fs.existsSync(threadsDir)) return [];
+
+    const files = fs.readdirSync(threadsDir).filter(f => f.endsWith('.json'));
+    const threads: MessageThread[] = [];
+
+    for (const file of files) {
+      try {
+        const data = fs.readFileSync(path.join(threadsDir, file), 'utf-8');
+        const thread = JSON.parse(data) as MessageThread;
+        if (!status || thread.status === status) {
+          threads.push(thread);
+        }
+      } catch {
+        // @silent-fallback-ok — skip corrupt thread files
+      }
+    }
+
+    // Sort by most recent activity first
+    threads.sort((a, b) => b.lastMessageAt.localeCompare(a.lastMessageAt));
+    return threads;
+  }
+
+  async archiveThread(threadId: string): Promise<void> {
+    const srcPath = path.join(this.basePath, 'threads', `${threadId}.json`);
+    if (!fs.existsSync(srcPath)) return;
+
+    const destPath = path.join(this.basePath, 'threads', 'archive', `${threadId}.json`);
+    fs.renameSync(srcPath, destPath);
+  }
+
   async getStats(): Promise<MessagingStats> {
     const envelopes = this.readAllEnvelopes();
     const now = Date.now();
@@ -274,11 +334,7 @@ export class MessageStore implements IMessageStore {
         sessionsThrottled: 0,
         circuitBreakers: { open: 0, recentTrips: 0 },
       },
-      threads: {
-        active: 0,
-        resolved: 0,
-        stale: 0,
-      },
+      threads: await this.getThreadStats(),
     };
   }
 
@@ -316,6 +372,17 @@ export class MessageStore implements IMessageStore {
 
   private messageFilePath(messageId: string): string {
     return path.join(this.basePath, 'store', `${messageId}.json`);
+  }
+
+  private async getThreadStats(): Promise<{ active: number; resolved: number; stale: number }> {
+    const threads = await this.listThreads();
+    let active = 0, resolved = 0, stale = 0;
+    for (const t of threads) {
+      if (t.status === 'active') active++;
+      else if (t.status === 'resolved') resolved++;
+      else if (t.status === 'stale') stale++;
+    }
+    return { active, resolved, stale };
   }
 
   private readAllEnvelopes(): MessageEnvelope[] {

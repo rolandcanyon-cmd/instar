@@ -34,6 +34,8 @@ import type {
   AgentMessage,
   MessageEnvelope,
   MessageFilter,
+  MessageThread,
+  ThreadStatus,
   MessageType,
   MessagePriority,
   SendMessageOptions,
@@ -42,7 +44,7 @@ import type {
   MessagingStats,
   SignedPayload,
 } from './types.js';
-import { DEFAULT_TTL, VALID_TRANSITIONS, CLOCK_SKEW_TOLERANCE } from './types.js';
+import { DEFAULT_TTL, VALID_TRANSITIONS, CLOCK_SKEW_TOLERANCE, THREAD_STALE_MINUTES } from './types.js';
 import type { MessageStore } from './MessageStore.js';
 import type { MessageDelivery } from './MessageDelivery.js';
 import { getAgentToken, computeDropHmac } from './AgentTokenManager.js';
@@ -151,6 +153,11 @@ export class MessageRouter implements IMessageRouter {
     // Save to local store (outbox)
     await this.store.save(envelope);
 
+    // Track thread if message has a threadId
+    if (threadId) {
+      await this.updateThread(threadId, message);
+    }
+
     // Route the message based on target
     const isLocalMachine = to.machine === 'local' || to.machine === this.config.localMachine;
     const isLocalAgent = to.agent === this.config.localAgent;
@@ -251,6 +258,115 @@ export class MessageRouter implements IMessageRouter {
 
   async getDeadLetters(filter?: MessageFilter): Promise<MessageEnvelope[]> {
     return this.store.queryDeadLetters(filter);
+  }
+
+  // ── Thread Management ──────────────────────────────────────────
+
+  async getThread(threadId: string): Promise<{ thread: MessageThread; messages: MessageEnvelope[] } | null> {
+    const thread = await this.store.getThread(threadId);
+    if (!thread) return null;
+
+    // Fetch all messages in the thread
+    const messages: MessageEnvelope[] = [];
+    for (const msgId of thread.messageIds) {
+      const env = await this.store.get(msgId);
+      if (env) messages.push(env);
+    }
+
+    // Check staleness
+    if (thread.status === 'active') {
+      const lastActivity = new Date(thread.lastMessageAt).getTime();
+      const staleThreshold = Date.now() - THREAD_STALE_MINUTES * 60_000;
+      if (lastActivity < staleThreshold) {
+        thread.status = 'stale';
+        await this.store.saveThread(thread);
+      }
+    }
+
+    return { thread, messages };
+  }
+
+  async listThreads(status?: ThreadStatus): Promise<MessageThread[]> {
+    const threads = await this.store.listThreads(status);
+
+    // Check staleness for active threads
+    const now = Date.now();
+    const staleThreshold = now - THREAD_STALE_MINUTES * 60_000;
+    for (const thread of threads) {
+      if (thread.status === 'active') {
+        const lastActivity = new Date(thread.lastMessageAt).getTime();
+        if (lastActivity < staleThreshold) {
+          thread.status = 'stale';
+          await this.store.saveThread(thread);
+        }
+      }
+    }
+
+    // Re-filter if status was specified (stale threads may have just changed)
+    if (status) {
+      return threads.filter(t => t.status === status);
+    }
+    return threads;
+  }
+
+  async resolveThread(threadId: string): Promise<void> {
+    const thread = await this.store.getThread(threadId);
+    if (!thread) throw new Error(`Thread not found: ${threadId}`);
+
+    thread.status = 'resolved';
+    await this.store.saveThread(thread);
+    await this.store.archiveThread(threadId);
+  }
+
+  private async updateThread(threadId: string, message: AgentMessage): Promise<void> {
+    const now = message.createdAt;
+    let thread = await this.store.getThread(threadId);
+
+    if (!thread) {
+      // Create new thread
+      thread = {
+        id: threadId,
+        subject: message.subject,
+        participants: [{
+          agent: message.from.agent,
+          session: message.from.session,
+          joinedAt: now,
+          lastMessageAt: now,
+        }],
+        createdAt: now,
+        lastMessageAt: now,
+        messageCount: 1,
+        status: 'active',
+        messageIds: [message.id],
+      };
+    } else {
+      // Update existing thread
+      thread.lastMessageAt = now;
+      thread.messageCount++;
+      thread.messageIds.push(message.id);
+
+      // Un-stale a thread if a new message arrives
+      if (thread.status === 'stale') {
+        thread.status = 'active';
+      }
+
+      // Add or update participant
+      const participant = thread.participants.find(
+        p => p.agent === message.from.agent && p.session === message.from.session,
+      );
+      if (participant) {
+        participant.lastMessageAt = now;
+      } else {
+        thread.participants.push({
+          agent: message.from.agent,
+          session: message.from.session,
+          joinedAt: now,
+          lastMessageAt: now,
+        });
+      }
+    }
+
+    await this.store.saveThread(thread);
   }
 
   async getStats(): Promise<MessagingStats> {

@@ -20,6 +20,7 @@ import os from 'node:os';
 import { MessageStore } from '../../src/messaging/MessageStore.js';
 import type {
   MessageEnvelope,
+  MessageThread,
   AgentMessage,
   DeliveryState,
 } from '../../src/messaging/types.js';
@@ -45,6 +46,26 @@ function makeMessage(overrides?: Partial<AgentMessage>): AgentMessage {
     body: 'Hello, world!',
     createdAt: new Date().toISOString(),
     ttlMinutes: 30,
+    ...overrides,
+  };
+}
+
+function makeThread(overrides?: Partial<MessageThread>): MessageThread {
+  const now = new Date().toISOString();
+  return {
+    id: `thr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    subject: 'Test thread',
+    participants: [{
+      agent: 'test-agent',
+      session: 'test-session',
+      joinedAt: now,
+      lastMessageAt: now,
+    }],
+    createdAt: now,
+    lastMessageAt: now,
+    messageCount: 1,
+    status: 'active',
+    messageIds: [`msg-${Date.now()}`],
     ...overrides,
   };
 }
@@ -471,6 +492,116 @@ describe('MessageStore', () => {
       const results = await store.queryDeadLetters();
       expect(results.length).toBe(1);
       expect(results[0].message.id).toBe(valid.message.id);
+    });
+  });
+
+  // ── Thread Management ──────────────────────────────────────────
+
+  describe('thread management', () => {
+    it('saveThread creates a thread file', async () => {
+      const thread = makeThread();
+      await store.saveThread(thread);
+
+      const loaded = await store.getThread(thread.id);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.id).toBe(thread.id);
+      expect(loaded!.subject).toBe(thread.subject);
+    });
+
+    it('saveThread overwrites existing thread', async () => {
+      const thread = makeThread();
+      await store.saveThread(thread);
+
+      thread.messageCount = 5;
+      thread.status = 'stale';
+      await store.saveThread(thread);
+
+      const loaded = await store.getThread(thread.id);
+      expect(loaded!.messageCount).toBe(5);
+      expect(loaded!.status).toBe('stale');
+    });
+
+    it('getThread returns null for non-existent thread', async () => {
+      const result = await store.getThread('nonexistent-thread-id');
+      expect(result).toBeNull();
+    });
+
+    it('listThreads returns all threads', async () => {
+      const t1 = makeThread({ status: 'active' });
+      const t2 = makeThread({ status: 'resolved' });
+      const t3 = makeThread({ status: 'stale' });
+      await store.saveThread(t1);
+      await store.saveThread(t2);
+      await store.saveThread(t3);
+
+      const all = await store.listThreads();
+      expect(all.length).toBe(3);
+    });
+
+    it('listThreads filters by status', async () => {
+      const t1 = makeThread({ status: 'active' });
+      const t2 = makeThread({ status: 'resolved' });
+      await store.saveThread(t1);
+      await store.saveThread(t2);
+
+      const active = await store.listThreads('active');
+      expect(active.length).toBe(1);
+      expect(active[0].status).toBe('active');
+    });
+
+    it('listThreads sorts by most recent activity first', async () => {
+      const older = makeThread({ lastMessageAt: '2025-01-01T00:00:00.000Z' });
+      const newer = makeThread({ lastMessageAt: '2026-01-01T00:00:00.000Z' });
+      await store.saveThread(older);
+      await store.saveThread(newer);
+
+      const threads = await store.listThreads();
+      expect(threads[0].id).toBe(newer.id);
+    });
+
+    it('archiveThread moves thread to archive directory', async () => {
+      const thread = makeThread();
+      await store.saveThread(thread);
+
+      await store.archiveThread(thread.id);
+
+      // Should still be findable (getThread checks archive)
+      const loaded = await store.getThread(thread.id);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.id).toBe(thread.id);
+
+      // Should not be in the active listing
+      const active = await store.listThreads();
+      expect(active.find(t => t.id === thread.id)).toBeUndefined();
+    });
+
+    it('archiveThread is no-op for non-existent thread', async () => {
+      // Should not throw
+      await store.archiveThread('nonexistent');
+    });
+
+    it('getStats includes thread counts', async () => {
+      const t1 = makeThread({ status: 'active' });
+      const t2 = makeThread({ status: 'resolved' });
+      await store.saveThread(t1);
+      await store.saveThread(t2);
+
+      const stats = await store.getStats();
+      expect(stats.threads.active).toBe(1);
+      expect(stats.threads.resolved).toBe(1);
+      expect(stats.threads.stale).toBe(0);
+    });
+
+    it('skips corrupt thread files in listThreads', async () => {
+      const valid = makeThread();
+      await store.saveThread(valid);
+
+      // Write corrupt file
+      const corruptPath = path.join(tmpDir, 'threads', 'corrupt.json');
+      fs.writeFileSync(corruptPath, 'not json {{{');
+
+      const threads = await store.listThreads();
+      expect(threads.length).toBe(1);
     });
   });
 });

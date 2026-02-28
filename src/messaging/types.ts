@@ -434,6 +434,18 @@ export interface IMessageStore {
   /** Check if a message ID exists in the store */
   exists(messageId: string): Promise<boolean>;
 
+  /** Save or update a thread */
+  saveThread(thread: MessageThread): Promise<void>;
+
+  /** Get a thread by ID */
+  getThread(threadId: string): Promise<MessageThread | null>;
+
+  /** List all threads with optional status filter */
+  listThreads(status?: ThreadStatus): Promise<MessageThread[]>;
+
+  /** Archive a thread (move to threads/archive/) */
+  archiveThread(threadId: string): Promise<void>;
+
   /** Get messaging statistics */
   getStats(): Promise<MessagingStats>;
 
@@ -515,6 +527,15 @@ export interface IMessageRouter {
 
   /** Query dead-lettered messages */
   getDeadLetters(filter?: MessageFilter): Promise<MessageEnvelope[]>;
+
+  /** Get a thread and its messages */
+  getThread(threadId: string): Promise<{ thread: MessageThread; messages: MessageEnvelope[] } | null>;
+
+  /** List all threads with optional status filter */
+  listThreads(status?: ThreadStatus): Promise<MessageThread[]>;
+
+  /** Resolve (close) a thread */
+  resolveThread(threadId: string): Promise<void>;
 
   /** Get messaging statistics */
   getStats(): Promise<MessagingStats>;

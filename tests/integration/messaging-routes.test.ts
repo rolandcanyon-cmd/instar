@@ -934,4 +934,121 @@ describe('Inter-Agent Messaging API routes', () => {
         .expect(401);
     });
   });
+
+  // ── Thread Endpoints ─────────────────────────────────────────
+
+  describe('thread endpoints', () => {
+    let threadId: string;
+
+    it('creates a thread via query message (auto-creation)', async () => {
+      const res = await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'thread-test', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'thread-target', machine: 'local' },
+          type: 'query',
+          priority: 'medium',
+          subject: 'Thread lifecycle test',
+          body: 'What is the status?',
+        })
+        .expect(201);
+      expect(res.body.threadId).toBeDefined();
+      threadId = res.body.threadId;
+    });
+
+    it('GET /messages/threads lists threads', async () => {
+      const res = await request(app)
+        .get('/messages/threads')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+      expect(res.body).toHaveProperty('threads');
+      expect(res.body).toHaveProperty('count');
+      expect(res.body.count).toBeGreaterThan(0);
+    });
+
+    it('GET /messages/threads?status=active filters by status', async () => {
+      const res = await request(app)
+        .get('/messages/threads?status=active')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+      for (const t of res.body.threads) {
+        expect(t.status).toBe('active');
+      }
+    });
+
+    it('GET /messages/threads rejects invalid status', async () => {
+      await request(app)
+        .get('/messages/threads?status=invalid')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(400);
+    });
+
+    it('GET /messages/thread/:id returns thread with messages', async () => {
+      const res = await request(app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+      expect(res.body.thread.id).toBe(threadId);
+      expect(res.body.thread.subject).toBe('Thread lifecycle test');
+      expect(res.body.thread.messageCount).toBe(1);
+      expect(res.body.messages.length).toBe(1);
+      expect(res.body.messages[0].message.threadId).toBe(threadId);
+    });
+
+    it('thread grows with reply messages', async () => {
+      // Send a reply in the same thread
+      await request(app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          from: { agent: 'test-agent', session: 'thread-target', machine: 'test-machine' },
+          to: { agent: 'test-agent', session: 'thread-test', machine: 'local' },
+          type: 'response',
+          priority: 'medium',
+          subject: 'Re: Thread lifecycle test',
+          body: 'Status is good',
+          options: { threadId, inReplyTo: 'original-msg' },
+        })
+        .expect(201);
+
+      const res = await request(app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+      expect(res.body.thread.messageCount).toBe(2);
+      expect(res.body.thread.participants.length).toBe(2);
+      expect(res.body.messages.length).toBe(2);
+    });
+
+    it('GET /messages/thread/:id returns 404 for non-existent thread', async () => {
+      const fakeId = '00000000-0000-0000-0000-000000000000';
+      await request(app)
+        .get(`/messages/thread/${fakeId}`)
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(404);
+    });
+
+    it('POST /messages/thread/:id/resolve resolves and archives a thread', async () => {
+      await request(app)
+        .post(`/messages/thread/${threadId}/resolve`)
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+
+      // Thread should still be queryable but with resolved status
+      const res = await request(app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(200);
+      expect(res.body.thread.status).toBe('resolved');
+    });
+
+    it('POST /messages/thread/:id/resolve returns 404 for unknown thread', async () => {
+      const fakeId = '00000000-0000-0000-0000-000000000000';
+      await request(app)
+        .post(`/messages/thread/${fakeId}/resolve`)
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .expect(404);
+    });
+  });
 });
