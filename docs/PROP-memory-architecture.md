@@ -1,8 +1,8 @@
 # PROP: Mature Memory Architecture for Instar
 
-> **Version**: 1.0
-> **Date**: 2026-02-25
-> **Status**: Draft — awaiting review
+> **Version**: 2.0
+> **Date**: 2026-02-28
+> **Status**: Phase 1-2 complete (115 tests). Phase 3 revised — awaiting review.
 > **Author**: Dawn (Inside-Dawn, builder instance)
 > **Instar Version**: 0.9.17 (baseline)
 > **Target Version**: 0.10.x
@@ -301,47 +301,195 @@ Default half-life: **30 days**. A fact not re-verified in 30 days drops to 50% c
 
 **Exemptions**: Entities with `expiresAt: null` and `type: 'lesson'` have a longer half-life (90 days). Hard-won lessons should persist longer than factual observations.
 
-### Phase 2: Episodic Memory (Session Digests)
+### Phase 2: Episodic Memory + Session Activity Sentinel
 
-**New file**: `src/memory/EpisodicMemory.ts`
+**New files**: `src/memory/EpisodicMemory.ts`, `src/monitoring/SessionActivitySentinel.ts`, `src/memory/ActivityPartitioner.ts`
 
-Every session produces a **digest** — a structured summary of what happened, what was learned, and what matters.
+#### The Problem with Session-End Digests
+
+The original design assumed sessions are short, discrete units — digest them when they end. Reality is different: Telegram sessions can span hours or days, covering multiple unrelated topics. A session might never end cleanly (compaction, timeout, machine restart). And learnings from hour 1 are cold by hour 8.
+
+**The solution**: Continuous mid-session digestion with end-of-session synthesis.
+
+#### Two-Level Digest Architecture
+
+```
+Long-running session (hours/days)
+  │
+  ├─ Activity Unit 1: "Built migration engine" (45 min)
+  │   └─ Mini-digest + entity extraction
+  │
+  ├─ Activity Unit 2: "Wrote E2E tests" (30 min)
+  │   └─ Mini-digest + entity extraction
+  │
+  ├─ Activity Unit 3: "Discussed Phase 3 architecture" (20 min)
+  │   └─ Mini-digest + entity extraction
+  │
+  └─ Session ends
+      └─ Synthesis digest (reads all mini-digests → coherent overview)
+```
+
+#### Activity Digest (Mini-Digest)
 
 ```typescript
-interface SessionDigest {
+interface ActivityDigest {
+  id: string;                      // UUID
+  sessionId: string;               // Parent session
+  sessionName: string;
+  startedAt: string;               // When this activity unit began
+  endedAt: string;                 // When it ended (next boundary)
+  telegramTopicId?: number;        // Linked Telegram topic (if any)
+
+  // What happened
+  summary: string;                 // 2-3 sentence overview of this activity unit
+  actions: string[];               // Key actions taken (commits, file edits, tests)
+
+  // What was learned
+  entities: string[];              // IDs of SemanticMemory entities created/updated
+  learnings: string[];             // Key insights (free text)
+
+  // What matters
+  significance: number;            // 1-10
+  themes: string[];                // Topic tags
+  boundarySignal: BoundarySignal;  // What triggered this partition
+}
+
+type BoundarySignal =
+  | 'topic_shift'       // Conversation changed direction
+  | 'task_complete'     // Commit, test run, deployment
+  | 'long_pause'        // 30+ min gap in activity
+  | 'explicit_switch'   // User said "now let's work on..."
+  | 'time_threshold'    // Max time between digests (60 min)
+  | 'session_end';      // Session completed/killed
+```
+
+#### Session Synthesis (End-of-Session)
+
+```typescript
+interface SessionSynthesis {
   sessionId: string;
   sessionName: string;
   startedAt: string;
   endedAt: string;
   jobSlug?: string;
+  telegramTopicId?: number;
 
-  // What happened
-  summary: string;                // 2-3 sentence overview
-  actions: string[];              // Key actions taken
+  // Composed from mini-digests
+  activityDigestIds: string[];     // References to all activity digests
+  summary: string;                 // Coherent overview of the full session
+  keyOutcomes: string[];           // What was accomplished
 
-  // What was learned
-  entities: string[];             // IDs of entities created/updated
-  learnings: string[];            // Key insights (free text)
+  // Aggregated from mini-digests
+  allEntities: string[];           // All SemanticMemory entities created
+  allLearnings: string[];          // All insights across activity units
 
-  // What matters
-  significance: number;           // 1-10
-  themes: string[];               // Topic tags
-  followUp?: string;              // What the next session should do
+  // Session-level assessment
+  significance: number;            // 1-10
+  themes: string[];                // Union of all activity themes
+  followUp?: string;               // What the next session should do
 }
 ```
 
-**How digests are created**: The existing `reflection-trigger` job is extended to:
-1. Read the session's activity log
-2. Summarize into a SessionDigest
-3. Extract entities (facts, lessons, patterns) into SemanticMemory
-4. Store the digest in episodic storage
+#### Session Activity Sentinel
 
-**Storage**: `state/episodes/{sessionId}.json` (one file per session)
+The sentinel is a monitoring process that runs inside the Instar server, watching for sessions that have accumulated unprocessed activity.
 
-**Retrieval**:
-- By time range: "What happened in the last 24 hours?"
-- By theme: "What sessions touched deployment?"
-- By significance: "What were the most important sessions this week?"
+```typescript
+class SessionActivitySentinel {
+  /**
+   * Check all running sessions for undigested activity.
+   * Called periodically (every 30-60 min) by the scheduler.
+   */
+  async scan(): Promise<SentinelReport>;
+
+  /**
+   * Digest a specific session's recent activity.
+   * Reads both session logs AND Telegram topic logs.
+   */
+  async digestActivity(sessionId: string): Promise<ActivityDigest[]>;
+
+  /**
+   * Synthesize all mini-digests into a session-level summary.
+   * Called when a session completes.
+   */
+  async synthesizeSession(sessionId: string): Promise<SessionSynthesis>;
+}
+```
+
+**Trigger points:**
+1. **Periodic scan** (every 30-60 min): Sentinel checks running sessions, digests any with significant new activity since last digest
+2. **Session completion** (`sessionComplete` event): Sentinel creates final activity digest + session synthesis
+3. **On-demand** (API/CLI): Manual digest trigger for debugging or catch-up
+
+#### Dual-Source Activity Partitioning
+
+The ActivityPartitioner reads from two sources to build a unified activity timeline:
+
+| Source | What it captures | Best for |
+|--------|-----------------|----------|
+| **Session logs** (tmux capture-pane) | Raw actions — file edits, test runs, git commits, tool output | WHAT the agent did |
+| **Telegram topic logs** (JSONL) | Conversation — human instructions, agent responses, decisions, feedback | WHY the agent did it |
+
+```typescript
+class ActivityPartitioner {
+  /**
+   * Build a unified activity timeline from session + Telegram logs.
+   * Identifies natural boundaries where activity shifts.
+   */
+  partition(input: {
+    sessionOutput: string;           // tmux capture output
+    telegramMessages?: TelegramLogEntry[];  // JSONL entries for linked topic
+    lastDigestedAt?: string;         // Only process activity after this timestamp
+  }): ActivityUnit[];
+}
+
+interface ActivityUnit {
+  startedAt: string;
+  endedAt: string;
+  sessionContent: string;          // Relevant session output for this unit
+  telegramContent?: string;        // Relevant Telegram messages for this unit
+  boundarySignal: BoundarySignal;  // What marks the end of this unit
+}
+```
+
+**Boundary detection signals (ranked by strength):**
+1. **Explicit topic shift** in Telegram: "now let's work on X" / "moving on to..."
+2. **Git commit** in session output: clear task completion marker
+3. **Long pause** (30+ min gap): natural break in activity
+4. **Telegram topic change**: messages shift to a different subject
+5. **Time threshold** (60 min max): prevents unbounded activity units
+
+For **job sessions** with no Telegram topic, the partitioner uses session logs only. For **interactive Telegram sessions**, it uses both. The Telegram logs are the richer signal for boundary detection because they contain the human's intent.
+
+#### Storage
+
+- Activity digests: `state/episodes/activities/{sessionId}/{digestId}.json`
+- Session syntheses: `state/episodes/sessions/{sessionId}.json`
+- Sentinel state: `state/episodes/sentinel-state.json` (tracks last-digested timestamps per session)
+
+#### Retrieval
+
+```typescript
+class EpisodicMemory {
+  /** Get all activity digests for a session */
+  getSessionActivities(sessionId: string): ActivityDigest[];
+
+  /** Get the session synthesis */
+  getSessionSynthesis(sessionId: string): SessionSynthesis | null;
+
+  /** Search across all digests by time range */
+  getByTimeRange(start: string, end: string): ActivityDigest[];
+
+  /** Search by theme */
+  getByTheme(theme: string): ActivityDigest[];
+
+  /** Search by significance (most important activity) */
+  getBySignificance(minSignificance: number): ActivityDigest[];
+
+  /** Get recent activity across all sessions (for working memory) */
+  getRecentActivity(hours: number, limit: number): ActivityDigest[];
+}
+```
 
 ### Phase 3: Working Memory (Context-Aware Retrieval)
 
@@ -452,17 +600,28 @@ MEMORY.md transitions from "source of truth" to "generated snapshot":
 - Dual-write hooks in existing managers
 - CLI for manual migration and inspection
 
-### Phase 3: Episodic Memory (v0.10.2)
-**Effort**: 1-2 sessions
+### Phase 3: Episodic Memory + Session Activity Sentinel (v0.10.2)
+**Effort**: 3-4 sessions
 **Files**:
-- `src/memory/EpisodicMemory.ts` — Session digest storage
-- Enhancement to `reflection-trigger` job — Produces structured digests
-- Enhancement to session completion hooks — Trigger digest creation
+- `src/memory/EpisodicMemory.ts` — Activity digest + session synthesis storage and retrieval
+- `src/memory/ActivityPartitioner.ts` — Dual-source activity timeline builder with boundary detection
+- `src/monitoring/SessionActivitySentinel.ts` — Periodic scan of running sessions for undigested activity
+- `tests/unit/episodic-memory.test.ts` — Storage, retrieval, time-range queries
+- `tests/unit/activity-partitioner.test.ts` — Boundary detection, dual-source merging
+- `tests/unit/session-activity-sentinel.test.ts` — Scan logic, trigger conditions
+- `tests/integration/episodic-memory.test.ts` — Full HTTP pipeline for episode API routes
+- `tests/e2e/episodic-memory-lifecycle.test.ts` — Production path verification (E2E standard)
+- `src/server/routes.ts` — Episode API endpoints
+- Enhancement to `sessionComplete` event handler — Triggers synthesis
 
 **Deliverables**:
-- Session digest capture on completion
+- Mid-session activity digestion (continuous, not just at session end)
+- Dual-source partitioning (session logs + Telegram topic logs)
+- Activity boundary detection (topic shifts, commits, pauses, time thresholds)
+- End-of-session synthesis from accumulated mini-digests
 - Entity extraction from digests into SemanticMemory
-- Time-range and theme-based episode retrieval
+- Time-range, theme, and significance-based episode retrieval
+- Sentinel job for monitoring long-running sessions
 
 ### Phase 4: Working Memory Assembly (v0.10.3)
 **Effort**: 1-2 sessions
@@ -541,9 +700,14 @@ POST   /memory/semantic/decay              # Trigger confidence decay
 POST   /memory/semantic/export             # Full JSON export
 POST   /memory/semantic/import             # Full JSON import
 
-GET    /memory/episodes                    # List session digests
-GET    /memory/episodes/:sessionId         # Get specific digest
-GET    /memory/episodes/search?q=QUERY     # Search episodes
+GET    /memory/episodes                    # List session syntheses
+GET    /memory/episodes/:sessionId         # Get session synthesis + activity digests
+GET    /memory/episodes/activities         # List activity digests (with time/theme filters)
+GET    /memory/episodes/activities/:id     # Get specific activity digest
+GET    /memory/episodes/recent?hours=24    # Recent activity across all sessions
+POST   /memory/episodes/digest/:sessionId  # Trigger manual digest for a running session
+GET    /memory/episodes/sentinel           # Sentinel status (last scan, pending sessions)
+POST   /memory/episodes/sentinel/scan      # Trigger sentinel scan on-demand
 ```
 
 ### CLI Commands
@@ -556,6 +720,9 @@ instar memory export             # Export to JSON
 instar memory import FILE        # Import from JSON
 instar memory decay              # Trigger confidence decay
 instar memory stale              # List entities needing re-verification
+instar memory episodes           # List recent session syntheses
+instar memory digest SESSION_ID  # Trigger manual digest for a session
+instar memory sentinel           # Show sentinel status and pending sessions
 ```
 
 ---
@@ -571,6 +738,11 @@ instar memory stale              # List entities needing re-verification
 | Backward compatibility | Existing agents break | MEMORY.md continues to work; new features are additive |
 | Confidence decay too aggressive | Useful knowledge forgotten | Configurable half-life, lessons exempt from fast decay |
 | Entity bloat | Too many low-quality entities | memory-hygiene guardian job prunes stale entities |
+| Sentinel LLM cost | Frequent digestion burns API tokens | Haiku tier for digestion; configurable scan interval; skip sessions with minimal activity |
+| tmux buffer overflow | Long sessions lose early output | Sentinel digests continuously so early activity is captured before buffer scrolls |
+| Noisy activity partitioning | Too many trivial mini-digests | Minimum activity threshold (e.g., 5+ Telegram messages or 10+ min of session output) before creating a digest |
+| Digest quality varies | LLM summaries may miss key insights | Entity extraction as separate step from summarization; human can review via API/CLI |
+| Sentinel interferes with running session | Reading tmux output disrupts active session | Read-only capture-pane (already non-disruptive); Telegram JSONL is separate file |
 
 ---
 
@@ -583,6 +755,9 @@ instar memory stale              # List entities needing re-verification
 5. **MEMORY.md stays readable** — generated version is as useful as hand-written version
 6. **Zero breaking changes** — existing agents continue working without modification
 7. **Migration is reversible** — JSON export can restore to any point
+8. **Long sessions don't lose learnings** — activity from hour 1 of a 6-hour session is captured, not forgotten
+9. **Digests capture both what and why** — dual-source digests include agent actions AND human intent
+10. **Sentinel overhead is negligible** — <$0.01 per digest using Haiku tier
 
 ---
 
@@ -608,3 +783,4 @@ The guardian network (implemented in commit 913b871) maintains whatever memory s
 - **guardian-pulse** → Monitors memory migration job health
 
 The guardians are the immune system. SemanticMemory is the nervous system. They complement, not replace, each other.
+
