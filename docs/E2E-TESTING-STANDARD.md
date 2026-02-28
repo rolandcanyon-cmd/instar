@@ -171,6 +171,7 @@ Not required for:
 ## Reference Implementations
 
 - `tests/e2e/semantic-memory-lifecycle.test.ts` — 25 tests, 11 phases. The gold standard.
+- `tests/e2e/episodic-memory-lifecycle.test.ts` — 16 tests, 5 phases. Mirrors server.ts sentinel wiring with Telegram dual-source testing. Demonstrates mock branching on prompt preamble (not keywords).
 - `tests/e2e/topic-memory-lifecycle.test.ts` — Topic memory lifecycle.
 - `tests/e2e/lifecycle.test.ts` — Core server lifecycle.
 

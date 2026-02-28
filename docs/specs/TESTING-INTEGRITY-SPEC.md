@@ -129,6 +129,7 @@ The assembly gap exists at step 2. Unit tests cover step 3 with mocks. Integrati
 | SessionWatchdog | SessionManager, StateManager, config | Missing tmux path, wrong thresholds |
 | AgentServer | All components via options object | Null fields when feature is enabled |
 | JobScheduler | SessionManager, StateManager | Can't spawn sessions, can't persist |
+| SessionActivitySentinel | intelligence, getActiveSessions, captureSessionOutput, getTelegramMessages, getTopicForSession | No LLM for digests, null session capture, missing telegram wiring, sessionComplete event unwired |
 
 ### The Wiring Test Template
 
@@ -155,11 +156,27 @@ describe('[Component] wiring integrity', () => {
 
 ## Implementation Checklist
 
-- [ ] `tests/integration/server-wiring.test.ts` — Wiring integrity for all DI components
+- [x] `tests/integration/server-wiring.test.ts` — Wiring integrity for all DI components
 - [ ] `tests/integration/stall-recovery-e2e.test.ts` — Full lifecycle from stall to recovery
 - [ ] `tests/unit/semantic-verification.test.ts` — Verification boundary conditions
+- [x] `tests/integration/episodic-wiring.test.ts` — Wiring integrity for SessionActivitySentinel (16 tests)
+- [x] `tests/integration/episodic-memory-routes.test.ts` — Integration tests for episode API routes (17 tests)
+- [x] `tests/e2e/episodic-memory-lifecycle.test.ts` — E2E lifecycle for episodic memory (16 tests)
 - [ ] Add wiring tests for every new dependency-injected feature going forward
 - [ ] CI enforcement: wiring tests run on every PR that touches server.ts or any constructor
+
+## Mock Branching Pitfall
+
+When mocking intelligence providers that return different responses based on prompt content, never branch on generic keywords that could appear in embedded data. Session output, Telegram messages, and other content gets embedded in prompts — a mock checking `prompt.includes('session synthesis')` will false-match when session output contains a test name like "round-trips a session synthesis."
+
+**Rule:** Branch mock responses on the unique preamble of each prompt type, not on keywords:
+```typescript
+// BAD: Generic keywords can appear in embedded content
+if (prompt.includes('session synthesis')) { ... }
+
+// GOOD: Unique preamble only appears in the actual synthesis prompt
+if (prompt.includes('creating a coherent session synthesis')) { ... }
+```
 
 ## The Meta-Lesson
 
