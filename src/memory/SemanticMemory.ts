@@ -135,6 +135,7 @@ export class SemanticMemory {
       CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
       CREATE INDEX IF NOT EXISTS idx_entities_confidence ON entities(confidence);
       CREATE INDEX IF NOT EXISTS idx_entities_domain ON entities(domain);
+      CREATE INDEX IF NOT EXISTS idx_entities_source ON entities(source);
 
       CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
         name,
@@ -273,6 +274,18 @@ export class SemanticMemory {
     `).run(id, fromId, toId, relation, weight, context ?? null, now);
 
     return id;
+  }
+
+  // ─── Lookup ─────────────────────────────────────────────────────
+
+  /**
+   * Find an entity by its exact source key.
+   * Used for deduplication during migration.
+   */
+  findBySource(source: string): MemoryEntity | null {
+    const db = this.ensureOpen();
+    const row = db.prepare('SELECT * FROM entities WHERE source = ?').get(source) as EntityRow | undefined;
+    return row ? rowToEntity(row) : null;
   }
 
   // ─── Search ─────────────────────────────────────────────────────

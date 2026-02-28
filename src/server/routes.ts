@@ -690,6 +690,91 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // ── Semantic Memory Migration ────────────────────────────────────
+
+  router.post('/semantic/migrate', async (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const { MemoryMigrator } = await import('../memory/MemoryMigrator.js');
+      const migrator = new MemoryMigrator({
+        stateDir: ctx.config.stateDir,
+        semanticMemory: ctx.semanticMemory,
+      });
+
+      const memoryMdPath = req.body?.memoryMdPath;
+      const report = await migrator.migrateAll({ memoryMdPath });
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Migration failed' });
+    }
+  });
+
+  router.post('/semantic/migrate/memory-md', async (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const { MemoryMigrator } = await import('../memory/MemoryMigrator.js');
+      const migrator = new MemoryMigrator({
+        stateDir: ctx.config.stateDir,
+        semanticMemory: ctx.semanticMemory,
+      });
+
+      const filePath = req.body?.filePath;
+      if (!filePath) { res.status(400).json({ error: 'filePath required' }); return; }
+      const report = await migrator.migrateMemoryMd(filePath);
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Migration failed' });
+    }
+  });
+
+  router.post('/semantic/migrate/relationships', async (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const { MemoryMigrator } = await import('../memory/MemoryMigrator.js');
+      const migrator = new MemoryMigrator({
+        stateDir: ctx.config.stateDir,
+        semanticMemory: ctx.semanticMemory,
+      });
+
+      const report = await migrator.migrateRelationships();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Migration failed' });
+    }
+  });
+
+  router.post('/semantic/migrate/canonical-state', async (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const { MemoryMigrator } = await import('../memory/MemoryMigrator.js');
+      const migrator = new MemoryMigrator({
+        stateDir: ctx.config.stateDir,
+        semanticMemory: ctx.semanticMemory,
+      });
+
+      const report = await migrator.migrateCanonicalState();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Migration failed' });
+    }
+  });
+
+  router.post('/semantic/migrate/decisions', async (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const { MemoryMigrator } = await import('../memory/MemoryMigrator.js');
+      const migrator = new MemoryMigrator({
+        stateDir: ctx.config.stateDir,
+        semanticMemory: ctx.semanticMemory,
+      });
+
+      const report = await migrator.migrateDecisionJournal();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Migration failed' });
+    }
+  });
+
   // ── Status ──────────────────────────────────────────────────────
 
   router.get('/status', (_req, res) => {
