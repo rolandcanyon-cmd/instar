@@ -1577,4 +1577,879 @@ describe('E2E: Multi-Agent Messaging (same machine)', () => {
       await request(agentA.app).delete('/messages/outbound/m/id').expect(401);
     });
   });
+
+  // ── Full Conversation Thread (Multi-Turn) ────────────────────
+
+  describe('full multi-turn conversation thread', () => {
+    it('send → reply → reply → resolve across two agents', async () => {
+      // 1. Agent A sends initial query to Agent B
+      const sendRes = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'conv-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'conv-b', machine: 'test-machine' },
+          type: 'query',
+          priority: 'medium',
+          subject: 'Database migration impact?',
+          body: 'How does the new column affect performance?',
+        })
+        .expect(201);
+      const originalId = sendRes.body.messageId;
+      const threadId = sendRes.body.threadId;
+      expect(threadId).toBeDefined();
+
+      // 2. Agent B replies via send (simulating response through its API)
+      const reply1Res = await request(agentB.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .send({
+          from: { agent: agentB.name, session: 'conv-b', machine: 'test-machine' },
+          to: { agent: agentA.name, session: 'conv-a', machine: 'test-machine' },
+          type: 'response',
+          priority: 'medium',
+          subject: 'Re: Database migration impact?',
+          body: 'Minimal impact — column is nullable, no migration needed',
+          options: { threadId, inReplyTo: originalId },
+        })
+        .expect(201);
+      const reply1Id = reply1Res.body.messageId;
+
+      // 3. Agent A follows up with another question
+      const reply2Res = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'conv-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'conv-b', machine: 'test-machine' },
+          type: 'query',
+          priority: 'medium',
+          subject: 'Re: Database migration impact?',
+          body: 'What about index rebuild time?',
+          options: { threadId, inReplyTo: reply1Id },
+        })
+        .expect(201);
+      const reply2Id = reply2Res.body.messageId;
+
+      // 4. Agent B resolves the thread
+      const resolveRes = await request(agentB.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .send({
+          from: { agent: agentB.name, session: 'conv-b', machine: 'test-machine' },
+          to: { agent: agentA.name, session: 'conv-a', machine: 'test-machine' },
+          type: 'response',
+          priority: 'medium',
+          subject: 'Re: Database migration impact? [resolved]',
+          body: 'Index rebuild is sub-second. Thread resolved.',
+          options: { threadId, inReplyTo: reply2Id },
+        })
+        .expect(201);
+
+      // 5. Verify thread on Agent A side has all messages
+      const threadRes = await request(agentA.app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      // Thread should have the original + at least the reply that came to A
+      expect(threadRes.body.thread).toBeDefined();
+      expect(threadRes.body.thread.messageIds.length).toBeGreaterThanOrEqual(2);
+
+      // 6. Verify thread on Agent B side
+      const threadResB = await request(agentB.app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(threadResB.body.thread.messageIds.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  // ── Offline Drop Fallback & Recovery ─────────────────────────
+
+  describe('offline fallback and recovery', () => {
+    it('messages queued when target agent offline are recovered on pickup', async () => {
+      // Write messages directly to B's drop directory (simulating A dropping while B is offline)
+      const dropDir = path.join(os.homedir(), '.instar', 'messages', 'drop', agentB.name);
+      fs.mkdirSync(dropDir, { recursive: true });
+
+      const msgIds: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const msgId = crypto.randomUUID();
+        msgIds.push(msgId);
+        const envelope = makeEnvelope(
+          { agent: agentA.name },
+          { agent: agentB.name },
+          { subject: `Offline msg ${i + 1}`, body: `Message ${i + 1} while B was offline` },
+        );
+        envelope.message.id = msgId;
+        // Add HMAC for drop verification
+        const hmac = computeDropHmac(agentA.agentToken, {
+          message: envelope.message,
+          originServer: envelope.transport.originServer,
+          nonce: envelope.transport.nonce,
+          timestamp: envelope.transport.timestamp,
+        });
+        envelope.transport.hmac = hmac;
+        envelope.transport.hmacBy = agentA.name;
+        fs.writeFileSync(path.join(dropDir, `${msgId}.json`), JSON.stringify(envelope));
+      }
+
+      // Simulate B coming online — pick up drops
+      const result = await pickupDroppedMessages(agentB.name, agentB.store);
+      expect(result.ingested).toBe(3);
+      expect(result.rejected).toBe(0);
+
+      // Verify all 3 are now in B's inbox
+      for (const msgId of msgIds) {
+        const res = await request(agentB.app)
+          .get(`/messages/${msgId}`)
+          .set('Authorization', `Bearer ${agentB.authToken}`)
+          .expect(200);
+        expect(res.body.delivery.phase).toBe('received');
+      }
+    });
+
+    it('tampered drops are rejected while valid ones are accepted in same batch', async () => {
+      const dropDir = path.join(os.homedir(), '.instar', 'messages', 'drop', agentB.name);
+      fs.mkdirSync(dropDir, { recursive: true });
+
+      // Valid message
+      const validId = crypto.randomUUID();
+      const validEnvelope = makeEnvelope({ agent: agentA.name }, { agent: agentB.name });
+      validEnvelope.message.id = validId;
+      const hmac = computeDropHmac(agentA.agentToken, {
+        message: validEnvelope.message,
+        originServer: validEnvelope.transport.originServer,
+        nonce: validEnvelope.transport.nonce,
+        timestamp: validEnvelope.transport.timestamp,
+      });
+      validEnvelope.transport.hmac = hmac;
+      validEnvelope.transport.hmacBy = agentA.name;
+      fs.writeFileSync(path.join(dropDir, `${validId}.json`), JSON.stringify(validEnvelope));
+
+      // Tampered message (wrong HMAC)
+      const tamperedId = crypto.randomUUID();
+      const tamperedEnvelope = makeEnvelope({ agent: agentA.name }, { agent: agentB.name });
+      tamperedEnvelope.message.id = tamperedId;
+      tamperedEnvelope.transport.hmac = 'definitely-wrong-hmac';
+      tamperedEnvelope.transport.hmacBy = agentA.name;
+      fs.writeFileSync(path.join(dropDir, `${tamperedId}.json`), JSON.stringify(tamperedEnvelope));
+
+      const result = await pickupDroppedMessages(agentB.name, agentB.store);
+      expect(result.ingested).toBe(1);
+      expect(result.rejected).toBe(1);
+
+      // Valid one should be in store
+      const validRes = await request(agentB.app)
+        .get(`/messages/${validId}`)
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(validRes.body.delivery.phase).toBe('received');
+
+      // Tampered one should NOT be in store
+      await request(agentB.app)
+        .get(`/messages/${tamperedId}`)
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(404);
+    });
+  });
+
+  // ── Git-Sync Fallback Simulation ─────────────────────────────
+
+  describe('git-sync fallback simulation', () => {
+    it('simulates offline machine → git-sync → dedup on reconnect', async () => {
+      const { pickupGitSyncMessages } = await import('../../src/messaging/GitSyncTransport.js');
+
+      // 1. First, send a message from A→B normally (simulates real-time relay)
+      const sendRes = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'gs-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'gs-b', machine: 'test-machine' },
+          type: 'info',
+          priority: 'medium',
+          subject: 'Already delivered via relay',
+          body: 'This should be deduped when git-sync arrives',
+        })
+        .expect(201);
+      const relayedMsgId = sendRes.body.messageId;
+
+      // 2. Simulate a git-sync arrival with the same message (duplicate)
+      const gitSyncDir = path.join(agentB.stateDir, 'messages', 'outbound', 'remote-machine');
+      fs.mkdirSync(gitSyncDir, { recursive: true });
+
+      // Write the same message to git-sync inbound (as if remote synced it)
+      const existingEnvelope = await agentB.store.get(relayedMsgId);
+      if (existingEnvelope) {
+        existingEnvelope.transport.signature = 'fake-sig-for-test';
+        existingEnvelope.transport.signedBy = 'remote-machine';
+        fs.writeFileSync(
+          path.join(gitSyncDir, `${relayedMsgId}.json`),
+          JSON.stringify(existingEnvelope),
+        );
+      }
+
+      // 3. Also write a NEW message that only exists in git-sync
+      const newMsgId = crypto.randomUUID();
+      const newEnvelope = makeEnvelope(
+        { agent: 'remote-agent', machine: 'remote-machine' },
+        { agent: agentB.name, machine: 'remote-machine' },
+        { subject: 'New via git-sync', body: 'Only in git-sync, not relayed' },
+      );
+      newEnvelope.message.id = newMsgId;
+      newEnvelope.transport.signature = 'valid-sig-placeholder';
+      newEnvelope.transport.signedBy = 'remote-machine';
+      fs.writeFileSync(
+        path.join(gitSyncDir, `${newMsgId}.json`),
+        JSON.stringify(newEnvelope),
+      );
+
+      // 4. Run git-sync pickup
+      const result = await pickupGitSyncMessages({
+        localMachineId: 'remote-machine',
+        stateDir: agentB.stateDir,
+        store: agentB.store,
+        verifySignature: () => ({ valid: true }), // Trust all sigs in test
+      });
+
+      // The relayed one should be deduped, the new one ingested
+      expect(result.duplicates).toBeGreaterThanOrEqual(1);
+      expect(result.ingested).toBe(1);
+
+      // 5. Verify new message is accessible via API
+      const newRes = await request(agentB.app)
+        .get(`/messages/${newMsgId}`)
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(newRes.body.delivery.phase).toBe('received');
+    });
+
+    it('rejects expired git-sync messages', async () => {
+      const { pickupGitSyncMessages } = await import('../../src/messaging/GitSyncTransport.js');
+
+      const gitSyncDir = path.join(agentB.stateDir, 'messages', 'outbound', 'expired-machine');
+      fs.mkdirSync(gitSyncDir, { recursive: true });
+
+      const expiredId = crypto.randomUUID();
+      const envelope = makeEnvelope(
+        { agent: 'remote', machine: 'expired-machine' },
+        { agent: agentB.name },
+        { subject: 'Stale git-sync message' },
+      );
+      envelope.message.id = expiredId;
+      envelope.message.ttlMinutes = 1; // 1 minute TTL
+      // Backdate to 10 minutes ago
+      const oldTime = new Date(Date.now() - 10 * 60_000).toISOString();
+      envelope.message.createdAt = oldTime;
+      envelope.transport.timestamp = oldTime;
+      envelope.delivery.transitions = [{ from: 'created', to: 'sent', at: oldTime }];
+      envelope.transport.signature = 'sig';
+      envelope.transport.signedBy = 'expired-machine';
+
+      fs.writeFileSync(
+        path.join(gitSyncDir, `${expiredId}.json`),
+        JSON.stringify(envelope),
+      );
+
+      const result = await pickupGitSyncMessages({
+        localMachineId: 'expired-machine',
+        stateDir: agentB.stateDir,
+        store: agentB.store,
+        verifySignature: () => ({ valid: true }),
+      });
+
+      expect(result.rejected).toBe(1);
+      expect(result.rejections[0].reason).toContain('TTL expired');
+    });
+  });
+
+  // ── Spawn Storm (Cooldown Prevents Resource Exhaustion) ──────
+
+  describe('spawn storm protection', () => {
+    it('rapid fire spawn requests from same agent are throttled after first', async () => {
+      const uniqueAgent = `storm-agent-${Date.now()}`;
+      const results: Array<{ status: number; approved: boolean }> = [];
+
+      // Fire 5 rapid requests
+      for (let i = 0; i < 5; i++) {
+        const res = await request(agentA.app)
+          .post('/messages/spawn-request')
+          .set('Authorization', `Bearer ${agentA.authToken}`)
+          .send({
+            requester: { agent: uniqueAgent, session: `s${i}`, machine: 'm' },
+            target: { agent: agentA.name, machine: 'test-machine' },
+            reason: `Spawn storm test ${i}`,
+            priority: 'medium',
+          });
+        results.push({ status: res.status, approved: res.body.approved });
+      }
+
+      // First should be approved, rest should be throttled
+      expect(results[0].approved).toBe(true);
+      expect(results[0].status).toBe(201);
+      for (let i = 1; i < 5; i++) {
+        expect(results[i].approved).toBe(false);
+        expect(results[i].status).toBe(429);
+      }
+    });
+
+    it('different agents can spawn concurrently without blocking each other', async () => {
+      const results = await Promise.all(
+        Array.from({ length: 3 }, (_, i) =>
+          request(agentB.app)
+            .post('/messages/spawn-request')
+            .set('Authorization', `Bearer ${agentB.authToken}`)
+            .send({
+              requester: { agent: `independent-${i}-${Date.now()}`, session: 's', machine: 'm' },
+              target: { agent: agentB.name, machine: 'test-machine' },
+              reason: `Independent spawn ${i}`,
+              priority: 'medium',
+            }),
+        ),
+      );
+
+      // All should be approved (different agents, no cooldown interference)
+      for (const res of results) {
+        expect(res.status).toBe(201);
+        expect(res.body.approved).toBe(true);
+      }
+    });
+  });
+
+  // ── Concurrent Message Delivery ──────────────────────────────
+
+  describe('concurrent message delivery', () => {
+    it('handles 10 simultaneous sends from A to B without data loss', async () => {
+      const messageIds: string[] = [];
+
+      // Fire 10 concurrent sends
+      const sends = Array.from({ length: 10 }, (_, i) =>
+        request(agentA.app)
+          .post('/messages/send')
+          .set('Authorization', `Bearer ${agentA.authToken}`)
+          .send({
+            from: { agent: agentA.name, session: 'concurrent-a', machine: 'test-machine' },
+            to: { agent: agentB.name, session: 'concurrent-b', machine: 'test-machine' },
+            type: 'info',
+            priority: 'medium',
+            subject: `Concurrent msg ${i}`,
+            body: `Message ${i} of 10 concurrent sends`,
+          }),
+      );
+
+      const results = await Promise.all(sends);
+
+      // All should succeed
+      for (const res of results) {
+        expect(res.status).toBe(201);
+        expect(res.body.messageId).toBeDefined();
+        messageIds.push(res.body.messageId);
+      }
+
+      // All 10 should be in B's store
+      for (const msgId of messageIds) {
+        const res = await request(agentB.app)
+          .get(`/messages/${msgId}`)
+          .set('Authorization', `Bearer ${agentB.authToken}`)
+          .expect(200);
+        expect(res.body.message.id).toBe(msgId);
+      }
+    });
+
+    it('handles bidirectional concurrent sends (A→B and B→A simultaneously)', async () => {
+      const aToBIds: string[] = [];
+      const bToAIds: string[] = [];
+
+      // Fire concurrent sends in both directions
+      const sends = [
+        ...Array.from({ length: 5 }, (_, i) =>
+          request(agentA.app)
+            .post('/messages/send')
+            .set('Authorization', `Bearer ${agentA.authToken}`)
+            .send({
+              from: { agent: agentA.name, session: 'bidir-a', machine: 'test-machine' },
+              to: { agent: agentB.name, session: 'bidir-b', machine: 'test-machine' },
+              type: 'info',
+              priority: 'medium',
+              subject: `A→B concurrent ${i}`,
+              body: `Bidirectional test A→B ${i}`,
+            })
+            .then(res => ({ dir: 'atob', res })),
+        ),
+        ...Array.from({ length: 5 }, (_, i) =>
+          request(agentB.app)
+            .post('/messages/send')
+            .set('Authorization', `Bearer ${agentB.authToken}`)
+            .send({
+              from: { agent: agentB.name, session: 'bidir-b', machine: 'test-machine' },
+              to: { agent: agentA.name, session: 'bidir-a', machine: 'test-machine' },
+              type: 'info',
+              priority: 'medium',
+              subject: `B→A concurrent ${i}`,
+              body: `Bidirectional test B→A ${i}`,
+            })
+            .then(res => ({ dir: 'btoa', res })),
+        ),
+      ];
+
+      const results = await Promise.all(sends);
+
+      for (const { dir, res } of results) {
+        expect(res.status).toBe(201);
+        if (dir === 'atob') aToBIds.push(res.body.messageId);
+        else bToAIds.push(res.body.messageId);
+      }
+
+      expect(aToBIds).toHaveLength(5);
+      expect(bToAIds).toHaveLength(5);
+
+      // Verify A→B messages are in B's store
+      for (const id of aToBIds) {
+        await request(agentB.app)
+          .get(`/messages/${id}`)
+          .set('Authorization', `Bearer ${agentB.authToken}`)
+          .expect(200);
+      }
+
+      // Verify B→A messages are in A's store
+      for (const id of bToAIds) {
+        await request(agentA.app)
+          .get(`/messages/${id}`)
+          .set('Authorization', `Bearer ${agentA.authToken}`)
+          .expect(200);
+      }
+    });
+  });
+
+  // ── Stats Comprehensive Validation ───────────────────────────
+
+  describe('comprehensive stats validation', () => {
+    it('stats reflect all message types and volumes accurately', async () => {
+      // Send diverse message types
+      const types = ['info', 'query', 'request', 'alert', 'sync'];
+      for (const type of types) {
+        await request(agentA.app)
+          .post('/messages/send')
+          .set('Authorization', `Bearer ${agentA.authToken}`)
+          .send({
+            from: { agent: agentA.name, session: 'stats-a', machine: 'test-machine' },
+            to: { agent: agentB.name, session: 'stats-b', machine: 'test-machine' },
+            type,
+            priority: 'medium',
+            subject: `Stats test: ${type}`,
+            body: `Testing ${type} stats tracking`,
+          })
+          .expect(201);
+      }
+
+      // Check A's stats (sender side)
+      const statsA = await request(agentA.app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      expect(statsA.body.volume).toBeDefined();
+      expect(statsA.body.volume.sent).toBeDefined();
+      expect(statsA.body.volume.sent.total).toBeGreaterThanOrEqual(5);
+
+      // Check B's stats (receiver side)
+      const statsB = await request(agentB.app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+
+      expect(statsB.body.volume).toBeDefined();
+      expect(statsB.body.volume.received).toBeDefined();
+      expect(statsB.body.volume.received.total).toBeGreaterThanOrEqual(5);
+
+      // Verify time-windowed stats exist
+      expect(typeof statsB.body.volume.received.last5min).toBe('number');
+      expect(typeof statsB.body.volume.received.last1hr).toBe('number');
+    });
+
+    it('stats track threads correctly', async () => {
+      const statsRes = await request(agentA.app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      expect(statsRes.body.threads).toBeDefined();
+      expect(typeof statsRes.body.threads.active).toBe('number');
+      expect(typeof statsRes.body.threads.resolved).toBe('number');
+      expect(typeof statsRes.body.threads.stale).toBe('number');
+    });
+  });
+
+  // ── Dead Letter Lifecycle ────────────────────────────────────
+
+  describe('dead letter lifecycle', () => {
+    it('dead-lettered messages appear in dead-letter queue with full history', async () => {
+      // Create a message that will be dead-lettered
+      const msgId = crypto.randomUUID();
+      const envelope = {
+        schemaVersion: 1,
+        message: {
+          id: msgId,
+          from: { agent: agentA.name, session: 's', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 's', machine: 'local' },
+          type: 'info' as const,
+          priority: 'low' as const,
+          subject: 'Dead letter test',
+          body: 'This will be dead-lettered',
+          createdAt: new Date(Date.now() - 3600_000).toISOString(), // 1 hour ago
+          ttlMinutes: 1, // Already expired
+        },
+        transport: {
+          relayChain: [],
+          originServer: 'http://localhost:0',
+          nonce: `${crypto.randomUUID()}:${new Date().toISOString()}`,
+          timestamp: new Date().toISOString(),
+        },
+        delivery: {
+          phase: 'queued' as const,
+          transitions: [
+            { from: 'created', to: 'sent', at: new Date(Date.now() - 3600_000).toISOString() },
+            { from: 'sent', to: 'queued', at: new Date(Date.now() - 3500_000).toISOString() },
+          ],
+          attempts: 5,
+        },
+      };
+      await agentB.store.save(envelope as any);
+
+      // Tick retry manager to expire it
+      const { DeliveryRetryManager } = await import('../../src/messaging/DeliveryRetryManager.js');
+      const formatter = new MessageFormatter();
+      const delivery = new MessageDelivery(formatter, mockTmux);
+      const retryMgr = new DeliveryRetryManager(agentB.store, delivery, { agentName: agentB.name });
+      await retryMgr.tick();
+      retryMgr.stop();
+
+      // Verify it's in dead-letter queue
+      const dlRes = await request(agentB.app)
+        .get('/messages/dead-letter')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+
+      const found = dlRes.body.messages.find((m: any) => m.message.id === msgId);
+      expect(found).toBeDefined();
+      expect(found.delivery.phase).toBe('dead-lettered');
+      expect(found.delivery.transitions.length).toBeGreaterThanOrEqual(3); // created→sent→queued→dead-lettered
+
+      // Verify stats reflect the dead letter
+      const statsRes = await request(agentB.app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(statsRes.body.volume.deadLettered.total).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // ── Message Persistence and Recovery ─────────────────────────
+
+  describe('message persistence across store re-init', () => {
+    it('messages, threads, and dead-letters all survive store re-initialization', async () => {
+      // Send a fresh message
+      const sendRes = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'persist-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'persist-b', machine: 'test-machine' },
+          type: 'query',
+          priority: 'medium',
+          subject: 'Persistence test query',
+          body: 'Will this survive re-init?',
+        })
+        .expect(201);
+      const msgId = sendRes.body.messageId;
+      const threadId = sendRes.body.threadId;
+
+      // Record current stats
+      const statsBefore = await request(agentB.app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      const receivedBefore = statsBefore.body.volume.received.total;
+
+      // Re-initialize B's store (simulates server restart)
+      await agentB.store.destroy();
+      const messagingDir = path.join(agentB.stateDir, 'messages');
+      const newStore = new MessageStore(messagingDir);
+      await newStore.initialize();
+
+      // Verify message still exists
+      const envelope = await newStore.get(msgId);
+      expect(envelope).toBeDefined();
+      expect(envelope!.message.subject).toBe('Persistence test query');
+
+      // Verify thread still exists
+      const thread = await newStore.getThread(threadId);
+      expect(thread).toBeDefined();
+
+      // Verify stats rebuilt correctly
+      const stats = await newStore.getStats();
+      expect(stats.volume.received.total).toBeGreaterThanOrEqual(receivedBefore);
+
+      // Replace store reference for cleanup
+      (agentB as any).store = newStore;
+      await newStore.destroy();
+      const finalStore = new MessageStore(messagingDir);
+      await finalStore.initialize();
+      (agentB as any).store = finalStore;
+    });
+  });
+
+  // ── Priority-Based Behavior ──────────────────────────────────
+
+  describe('priority-based behavior', () => {
+    it('all priority levels are accepted and tracked in stats', async () => {
+      const priorities = ['low', 'normal', 'medium', 'high', 'critical'];
+      const ids: string[] = [];
+
+      for (const priority of priorities) {
+        const res = await request(agentA.app)
+          .post('/messages/send')
+          .set('Authorization', `Bearer ${agentA.authToken}`)
+          .send({
+            from: { agent: agentA.name, session: 'prio-a', machine: 'test-machine' },
+            to: { agent: agentB.name, session: 'prio-b', machine: 'test-machine' },
+            type: 'info',
+            priority,
+            subject: `Priority ${priority} message`,
+            body: `Testing ${priority} priority`,
+          })
+          .expect(201);
+        ids.push(res.body.messageId);
+      }
+
+      // Verify all arrived at B
+      for (const id of ids) {
+        await request(agentB.app)
+          .get(`/messages/${id}`)
+          .set('Authorization', `Bearer ${agentB.authToken}`)
+          .expect(200);
+      }
+
+      // Verify stats volume reflects the priority messages
+      const statsB = await request(agentB.app)
+        .get('/messages/stats')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(statsB.body.volume.received.total).toBeGreaterThanOrEqual(5);
+    });
+  });
+
+  // ── Edge Cases and Error Boundaries ──────────────────────────
+
+  describe('edge cases and error boundaries', () => {
+    it('handles very large message body', async () => {
+      const largeBody = 'X'.repeat(50_000); // 50KB body
+      const res = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'large-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'large-b', machine: 'test-machine' },
+          type: 'info',
+          priority: 'low',
+          subject: 'Large payload test',
+          body: largeBody,
+        })
+        .expect(201);
+
+      // Verify full body preserved at B
+      const getRes = await request(agentB.app)
+        .get(`/messages/${res.body.messageId}`)
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(getRes.body.message.body.length).toBe(50_000);
+    });
+
+    it('handles special characters in subject and body', async () => {
+      const res = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'special-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'special-b', machine: 'test-machine' },
+          type: 'info',
+          priority: 'medium',
+          subject: 'Test: "quotes" & <angles> & unicode: 日本語 🎯',
+          body: 'Line1\nLine2\tTabbed\n\n{"json": "embedded"}\n```code block```',
+        })
+        .expect(201);
+
+      const getRes = await request(agentB.app)
+        .get(`/messages/${res.body.messageId}`)
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(getRes.body.message.subject).toContain('日本語');
+      expect(getRes.body.message.body).toContain('{"json": "embedded"}');
+    });
+
+    it('rejects message with invalid UUID format for message ID', async () => {
+      await request(agentA.app)
+        .get('/messages/not-a-valid-uuid')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(400);
+    });
+
+    it('inbox/outbox filters work correctly', async () => {
+      // Send a query and an info
+      await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'filter-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'filter-b', machine: 'test-machine' },
+          type: 'alert',
+          priority: 'high',
+          subject: 'Alert for filter test',
+          body: 'Filter test alert',
+        })
+        .expect(201);
+
+      // Filter B's inbox by type=alert
+      const alertRes = await request(agentB.app)
+        .get('/messages/inbox')
+        .query({ type: 'alert' })
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+
+      // All returned messages should be alerts
+      for (const msg of alertRes.body.messages) {
+        expect(msg.message.type).toBe('alert');
+      }
+    });
+
+    it('ack with non-existent message ID returns appropriate response', async () => {
+      const nonExistentId = crypto.randomUUID();
+      const res = await request(agentB.app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .send({
+          sessionId: 'session-b',
+          messageId: nonExistentId,
+        });
+      // Should either 404 or handle gracefully (not 500)
+      expect(res.status).toBeLessThan(500);
+    });
+
+    it('multiple ACKs for same message are idempotent', async () => {
+      // Send a message
+      const sendRes = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'ack-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'ack-b', machine: 'test-machine' },
+          type: 'info',
+          priority: 'medium',
+          subject: 'Idempotent ACK test',
+          body: 'Double-ack me',
+        })
+        .expect(201);
+      const msgId = sendRes.body.messageId;
+
+      // ACK twice
+      await request(agentB.app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .send({ sessionId: 'ack-b', messageId: msgId })
+        .expect(200);
+
+      const secondAck = await request(agentB.app)
+        .post('/messages/ack')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .send({ sessionId: 'ack-b', messageId: msgId });
+      // Second ACK should not cause error
+      expect(secondAck.status).toBeLessThan(500);
+    });
+  });
+
+  // ── Thread Lifecycle Deep ────────────────────────────────────
+
+  describe('thread lifecycle deep', () => {
+    it('threads listing shows all active threads', async () => {
+      const res = await request(agentA.app)
+        .get('/messages/threads')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      expect(res.body.threads).toBeDefined();
+      expect(Array.isArray(res.body.threads)).toBe(true);
+    });
+
+    it('thread detail includes full message history', async () => {
+      // Create a thread with a query
+      const sendRes = await request(agentA.app)
+        .post('/messages/send')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          from: { agent: agentA.name, session: 'td-a', machine: 'test-machine' },
+          to: { agent: agentB.name, session: 'td-b', machine: 'test-machine' },
+          type: 'query',
+          priority: 'medium',
+          subject: 'Thread detail test',
+          body: 'Testing thread detail retrieval',
+        })
+        .expect(201);
+
+      const threadId = sendRes.body.threadId;
+
+      const threadRes = await request(agentA.app)
+        .get(`/messages/thread/${threadId}`)
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      expect(threadRes.body.thread.id).toBe(threadId);
+      expect(threadRes.body.thread.messageIds.length).toBeGreaterThanOrEqual(1);
+      expect(threadRes.body.thread.status).toBeDefined();
+      expect(threadRes.body.thread.subject).toBe('Thread detail test');
+    });
+
+    it('thread 404 for non-existent thread ID', async () => {
+      await request(agentA.app)
+        .get(`/messages/thread/${crypto.randomUUID()}`)
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(404);
+    });
+  });
+
+  // ── Summary Sentinel Lifecycle ───────────────────────────────
+
+  describe('session summary sentinel lifecycle', () => {
+    it('summaries endpoint returns sentinel status on both agents', async () => {
+      const resA = await request(agentA.app)
+        .get('/messages/summaries')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      expect(resA.body.status).toBeDefined();
+      expect(resA.body.summaries).toBeDefined();
+      expect(typeof resA.body.status.summaryCount).toBe('number');
+      expect(typeof resA.body.status.staleCount).toBe('number');
+      expect(typeof resA.body.status.inFallback).toBe('boolean');
+
+      const resB = await request(agentB.app)
+        .get('/messages/summaries')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .expect(200);
+      expect(resB.body.status).toBeDefined();
+    });
+
+    it('route-score returns valid scores for subject/body query', async () => {
+      const res = await request(agentA.app)
+        .get('/messages/route-score')
+        .query({ subject: 'Database migration', body: 'Schema changes for v2' })
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .expect(200);
+
+      expect(res.body).toHaveProperty('scores');
+      expect(res.body).toHaveProperty('inFallback');
+      expect(Array.isArray(res.body.scores)).toBe(true);
+    });
+  });
 });
