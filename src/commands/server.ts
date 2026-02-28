@@ -63,6 +63,11 @@ import { StaleProcessGuard } from '../core/StaleProcessGuard.js';
 import { ForegroundRestartWatcher } from '../core/ForegroundRestartWatcher.js';
 import { NotificationBatcher } from '../messaging/NotificationBatcher.js';
 import type { NotificationTier } from '../messaging/NotificationBatcher.js';
+import { MessageStore } from '../messaging/MessageStore.js';
+import { MessageFormatter } from '../messaging/MessageFormatter.js';
+import { MessageDelivery } from '../messaging/MessageDelivery.js';
+import type { TmuxOperations } from '../messaging/MessageDelivery.js';
+import { MessageRouter } from '../messaging/MessageRouter.js';
 import type { PipelineMessage } from '../types/pipeline.js';
 import { toPipeline, toInjection, toLogEntry, formatHistoryLine } from '../types/pipeline.js';
 import type { Message, IntelligenceProvider } from '../core/types.js';
@@ -1363,12 +1368,41 @@ export async function startServer(options: StartOptions): Promise<void> {
       await semanticMemory.open();
       const smStats = semanticMemory.stats();
       console.log(pc.green(`  SemanticMemory: ${smStats.totalEntities} entities, ${smStats.totalEdges} edges`));
+
+      // Phase 5: Hybrid Search — attach EmbeddingProvider for vector-enhanced search.
+      // Loads all-MiniLM-L6-v2 (~80MB ONNX model, cached after first download) and
+      // sqlite-vec extension for KNN queries alongside FTS5.
+      // Graceful degradation: if either fails, SemanticMemory continues FTS5-only.
+      try {
+        const { EmbeddingProvider } = await import('../memory/EmbeddingProvider.js');
+        const embeddingProvider = new EmbeddingProvider();
+        const vecModuleLoaded = await embeddingProvider.loadVecModule();
+        if (vecModuleLoaded) {
+          semanticMemory.setEmbeddingProvider(embeddingProvider);
+          const vecReady = await semanticMemory.initializeVectorSearch();
+          if (vecReady) {
+            // Initialize model in background — don't block server startup
+            embeddingProvider.initialize().then(() => {
+              const updatedStats = semanticMemory!.stats();
+              console.log(pc.green(`  Vector search: ready (${updatedStats.embeddingCount ?? 0}/${updatedStats.totalEntities} embeddings)`));
+            }).catch((modelErr) => { // @silent-fallback-ok: embedding model load is non-blocking, FTS5-only degradation logged
+              console.log(pc.yellow(`  Vector search: model load failed (${modelErr instanceof Error ? modelErr.message : String(modelErr)}). FTS5-only mode.`));
+            });
+          } else {
+            console.log(pc.yellow('  Vector search: sqlite-vec extension failed to initialize. FTS5-only mode.'));
+          }
+        } else {
+          console.log(pc.yellow('  Vector search: sqlite-vec not available. FTS5-only mode.'));
+        }
+      } catch (vecErr) { // @silent-fallback-ok: vector search is optional enhancement, FTS5-only degradation logged
+        console.log(pc.yellow(`  Vector search: ${vecErr instanceof Error ? vecErr.message : String(vecErr)}. FTS5-only mode.`));
+      }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       semanticMemory = undefined;
       degradationReporter.report({
         feature: 'SemanticMemory',
-        primary: 'SQLite-backed knowledge graph with FTS5 search and confidence decay',
+        primary: 'SQLite-backed knowledge graph with FTS5 + vector hybrid search',
         fallback: 'Legacy memory systems (MEMORY.md, CanonicalState, MemoryIndex)',
         reason: `SemanticMemory init failed: ${reason}`,
         impact: 'Knowledge graph unavailable. Migration, semantic search, and entity-relationship queries disabled.',
@@ -1908,7 +1942,53 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Sentinel wired into Telegram message flow'));
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    // Inter-Agent Messaging — structured communication between sessions
+    const messageStore = new MessageStore(path.join(config.stateDir, 'messages'));
+    await messageStore.initialize();
+    const messageFormatter = new MessageFormatter();
+    const tmuxBin = config.sessions.tmuxPath;
+    const tmuxOps: TmuxOperations = {
+      getForegroundProcess(tmuxSession: string): string {
+        try {
+          return execFileSync(tmuxBin, ['list-panes', '-t', `=${tmuxSession}:`, '-F', '#{pane_current_command}'], {
+            encoding: 'utf-8', timeout: 5000,
+          }).trim().split('\n')[0] || 'unknown';
+        } catch { /* @silent-fallback-ok — tmux query, delivery layer handles unknown */ return 'unknown'; }
+      },
+      isSessionAlive(tmuxSession: string): boolean {
+        return sessionManager.isSessionAlive(tmuxSession);
+      },
+      hasActiveHumanInput(_tmuxSession: string): boolean {
+        // Agent sessions don't have human input — safe to inject
+        return false;
+      },
+      sendKeys(tmuxSession: string, text: string): boolean {
+        try {
+          const target = `=${tmuxSession}:`;
+          execFileSync(tmuxBin, ['send-keys', '-t', target, '-l', text], { encoding: 'utf-8', timeout: 5000 });
+          execFileSync(tmuxBin, ['send-keys', '-t', target, 'Enter'], { encoding: 'utf-8', timeout: 5000 });
+          return true;
+        } catch { /* @silent-fallback-ok — send-keys boolean return */ return false; }
+      },
+      getOutputLineCount(tmuxSession: string): number {
+        try {
+          const output = execFileSync(tmuxBin, ['capture-pane', '-t', `=${tmuxSession}:`, '-p'], {
+            encoding: 'utf-8', timeout: 5000,
+          });
+          return output.split('\n').length;
+        } catch { /* @silent-fallback-ok — capture-pane line count, 0 triggers inline delivery */ return 0; }
+      },
+    };
+    const messageDelivery = new MessageDelivery(messageFormatter, tmuxOps);
+    const machineId = coordinator.identity?.machineId ?? os.hostname();
+    const messageRouter = new MessageRouter(messageStore, messageDelivery, {
+      localAgent: config.projectName,
+      localMachine: machineId,
+      serverUrl: `http://localhost:${config.port}`,
+    });
+    console.log(pc.green('  Inter-agent messaging: enabled'));
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.

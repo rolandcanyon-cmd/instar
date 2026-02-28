@@ -598,6 +598,34 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // Hybrid search — uses FTS5 + vector KNN when embeddings are available
+  router.get('/semantic/search/hybrid', async (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const query = String(req.query.q || '');
+      const limit = parseInt(req.query.limit as string, 10) || 20;
+      const types = req.query.types ? String(req.query.types).split(',').filter(t => VALID_ENTITY_TYPES.has(t)) : undefined;
+      const domain = req.query.domain as string | undefined;
+      const minConfidence = req.query.minConfidence ? parseFloat(req.query.minConfidence as string) : undefined;
+
+      const results = await ctx.semanticMemory.searchHybrid(query, { types: types as any, domain, minConfidence, limit });
+      res.json({ query, results, totalResults: results.length, vectorSearchActive: ctx.semanticMemory.vectorSearchAvailable });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Hybrid search failed' });
+    }
+  });
+
+  // Batch embed all entities that are missing embeddings
+  router.post('/semantic/embeddings/migrate', async (req, res) => {
+    if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
+    try {
+      const count = await ctx.semanticMemory.embedAllEntities();
+      res.json({ embedded: count, vectorSearchAvailable: ctx.semanticMemory.vectorSearchAvailable });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Embedding migration failed' });
+    }
+  });
+
   router.get('/semantic/explore/:id', (req, res) => {
     if (!ctx.semanticMemory) { res.status(503).json({ error: 'Semantic memory not enabled' }); return; }
     try {

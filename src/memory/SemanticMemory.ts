@@ -1,5 +1,5 @@
 /**
- * SemanticMemory — Entity-relationship knowledge store with FTS5 search.
+ * SemanticMemory — Entity-relationship knowledge store with FTS5 + vector hybrid search.
  *
  * A typed, confidence-tracked knowledge graph stored in SQLite. Entities
  * represent knowledge (facts, people, projects, tools, patterns, decisions,
@@ -7,10 +7,13 @@
  *
  * Key features:
  *   - FTS5 full-text search with multi-signal ranking
+ *   - Optional vector similarity search via sqlite-vec (Phase 5)
+ *   - Hybrid scoring: FTS5 keyword + vector cosine similarity
  *   - Exponential confidence decay (lessons decay slower than facts)
  *   - BFS graph traversal with cycle detection
  *   - Export/import for portability
  *   - Formatted context generation for session injection
+ *   - Graceful degradation: works FTS5-only when vectors unavailable
  *
  * Uses the same better-sqlite3 pattern as MemoryIndex and TopicMemory.
  */
@@ -32,6 +35,8 @@ import type {
   EntityType,
   RelationType,
 } from '../core/types.js';
+import type { EmbeddingProvider } from './EmbeddingProvider.js';
+import { VectorSearch } from './VectorSearch.js';
 
 // Dynamic import for better-sqlite3 (optional dependency)
 type Database = import('better-sqlite3').Database;
@@ -51,9 +56,62 @@ function sanitizeFts5Query(query: string): string {
 export class SemanticMemory {
   private db: Database | null = null;
   private readonly config: SemanticMemoryConfig;
+  private embeddingProvider: EmbeddingProvider | null = null;
+  private vectorSearch: VectorSearch | null = null;
+  private _vectorAvailable = false;
 
   constructor(config: SemanticMemoryConfig) {
     this.config = config;
+  }
+
+  /**
+   * Whether hybrid vector search is active (sqlite-vec loaded + embeddings table created).
+   */
+  get vectorSearchAvailable(): boolean {
+    return this._vectorAvailable;
+  }
+
+  /**
+   * Attach an EmbeddingProvider to enable hybrid search.
+   * Must be called BEFORE open() for full effect, but can be called after
+   * to enable vector search on an already-open database.
+   */
+  setEmbeddingProvider(provider: EmbeddingProvider): void {
+    this.embeddingProvider = provider;
+    this.vectorSearch = new VectorSearch({
+      tableName: 'entity_embeddings',
+      dimensions: provider.dimensions,
+    });
+
+    // If DB is already open, try to wire up vector search now
+    if (this.db) {
+      this.initVectorSearch();
+    }
+  }
+
+  private initVectorSearch(): void {
+    if (!this.db || !this.embeddingProvider || !this.vectorSearch) return;
+
+    const loaded = this.embeddingProvider.loadVecExtension(this.db);
+    if (loaded) {
+      this.vectorSearch.createTable(this.db);
+      this._vectorAvailable = true;
+    }
+  }
+
+  /**
+   * Async initialization for vector search.
+   * Loads sqlite-vec module, then wires up the extension and creates tables.
+   * Call this after open() and setEmbeddingProvider() for full hybrid search.
+   */
+  async initializeVectorSearch(): Promise<boolean> {
+    if (!this.db || !this.embeddingProvider || !this.vectorSearch) return false;
+
+    const vecAvailable = await this.embeddingProvider.loadVecModule();
+    if (!vecAvailable) return false;
+
+    this.initVectorSearch();
+    return this._vectorAvailable;
   }
 
   // ─── Lifecycle ──────────────────────────────────────────────────
@@ -83,6 +141,9 @@ export class SemanticMemory {
     this.db!.pragma('foreign_keys = ON');
 
     this.createSchema();
+
+    // Initialize vector search if embedding provider is attached
+    this.initVectorSearch();
   }
 
   close(): void {
@@ -206,6 +267,47 @@ export class SemanticMemory {
       input.domain ?? null,
     );
 
+    // Generate embedding asynchronously (fire-and-forget for write performance)
+    if (this._vectorAvailable && this.embeddingProvider && this.vectorSearch) {
+      const embeddingText = `${input.name} ${input.content}`;
+      this.embeddingProvider.embed(embeddingText).then(embedding => {
+        if (this.db && this.vectorSearch) {
+          this.vectorSearch.upsert(this.db, id, embedding);
+        }
+      }).catch(() => { // @silent-fallback-ok: embedding failure is non-fatal, FTS5 search still works
+      });
+    }
+
+    return id;
+  }
+
+  /**
+   * Store a knowledge entity AND generate its embedding synchronously.
+   * Use this when you need the embedding to be available immediately
+   * (e.g., during migration or when testing search after insert).
+   */
+  async rememberWithEmbedding(input: {
+    type: EntityType;
+    name: string;
+    content: string;
+    confidence: number;
+    lastVerified: string;
+    source: string;
+    sourceSession?: string;
+    tags: string[];
+    domain?: string;
+    expiresAt?: string;
+  }): Promise<string> {
+    const id = this.remember(input);
+
+    // Wait for embedding to be generated and stored
+    if (this._vectorAvailable && this.embeddingProvider && this.vectorSearch) {
+      const db = this.ensureOpen();
+      const embeddingText = `${input.name} ${input.content}`;
+      const embedding = await this.embeddingProvider.embed(embeddingText);
+      this.vectorSearch.upsert(db, id, embedding);
+    }
+
     return id;
   }
 
@@ -239,6 +341,10 @@ export class SemanticMemory {
 
     // Delete edges first (both directions)
     db.prepare('DELETE FROM edges WHERE from_id = ? OR to_id = ?').run(id, id);
+    // Delete embedding if vector search is active
+    if (this._vectorAvailable && this.vectorSearch) {
+      this.vectorSearch.delete(db, id);
+    }
     // Delete entity
     db.prepare('DELETE FROM entities WHERE id = ?').run(id);
   }
@@ -292,7 +398,12 @@ export class SemanticMemory {
 
   /**
    * Full-text search with multi-signal ranking.
-   * Score = (fts5_rank * 0.4) + (confidence * 0.3) + (recency * 0.2) + (access_freq * 0.1)
+   *
+   * Without vector search:
+   *   Score = (fts5_rank * 0.5) + (confidence * 0.3) + (access * 0.1) + (recency * 0.1)
+   *
+   * With vector search (hybrid mode):
+   *   Score = (fts5_rank * 0.4) + (confidence * 0.3) + (access * 0.1) + (vector_sim * 0.2)
    */
   search(query: string, options?: SemanticSearchOptions): ScoredEntity[] {
     const db = this.ensureOpen();
@@ -302,7 +413,7 @@ export class SemanticMemory {
 
     const limit = options?.limit ?? 20;
 
-    // Build the query
+    // ─── FTS5 results ─────────────────────────────────────────
     let sql = `
       SELECT e.*, entities_fts.rank as fts_rank
       FROM entities_fts
@@ -333,34 +444,170 @@ export class SemanticMemory {
 
     const rows = db.prepare(sql).all(...params) as (EntityRow & { fts_rank: number })[];
 
-    // Multi-signal re-ranking
-    const now = Date.now();
-    const scored: ScoredEntity[] = rows.map(row => {
-      const entity = rowToEntity(row);
+    // ─── Vector results (if available) ────────────────────────
+    // vectorScores is populated asynchronously via searchHybrid() for callers
+    // that need vector scoring. For synchronous search(), we use cached scores
+    // from _lastVectorScores if searchHybrid was recently called.
+    const vectorScores = this._lastVectorScores;
+    const useVectors = this._vectorAvailable && vectorScores !== null && vectorScores.size > 0;
 
-      // Normalize FTS rank (BM25 returns negative, more negative = more relevant)
+    // ─── Merge & re-rank ──────────────────────────────────────
+    const now = Date.now();
+    const entityMap = new Map<string, ScoredEntity>();
+
+    for (const row of rows) {
+      const entity = rowToEntity(row);
       const ftsScore = 1 / (1 + Math.abs(row.fts_rank));
 
-      // Recency: how recently was this verified?
-      const daysSinceVerified = (now - new Date(entity.lastVerified).getTime()) / (1000 * 60 * 60 * 24);
-      const recencyScore = Math.exp(-0.02 * daysSinceVerified); // Gentle decay
-
-      // Access frequency proxy: recent access = higher value
       const daysSinceAccessed = (now - new Date(entity.lastAccessed).getTime()) / (1000 * 60 * 60 * 24);
       const accessScore = Math.exp(-0.01 * daysSinceAccessed);
 
-      const score =
-        ftsScore * 0.4 +
-        entity.confidence * 0.3 +
-        recencyScore * 0.2 +
-        accessScore * 0.1;
+      let score: number;
+      if (useVectors) {
+        const vecSim = vectorScores.get(entity.id) ?? 0;
+        score =
+          ftsScore * 0.4 +
+          entity.confidence * 0.3 +
+          accessScore * 0.1 +
+          vecSim * 0.2;
+      } else {
+        const daysSinceVerified = (now - new Date(entity.lastVerified).getTime()) / (1000 * 60 * 60 * 24);
+        const recencyScore = Math.exp(-0.02 * daysSinceVerified);
+        score =
+          ftsScore * 0.5 +
+          entity.confidence * 0.3 +
+          accessScore * 0.1 +
+          recencyScore * 0.1;
+      }
 
-      return { ...entity, score };
-    });
+      entityMap.set(entity.id, { ...entity, score });
+    }
 
-    // Sort by composite score (descending) and trim to limit
+    // If vectors are available, also add vector-only hits (entities found by
+    // semantic similarity but missed by FTS5 keyword matching)
+    if (useVectors && vectorScores) {
+      vectorScores.forEach((vecSim, id) => {
+        if (!entityMap.has(id)) {
+          const row = db.prepare('SELECT * FROM entities WHERE id = ?').get(id) as EntityRow | undefined;
+          if (row) {
+            const entity = rowToEntity(row);
+
+            // Apply type/domain/confidence filters
+            if (options?.types && options.types.length > 0 && !options.types.includes(entity.type)) return;
+            if (options?.domain && entity.domain !== options.domain) return;
+            if (options?.minConfidence !== undefined && entity.confidence < options.minConfidence) return;
+
+            const daysSinceAccessed = (now - new Date(entity.lastAccessed).getTime()) / (1000 * 60 * 60 * 24);
+            const accessScore = Math.exp(-0.01 * daysSinceAccessed);
+
+            // Vector-only result: no FTS score, so it contributes 0 for text signal
+            const score =
+              0 +                       // ftsScore * 0.4 = 0 (no keyword match)
+              entity.confidence * 0.3 +
+              accessScore * 0.1 +
+              vecSim * 0.2;
+
+            entityMap.set(entity.id, { ...entity, score });
+          }
+        }
+      });
+    }
+
+    const scored = Array.from(entityMap.values());
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, limit);
+  }
+
+  // Cached vector scores from the most recent searchHybrid() call
+  private _lastVectorScores: Map<string, number> | null = null;
+
+  /**
+   * Hybrid search — runs both FTS5 and vector KNN, then merges results.
+   * This is the recommended search method when vector search is available.
+   *
+   * Falls back to FTS5-only search when vectors are not available.
+   */
+  async searchHybrid(query: string, options?: SemanticSearchOptions): Promise<ScoredEntity[]> {
+    if (!this._vectorAvailable || !this.embeddingProvider || !this.vectorSearch) {
+      // Graceful degradation: fall back to FTS5-only
+      return this.search(query, options);
+    }
+
+    const db = this.ensureOpen();
+    const limit = options?.limit ?? 20;
+
+    // Generate query embedding
+    const queryEmbedding = await this.embeddingProvider.embed(query);
+
+    // Run vector KNN search
+    const vecResults = this.vectorSearch.search(db, queryEmbedding, limit * 3);
+
+    // Build vector score map for the search() method to use
+    this._lastVectorScores = new Map<string, number>();
+    for (const result of vecResults) {
+      this._lastVectorScores.set(result.id, result.similarity);
+    }
+
+    // Run the combined search (which now picks up vector scores)
+    const results = this.search(query, options);
+
+    // Clear cached scores
+    this._lastVectorScores = null;
+
+    return results;
+  }
+
+  /**
+   * Batch-embed all entities that are missing embeddings.
+   * Used for migration when enabling vector search on an existing database.
+   *
+   * @returns Number of entities embedded
+   */
+  async embedAllEntities(
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<number> {
+    if (!this._vectorAvailable || !this.embeddingProvider || !this.vectorSearch) {
+      return 0;
+    }
+
+    const db = this.ensureOpen();
+    const missingIds = this.vectorSearch.findMissingEmbeddings(db, 'entities');
+
+    if (missingIds.length === 0) return 0;
+
+    let done = 0;
+    const batchSize = 32;
+
+    for (let i = 0; i < missingIds.length; i += batchSize) {
+      const batchIds = missingIds.slice(i, i + batchSize);
+      const batchTexts: string[] = [];
+
+      for (const id of batchIds) {
+        const row = db.prepare('SELECT name, content FROM entities WHERE id = ?')
+          .get(id) as { name: string; content: string } | undefined;
+        if (row) {
+          batchTexts.push(`${row.name} ${row.content}`);
+        } else {
+          batchTexts.push('');
+        }
+      }
+
+      const embeddings = await this.embeddingProvider.embedBatch(batchTexts);
+
+      const items = batchIds.map((id, idx) => ({
+        id,
+        embedding: embeddings[idx],
+      }));
+
+      this.vectorSearch.upsertBatch(db, items);
+      done += batchIds.length;
+
+      if (onProgress) {
+        onProgress(done, missingIds.length);
+      }
+    }
+
+    return done;
   }
 
   // ─── Confidence Decay ───────────────────────────────────────────
@@ -397,6 +644,10 @@ export class SemanticMemory {
         // Check hard expiry
         if (row.expires_at && new Date(row.expires_at).getTime() < now) {
           delEdges.run(row.id, row.id);
+          // Clean up embedding if vector search active
+          if (this._vectorAvailable && this.vectorSearch) {
+            this.vectorSearch.delete(db, row.id);
+          }
           del.run(row.id);
           expired++;
           continue;
@@ -692,6 +943,15 @@ export class SemanticMemory {
       // File may not exist yet  @silent-fallback-ok: stat before DB fully flushed
     }
 
+    // Vector search stats
+    let embeddingCount = 0;
+    if (this._vectorAvailable && this.vectorSearch) {
+      try {
+        embeddingCount = this.vectorSearch.count(db);
+      } catch { // @silent-fallback-ok: vec0 table may not be queryable, report 0 embeddings
+      }
+    }
+
     return {
       totalEntities: entityCount,
       totalEdges: edgeCount,
@@ -699,6 +959,8 @@ export class SemanticMemory {
       avgConfidence: Math.round(avgConfidence * 100) / 100, // Round to 2 decimal places
       staleCount,
       dbSizeBytes,
+      vectorSearchAvailable: this._vectorAvailable,
+      embeddingCount,
     };
   }
 

@@ -1417,6 +1417,10 @@ export interface SemanticMemoryStats {
   avgConfidence: number;
   staleCount: number;
   dbSizeBytes: number;
+  /** Whether vector search (sqlite-vec) is active */
+  vectorSearchAvailable?: boolean;
+  /** Number of entities with computed embeddings */
+  embeddingCount?: number;
 }
 
 /**
