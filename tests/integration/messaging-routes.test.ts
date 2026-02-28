@@ -25,6 +25,7 @@ import {
 import type { TempProject, MockSessionManager } from '../helpers/setup.js';
 import { generateAgentToken } from '../../src/messaging/AgentTokenManager.js';
 import { SessionSummarySentinel } from '../../src/messaging/SessionSummarySentinel.js';
+import { SpawnRequestManager } from '../../src/messaging/SpawnRequestManager.js';
 import type { InstarConfig } from '../../src/core/types.js';
 import { deleteAgentToken } from '../../src/messaging/AgentTokenManager.js';
 import crypto from 'node:crypto';
@@ -98,12 +99,20 @@ describe('Inter-Agent Messaging API routes', () => {
       captureOutput: () => null,
     });
 
+    const spawnManager = new SpawnRequestManager({
+      maxSessions: 5,
+      getActiveSessions: () => [],
+      spawnSession: async () => 'test-spawned-session',
+      cooldownMs: 1000,
+    });
+
     server = new AgentServer({
       config,
       sessionManager: mockSM as any,
       state: project.state,
       messageRouter,
       summarySentinel,
+      spawnManager,
     });
 
     await server.start();
@@ -1349,6 +1358,98 @@ describe('Inter-Agent Messaging API routes', () => {
         .get('/messages/route-score')
         .query({ subject: 'Test', body: 'Test' })
         .expect(401);
+    });
+  });
+
+  // ── Spawn Request Routes ──────────────────────────────────────
+
+  describe('POST /messages/spawn-request', () => {
+    it('approves a valid spawn request and returns 201', async () => {
+      const res = await request(app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          requester: { agent: 'agent-x', session: 'sess-1', machine: 'machine-1' },
+          target: { agent: 'agent-y', machine: 'machine-2' },
+          reason: 'Need deployment review',
+          priority: 'medium',
+        })
+        .expect(201);
+
+      expect(res.body.approved).toBe(true);
+      expect(res.body.sessionId).toBe('test-spawned-session');
+      expect(res.body.reason).toContain('Session spawned');
+    });
+
+    it('denies a repeat spawn within cooldown and returns 429', async () => {
+      // First request — approved (or cooldown from previous test)
+      // Use a unique agent to avoid cooldown from previous test
+      await request(app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          requester: { agent: 'cooldown-agent', session: 's1', machine: 'm1' },
+          target: { agent: 'target', machine: 'm2' },
+          reason: 'First request',
+          priority: 'medium',
+        })
+        .expect(201);
+
+      // Second request — should hit cooldown
+      const res = await request(app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          requester: { agent: 'cooldown-agent', session: 's1', machine: 'm1' },
+          target: { agent: 'target', machine: 'm2' },
+          reason: 'Second request',
+          priority: 'medium',
+        })
+        .expect(429);
+
+      expect(res.body.approved).toBe(false);
+      expect(res.body.reason).toContain('Cooldown');
+    });
+
+    it('rejects request missing required fields with 400', async () => {
+      const res = await request(app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          requester: { agent: 'a', session: 's', machine: 'm' },
+          // Missing: target, reason, priority
+        })
+        .expect(400);
+
+      expect(res.body.error).toContain('Missing required fields');
+    });
+
+    it('requires auth', async () => {
+      await request(app)
+        .post('/messages/spawn-request')
+        .send({
+          requester: { agent: 'a', session: 's', machine: 'm' },
+          target: { agent: 'b', machine: 'm2' },
+          reason: 'test',
+          priority: 'medium',
+        })
+        .expect(401);
+    });
+
+    it('returns spawn status info', async () => {
+      const res = await request(app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+        .send({
+          requester: { agent: 'status-check-agent', session: 's', machine: 'm' },
+          target: { agent: 'b', machine: 'm2' },
+          reason: 'test spawn',
+          priority: 'medium',
+        })
+        .expect(201);
+
+      expect(res.body.approved).toBe(true);
+      expect(res.body.sessionId).toBeDefined();
     });
   });
 });

@@ -72,6 +72,7 @@ import { MessageRouter } from '../messaging/MessageRouter.js';
 import { generateAgentToken } from '../messaging/AgentTokenManager.js';
 import { pickupDroppedMessages } from '../messaging/DropPickup.js';
 import { DeliveryRetryManager } from '../messaging/DeliveryRetryManager.js';
+import { SpawnRequestManager } from '../messaging/SpawnRequestManager.js';
 import type { PipelineMessage } from '../types/pipeline.js';
 import { toPipeline, toInjection, toLogEntry, formatHistoryLine } from '../types/pipeline.js';
 import type { Message, IntelligenceProvider } from '../core/types.js';
@@ -2081,9 +2082,34 @@ export async function startServer(options: StartOptions): Promise<void> {
     summarySentinel.start();
     messageRouter.setSummarySentinel(summarySentinel);
 
+    // On-demand session spawning for message delivery (Phase 5)
+    const spawnManager = new SpawnRequestManager({
+      maxSessions: config.sessions.maxSessions ?? 5,
+      getActiveSessions: () => sessionManager.listRunningSessions(),
+      spawnSession: async (prompt, opts) => {
+        const session = await sessionManager.spawnSession({
+          name: `msg-spawn-${Date.now()}`,
+          prompt,
+          model: opts?.model as import('../core/types.js').ModelTier | undefined,
+          maxDurationMinutes: opts?.maxDurationMinutes,
+          triggeredBy: 'spawn-request',
+        });
+        return session.id;
+      },
+      isMemoryPressureHigh: memoryMonitor
+        ? () => {
+            const state = memoryMonitor!.getState();
+            return state.state === 'critical' || state.state === 'elevated';
+          }
+        : undefined,
+      onEscalate: (request, reason) => {
+        notify('IMMEDIATE', 'messaging', `Spawn escalation: ${reason}\n  Requester: ${request.requester.agent}\n  Target: ${request.target.agent}`);
+      },
+    });
+
     console.log(pc.green(`  Inter-agent messaging: enabled (token: ${agentToken.slice(0, 8)}...)${dropSummary}`));
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.

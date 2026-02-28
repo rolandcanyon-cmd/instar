@@ -54,6 +54,7 @@ import type { SessionActivitySentinel } from '../monitoring/SessionActivitySenti
 import { ProcessIntegrity } from '../core/ProcessIntegrity.js';
 import type { MessageRouter } from '../messaging/MessageRouter.js';
 import type { SessionSummarySentinel } from '../messaging/SessionSummarySentinel.js';
+import type { SpawnRequestManager } from '../messaging/SpawnRequestManager.js';
 import type { MessageType, MessagePriority, MessageFilter } from '../messaging/types.js';
 import { verifyAgentToken } from '../messaging/AgentTokenManager.js';
 import type { WorkingMemoryAssembler } from '../memory/WorkingMemoryAssembler.js';
@@ -97,6 +98,7 @@ export interface RouteContext {
   activitySentinel: SessionActivitySentinel | null;
   messageRouter: MessageRouter | null;
   summarySentinel: SessionSummarySentinel | null;
+  spawnManager: SpawnRequestManager | null;
   workingMemory: WorkingMemoryAssembler | null;
   quotaManager: QuotaManager | null;
   startTime: Date;
@@ -4428,6 +4430,33 @@ export function createRoutes(ctx: RouteContext): Router {
       res.json(stats);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Stats failed' });
+    }
+  });
+
+  router.post('/messages/spawn-request', async (req, res) => {
+    if (!ctx.spawnManager) {
+      res.status(503).json({ error: 'Spawn requests not available' });
+      return;
+    }
+    try {
+      const { requester, target, reason, context, priority, suggestedModel, suggestedMaxDuration, pendingMessages } = req.body;
+      if (!requester || !target || !reason || !priority) {
+        res.status(400).json({ error: 'Missing required fields: requester, target, reason, priority' });
+        return;
+      }
+      const result = await ctx.spawnManager.evaluate({
+        requester, target, reason, context, priority,
+        suggestedModel, suggestedMaxDuration, pendingMessages,
+      });
+      if (!result.approved) {
+        ctx.spawnManager.handleDenial(
+          { requester, target, reason, context, priority, suggestedModel, suggestedMaxDuration, pendingMessages },
+          result,
+        );
+      }
+      res.status(result.approved ? 201 : 429).json(result);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Spawn request failed' });
     }
   });
 

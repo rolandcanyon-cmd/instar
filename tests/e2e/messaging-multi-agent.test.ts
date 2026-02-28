@@ -37,6 +37,7 @@ import {
 } from '../../src/messaging/AgentTokenManager.js';
 import { pickupDroppedMessages } from '../../src/messaging/DropPickup.js';
 import { SessionSummarySentinel } from '../../src/messaging/SessionSummarySentinel.js';
+import { SpawnRequestManager } from '../../src/messaging/SpawnRequestManager.js';
 import type { InstarConfig } from '../../src/core/types.js';
 import type { MessageEnvelope } from '../../src/messaging/types.js';
 import { registerAgent, unregisterAgent } from '../../src/core/AgentRegistry.js';
@@ -119,12 +120,20 @@ async function createTestAgent(name: string): Promise<TestAgent> {
     captureOutput: () => null,
   });
 
+  const spawnManager = new SpawnRequestManager({
+    maxSessions: 3,
+    getActiveSessions: () => [],
+    spawnSession: async (prompt) => `spawned-${name}-${Date.now()}`,
+    cooldownMs: 500, // Short cooldown for E2E tests
+  });
+
   const server = new AgentServer({
     config,
     sessionManager: mockSM as any,
     state,
     messageRouter: router,
     summarySentinel,
+    spawnManager,
   });
 
   await server.start();
@@ -1427,6 +1436,102 @@ describe('E2E: Multi-Agent Messaging (same machine)', () => {
       await request(agentA.app)
         .get('/messages/route-score')
         .query({ subject: 'Test', body: 'Test' })
+        .expect(401);
+    });
+  });
+
+  // ── On-Demand Session Spawning (Phase 5) ────────────────────
+
+  describe('spawn request lifecycle', () => {
+    it('agent A requests spawn on agent B server — approved', async () => {
+      const res = await request(agentB.app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${agentB.authToken}`)
+        .send({
+          requester: { agent: agentA.name, session: 'e2e-sess-a', machine: 'test-machine' },
+          target: { agent: agentB.name, machine: 'test-machine' },
+          reason: 'Cross-agent task coordination',
+          priority: 'medium',
+        })
+        .expect(201);
+
+      expect(res.body.approved).toBe(true);
+      expect(res.body.sessionId).toContain('spawned-');
+      expect(res.body.reason).toContain('Session spawned');
+    });
+
+    it('repeated spawn request from same agent is cooldown-blocked', async () => {
+      // First spawn — approved (use unique agent name to avoid prior cooldown)
+      const uniqueAgent = `spawn-test-${Date.now()}`;
+      await request(agentA.app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          requester: { agent: uniqueAgent, session: 's', machine: 'm' },
+          target: { agent: agentA.name, machine: 'test-machine' },
+          reason: 'First spawn',
+          priority: 'medium',
+        })
+        .expect(201);
+
+      // Immediate second — cooldown blocked
+      const res = await request(agentA.app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          requester: { agent: uniqueAgent, session: 's', machine: 'm' },
+          target: { agent: agentA.name, machine: 'test-machine' },
+          reason: 'Second spawn',
+          priority: 'medium',
+        })
+        .expect(429);
+
+      expect(res.body.approved).toBe(false);
+      expect(res.body.reason).toContain('Cooldown');
+      expect(res.body.retryAfterMs).toBeGreaterThan(0);
+    });
+
+    it('spawn request with context and pending messages includes them in spawn', async () => {
+      const res = await request(agentA.app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          requester: { agent: 'ctx-agent', session: 'ctx-s', machine: 'm' },
+          target: { agent: agentA.name, machine: 'test-machine' },
+          reason: 'Process urgent messages',
+          context: 'Deployment pipeline stalled',
+          priority: 'high',
+          pendingMessages: ['msg-1', 'msg-2', 'msg-3'],
+          suggestedModel: 'sonnet',
+          suggestedMaxDuration: 15,
+        })
+        .expect(201);
+
+      expect(res.body.approved).toBe(true);
+    });
+
+    it('spawn request without required fields returns 400', async () => {
+      const res = await request(agentA.app)
+        .post('/messages/spawn-request')
+        .set('Authorization', `Bearer ${agentA.authToken}`)
+        .send({
+          requester: { agent: 'a', session: 's', machine: 'm' },
+          // Missing target, reason, priority
+        })
+        .expect(400);
+
+      expect(res.body.error).toContain('Missing required fields');
+    });
+
+    it('spawn request requires auth', async () => {
+      await request(agentA.app)
+        .post('/messages/spawn-request')
+        .send({
+          requester: { agent: 'a', session: 's', machine: 'm' },
+          target: { agent: 'b', machine: 'm' },
+          reason: 'test',
+          priority: 'low',
+        })
         .expect(401);
     });
   });

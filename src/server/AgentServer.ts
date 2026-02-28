@@ -88,6 +88,7 @@ export class AgentServer {
     quotaManager?: import('../monitoring/QuotaManager.js').QuotaManager;
     messageRouter?: MessageRouter;
     summarySentinel?: import('../messaging/SessionSummarySentinel.js').SessionSummarySentinel;
+    spawnManager?: import('../messaging/SpawnRequestManager.js').SpawnRequestManager;
     coordinator?: MultiMachineCoordinator;
     localSigningKeyPem?: string;
   }) {
@@ -228,6 +229,7 @@ export class AgentServer {
       quotaManager: options.quotaManager ?? null,
       messageRouter: options.messageRouter ?? null,
       summarySentinel: options.summarySentinel ?? null,
+      spawnManager: options.spawnManager ?? null,
       startTime: this.startTime,
     });
     this.app.use(routes);
