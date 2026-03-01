@@ -292,9 +292,10 @@ export async function runSetup(): Promise<void> {
 
 // ── Phase Gate: Secret Management ──────────────────────────────────────
 // Structure > Willpower: secret management MUST be configured before the main
-// wizard launches. We use a Claude Code micro-session (/secret-setup skill)
-// for this — conversational, can explain options, can answer questions, can
-// install and configure Bitwarden end-to-end. But SCOPED to one job.
+// wizard launches. Handled entirely in TypeScript with native terminal prompts.
+// No LLM session for credential collection — passwords go through @inquirer/password,
+// not through a Claude Code conversation where AskUserQuestion adds confusing
+// multi-choice menus.
 //
 // The gate: setup.ts won't launch the main wizard until backend.json exists.
 
@@ -303,11 +304,9 @@ export async function runSetup(): Promise<void> {
  * Returns context string to pass to the wizard so it knows secrets are handled.
  *
  * If backend.json already exists → skip (returns existing choice as context).
- * If not → spawn a focused Claude Code session with the /secret-setup skill.
- *   Claude explains options, guides through Bitwarden install/login/unlock,
- *   configures the backend, and exits. Then we continue.
+ * If not → native terminal prompts for backend choice and Bitwarden credentials.
  */
-async function ensureSecretBackend(claudePath: string, instarRoot: string): Promise<string> {
+async function ensureSecretBackend(_claudePath: string, _instarRoot: string): Promise<string> {
   const backendFile = path.join(os.homedir(), '.instar', 'secrets', 'backend.json');
 
   // Check if already configured
@@ -331,64 +330,251 @@ async function ensureSecretBackend(claudePath: string, instarRoot: string): Prom
 
       return ` SECRET_BACKEND_CONFIGURED="${backend}". Secret management is already set up — skip Phase 2.5.${bwSessionContext}`;
     } catch {
-      // Corrupted file — fall through to micro-session
+      // Corrupted file — fall through to setup
     }
   }
 
-  // Not configured — launch Claude Code micro-session for secret setup
+  // Not configured — use native terminal prompts (no LLM session)
   console.log();
   console.log(pc.bold('  Secret Management'));
-  console.log(pc.dim('  Your agent needs a way to store secrets securely.'));
-  console.log(pc.dim('  Let me walk you through the options...'));
+  console.log();
+  console.log('  Your agent will need to store sensitive things — API tokens,');
+  console.log('  bot credentials, etc. How should they be stored?');
   console.log();
 
-  // Spawn a focused Claude Code session with the /secret-setup skill
-  const child = spawn(claudePath, [
-    '--dangerously-skip-permissions',
-    '/secret-setup',
-  ], {
-    cwd: instarRoot,
-    stdio: 'inherit',
+  // Dynamic import to avoid top-level dependency on inquirer
+  const { default: select } = await import('@inquirer/select');
+
+  const backend = await select<SecretBackend>({
+    message: 'Secret storage backend',
+    choices: [
+      {
+        name: 'Bitwarden (Recommended)',
+        value: 'bitwarden' as SecretBackend,
+        description: 'Free, open-source password manager. Secrets sync across machines and survive reinstalls.',
+      },
+      {
+        name: 'Local encrypted store',
+        value: 'local' as SecretBackend,
+        description: 'AES-256 encrypted on this machine. Good if you only use one computer.',
+      },
+      {
+        name: 'Manual (paste when prompted)',
+        value: 'manual' as SecretBackend,
+        description: "You'll paste tokens each time. Not recommended.",
+      },
+    ],
   });
 
-  await new Promise<void>((resolve) => {
-    child.on('close', () => resolve());
-    child.on('error', () => resolve());
-  });
+  let bwSessionContext = '';
 
-  // Verify the micro-session did its job — backend.json must exist now
-  if (fs.existsSync(backendFile)) {
+  if (backend === 'bitwarden') {
+    bwSessionContext = await setupBitwarden();
+  } else if (backend === 'local') {
+    console.log();
+    console.log(`  ${pc.green('✓')} Local encrypted store is ready.`);
+  } else {
+    console.log();
+    console.log(`  ${pc.dim("  Got it. You'll paste tokens when prompted during setup.")}`);
+  }
+
+  // Save backend preference
+  saveBackendPreference(backend);
+  console.log(`  ${pc.green('✓')} Secret management: ${formatBackendName(backend)}`);
+
+  return ` SECRET_BACKEND_CONFIGURED="${backend}". Secret management configured. Skip Phase 2.5.${bwSessionContext}`;
+}
+
+/**
+ * Handle Bitwarden setup: install CLI if needed, check status, unlock vault.
+ * All credential prompts use native terminal input — no LLM involvement.
+ * Returns context string about BW_SESSION availability.
+ */
+async function setupBitwarden(): Promise<string> {
+  // Step 1: Check if bw CLI is installed
+  let bwPath: string | null = null;
+  try {
+    bwPath = execFileSync('which', ['bw'], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+  } catch { /* not installed */ }
+
+  if (!bwPath) {
+    console.log();
+    console.log(pc.dim('  Installing Bitwarden CLI...'));
     try {
-      const pref = JSON.parse(fs.readFileSync(backendFile, 'utf-8'));
-      const backend = pref.backend as SecretBackend;
-      console.log();
-      console.log(`  ${pc.green('✓')} Secret management: ${formatBackendName(backend)}`);
-
-      let bwSessionContext = '';
-      if (backend === 'bitwarden') {
-        const sessionFile = path.join(os.homedir(), '.instar', 'secrets', '.bw-session');
-        if (fs.existsSync(sessionFile)) {
-          bwSessionContext = ` BW_SESSION is available — Bitwarden vault is unlocked.`;
-        }
-      }
-
-      return ` SECRET_BACKEND_CONFIGURED="${backend}". Secret management configured. Skip Phase 2.5.${bwSessionContext}`;
+      execFileSync('npm', ['install', '-g', '@bitwarden/cli'], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 60000,
+      });
+      bwPath = execFileSync('which', ['bw'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      console.log(`  ${pc.green('✓')} Bitwarden CLI installed`);
     } catch {
-      // Fall through
+      try {
+        execFileSync('brew', ['install', 'bitwarden-cli'], {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 60000,
+        });
+        bwPath = execFileSync('which', ['bw'], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }).trim();
+        console.log(`  ${pc.green('✓')} Bitwarden CLI installed`);
+      } catch {
+        console.log(pc.yellow('  Could not install Bitwarden CLI. Falling back to local encrypted store.'));
+        saveBackendPreference('local');
+        return '';
+      }
     }
   }
 
-  // Micro-session didn't configure a backend — fall back to local
-  console.log();
-  console.log(pc.yellow('  Secret setup was not completed. Using local encrypted store as default.'));
-  console.log(pc.dim('  You can change this later via: instar secrets backend bitwarden'));
-  console.log();
+  // Step 2: Check vault status
+  let vaultStatus: 'unlocked' | 'locked' | 'unauthenticated' = 'unauthenticated';
+  try {
+    const statusRaw = execFileSync(bwPath, ['status', '--raw'], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 10000,
+    }).trim();
+    const status = JSON.parse(statusRaw);
+    vaultStatus = status.status || 'unauthenticated';
+  } catch {
+    vaultStatus = 'unauthenticated';
+  }
 
-  const { SecretManager } = await import('../core/SecretManager.js');
-  const mgr = new SecretManager({ agentName: '_setup' });
-  mgr.configureBackend('local');
+  if (vaultStatus === 'unlocked') {
+    console.log(`  ${pc.green('✓')} Bitwarden vault is already unlocked`);
+    return ' BW_SESSION is available — Bitwarden vault is unlocked.';
+  }
 
-  return ` SECRET_BACKEND_CONFIGURED="local". Secret setup micro-session did not complete — defaulted to local encrypted store. Skip Phase 2.5.`;
+  // Step 3: Get credentials and unlock
+  const { default: password } = await import('@inquirer/password');
+  const { default: input } = await import('@inquirer/input');
+
+  let sessionKey = '';
+  let retries = 0;
+  const maxRetries = 3;
+
+  while (retries < maxRetries) {
+    try {
+      if (vaultStatus === 'unauthenticated') {
+        // Need email + password
+        console.log();
+        const email = await input({
+          message: 'Bitwarden email',
+        });
+
+        const masterPw = await password({
+          message: 'Bitwarden master password',
+          mask: '*',
+        });
+
+        console.log(pc.dim('  Logging in...'));
+        sessionKey = execFileSync(bwPath, ['login', email, masterPw, '--raw'], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30000,
+        }).trim();
+      } else {
+        // Locked — just need password
+        console.log();
+        const masterPw = await password({
+          message: 'Bitwarden master password',
+          mask: '*',
+        });
+
+        console.log(pc.dim('  Unlocking vault...'));
+        sessionKey = execFileSync(bwPath, ['unlock', masterPw, '--raw'], {
+          encoding: 'utf-8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30000,
+        }).trim();
+      }
+
+      // If we got here without throwing, we have a session key
+      if (sessionKey && !sessionKey.toLowerCase().includes('invalid') && !sessionKey.toLowerCase().includes('error')) {
+        break;
+      }
+      throw new Error('Invalid session key');
+    } catch (err) {
+      retries++;
+      if (retries >= maxRetries) {
+        console.log();
+        console.log(pc.yellow('  Could not unlock Bitwarden after 3 attempts.'));
+        console.log(pc.dim('  Falling back to local encrypted store.'));
+        saveBackendPreference('local');
+        return '';
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      // Check for 2FA requirement
+      if (msg.includes('Two-step') || msg.includes('two-step') || msg.includes('2fa') || msg.includes('Two Step')) {
+        console.log();
+        console.log(pc.yellow('  Two-factor authentication is required.'));
+        const code = await input({
+          message: '2FA code from your authenticator app',
+        });
+        const email2fa = await input({
+          message: 'Bitwarden email (confirm)',
+        });
+        const pw2fa = await password({
+          message: 'Bitwarden master password',
+          mask: '*',
+        });
+        try {
+          sessionKey = execFileSync(bwPath, ['login', email2fa, pw2fa, '--method', '0', '--code', code, '--raw'], {
+            encoding: 'utf-8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 30000,
+          }).trim();
+          if (sessionKey && !sessionKey.toLowerCase().includes('invalid')) {
+            break;
+          }
+        } catch {
+          // Fall through to retry loop
+        }
+      } else {
+        console.log(pc.yellow(`  That didn't work — incorrect password or network error. (${maxRetries - retries} attempts remaining)`));
+      }
+    }
+  }
+
+  // Step 4: Save session and sync
+  if (sessionKey) {
+    try {
+      execFileSync(bwPath, ['sync', '--session', sessionKey], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 15000,
+      });
+    } catch { /* non-fatal */ }
+
+    const secretsDir = path.join(os.homedir(), '.instar', 'secrets');
+    fs.mkdirSync(secretsDir, { recursive: true });
+    const sessionFile = path.join(secretsDir, '.bw-session');
+    fs.writeFileSync(sessionFile, sessionKey);
+    fs.chmodSync(sessionFile, 0o600);
+
+    console.log(`  ${pc.green('✓')} Bitwarden is unlocked and ready`);
+    return ' BW_SESSION is available — Bitwarden vault is unlocked.';
+  }
+
+  return '';
+}
+
+/**
+ * Save the chosen backend to ~/.instar/secrets/backend.json
+ */
+function saveBackendPreference(backend: SecretBackend): void {
+  const secretsDir = path.join(os.homedir(), '.instar', 'secrets');
+  fs.mkdirSync(secretsDir, { recursive: true });
+  const backendFile = path.join(secretsDir, 'backend.json');
+  fs.writeFileSync(backendFile, JSON.stringify({
+    backend,
+    configuredAt: new Date().toISOString(),
+  }));
 }
 
 function formatBackendName(backend: SecretBackend): string {
