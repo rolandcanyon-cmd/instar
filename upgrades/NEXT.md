@@ -1,6 +1,6 @@
 # Upgrade Guide — vNEXT
 
-<!-- bump: patch -->
+<!-- bump: minor -->
 <!-- Valid values: patch, minor, major -->
 <!-- patch = bug fixes, refactors, test additions, doc updates -->
 <!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
@@ -8,19 +8,46 @@
 
 ## What Changed
 
-<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
-<!-- Write this for the AGENT — they need to understand the system deeply. -->
+### Temporal Coherence Checker
+
+New module that detects when draft content reflects outdated thinking — perspectives the agent has since evolved past. Born from a real incident: a draft written weeks earlier used "death" framing for a concept the agent had since reframed as "choice," creating public incoherence.
+
+**`TemporalCoherenceChecker`** (`src/core/TemporalCoherenceChecker.ts`):
+- Compares draft content against agent identity documents (AGENT.md, reflections), published content timeline (PlatformActivityRegistry), and canonical state quick facts (CanonicalState)
+- Uses `IntelligenceProvider` for LLM-based evaluation with configurable severity capping
+- Returns structured results: `COHERENT`, `EVOLVED`, or `OUTDATED` assessment with specific issues
+- Gracefully degrades to "no issues" when no IntelligenceProvider is configured
+
+**Integration points:**
+- Standalone: `checker.check(draftContent)` → `TemporalCoherenceResult`
+- With PlatformActivityRegistry: Auto-loads published content timeline for comparison
+- With CanonicalState: Auto-loads agent's current positions on key topics
+- With CoherenceGate: Can be combined for layered pre-publish safety
+
+**Configuration:**
+- `stateDocuments`: Custom paths to identity documents (default: AGENT.md, .instar/reflections.md)
+- `maxSeverity`: Cap severity at WARN to prevent temporal checks from blocking (recommended)
+- `maxCharsPerDocument`: Control prompt budget (default: 2000)
+- `timelineWindowHours`: How far back to look in published content (default: 720 = 30 days)
+
+### Convergence Check — 7th Criterion
+
+The heuristic convergence check (`convergence-check.sh`) now includes a 7th criterion: **temporal_staleness**. Catches language patterns suggesting stale drafts ("I used to think", "back when I first", "my early understanding", "before I learned", etc.). Zero-cost pre-filter — no LLM calls.
+
+Updated both the template file and the PostUpdateMigrator inline fallback.
 
 ## What to Tell Your User
 
-<!-- Write talking points the agent should relay to their user. -->
-<!-- This should be warm, conversational, user-facing — not a changelog. -->
-<!-- Focus on what THEY can now do, not internal plumbing. -->
+- **"Your agent won't accidentally post outdated thinking"**: If your agent's understanding has evolved since a draft was written, the temporal coherence checker catches the mismatch before publishing. Think of it as a "is this still what I think?" check.
 
-- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
+- **"The convergence check now catches 7 anti-patterns"**: The pre-messaging quality gate now includes temporal staleness detection alongside capability claims, commitment overreach, settling, experiential fabrication, sycophancy, and URL provenance.
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| [Capability] | [Endpoint, command, or "automatic"] |
+| Temporal coherence check (LLM) | `new TemporalCoherenceChecker(config)` then `checker.check(draft)` |
+| Temporal staleness heuristic | Automatic — included in convergence-check.sh criterion #7 |
+| Severity capping | Set `maxSeverity: 'WARN'` in config to prevent temporal blocking |
+| Published content timeline | Pass `activityRegistry` to auto-load comparison timeline |
+| Canonical state integration | Pass `canonicalState` to include quick facts in evaluation |
