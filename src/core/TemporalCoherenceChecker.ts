@@ -229,7 +229,7 @@ export class TemporalCoherenceChecker {
             sections.push(`[${basename}]:\n${truncated}`);
           }
         }
-      } catch {
+      } catch { // @silent-fallback-ok — skipping unreadable files is graceful degradation, checker works with partial data
         // Skip unreadable files — not a fatal error
       }
     }
@@ -245,7 +245,7 @@ export class TemporalCoherenceChecker {
             .join('\n');
           sections.push(`[Quick Facts]:\n${factsText}`);
         }
-      } catch {
+      } catch { // @silent-fallback-ok — canonical state is optional enrichment, checker works without it
         // Skip if canonical state is broken
       }
     }
@@ -283,7 +283,7 @@ export class TemporalCoherenceChecker {
       });
 
       return lines.join('\n');
-    } catch {
+    } catch { // @silent-fallback-ok — timeline is optional enrichment, null triggers heuristic-only path
       return null;
     }
   }
