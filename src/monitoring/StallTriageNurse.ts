@@ -48,7 +48,7 @@ const DEFAULT_POST_INTERVENTION_DELAY_MS = 3000;
 const DEFAULT_CONFIG: Required<StallTriageConfig> = {
   enabled: true,
   apiKey: '',
-  model: 'claude-sonnet-4-5-20250514',
+  model: process.env.STALL_TRIAGE_MODEL || 'claude-sonnet-4-6',
   maxTokens: 1024,
   apiTimeoutMs: 15000,
   cooldownMs: 180000,
@@ -483,11 +483,14 @@ export class StallTriageNurse extends EventEmitter {
       const processTreeDiagnosis = await this.processTreeFallback(context);
       if (processTreeDiagnosis) return processTreeDiagnosis;
 
-      // Layer 4: Terminal output heuristic fallback (last resort before nudge)
+      // Layer 4: Terminal output heuristic fallback — start with interrupt (Escape)
+      // instead of nudge. A newline does nothing to a session that's busy working.
+      // Escape interrupts the current tool call, giving the session a chance to
+      // notice the pending user message.
       const output = context.tmuxOutput || '';
-      let action: TreatmentAction = 'nudge';
+      let action: TreatmentAction = 'interrupt';
       let summary = 'LLM diagnosis unavailable, using heuristic';
-      let userMessage = `Session "${context.sessionName}" isn't responding. Trying to nudge it...`;
+      let userMessage = `Session "${context.sessionName}" isn't responding. Trying to interrupt it...`;
 
       if (context.sessionStatus === 'missing' || context.sessionStatus === 'dead') {
         action = 'restart';
@@ -707,29 +710,44 @@ export class StallTriageNurse extends EventEmitter {
       return this.deps.isSessionAlive(context.sessionName);
     }
 
-    // For nudge/interrupt/unstick: check if the session is actively working.
-    // Just checking "did tmux output change?" is too weak — sending Enter produces
-    // output (a new prompt line) without actually recovering the session.
-    // Instead, check for signs of active tool use or message processing.
+    // For nudge/interrupt/unstick: check if the session actually responded to the
+    // user, not just if output changed. An actively working session always produces
+    // output changes, which caused false positives where autonomous work was mistaken
+    // for recovery (the session was doing Phase 4 work, not addressing the user's message).
     const newOutput = this.deps.captureSessionOutput(context.sessionName, 50) || '';
 
-    // If output is identical to before, definitely not recovered
-    if (newOutput === context.tmuxOutput) return false;
+    // Check 1: Did the session send a Telegram reply?
+    // Look for "Sent X chars" in the new output, which indicates telegram-reply.py ran
+    const sentCharsPattern = /Sent \d+ chars to topic/;
+    if (sentCharsPattern.test(newOutput)) return true;
 
-    // Look for signs of actual work happening (tool calls, telegram-reply, processing)
-    const workIndicators = ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'telegram-reply', 'cat <<', 'thinking', 'tool_use'];
-    const hasWorkActivity = workIndicators.some(indicator => {
-      // Check if this indicator is NEW (not in the old output)
+    // Check 2: Is the session now processing the user's message?
+    // Look for NEW tool calls that reference the pending message content
+    if (context.pendingMessage) {
+      const messageKeywords = context.pendingMessage.split(/\s+/).filter(w => w.length > 3).slice(0, 3);
+      const hasMessageReference = messageKeywords.some(kw =>
+        newOutput.includes(kw) && !(context.tmuxOutput || '').includes(kw)
+      );
+      if (hasMessageReference) return true;
+    }
+
+    // Check 3: Look for NEW tool call activity (not pre-existing autonomous work)
+    const workIndicators = ['Read(', 'Write(', 'Edit(', 'Bash(', 'Grep(', 'Glob(', 'telegram-reply', 'tool_use'];
+    const hasNewWork = workIndicators.some(indicator => {
       const oldCount = (context.tmuxOutput || '').split(indicator).length;
       const newCount = newOutput.split(indicator).length;
       return newCount > oldCount;
     });
+    if (hasNewWork) return true;
 
-    if (hasWorkActivity) return true;
+    // If output is identical, definitely not recovered
+    if (newOutput === context.tmuxOutput) return false;
 
-    // If no clear work indicators, check if output grew significantly (not just a newline)
-    const outputGrowth = newOutput.length - (context.tmuxOutput || '').length;
-    return outputGrowth > 100;  // Meaningful output, not just a prompt echo
+    // Output changed but no evidence of user-message handling.
+    // This is the false-positive case: session is doing autonomous work
+    // and the output naturally changes. Don't count this as recovery.
+    console.log(`[StallTriageNurse] Output changed after ${action} but no Telegram reply or tool activity detected — not counting as recovered`);
+    return false;
   }
 
   // ─── State Persistence ────────────────────────────────────

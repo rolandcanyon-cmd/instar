@@ -297,7 +297,7 @@ describe('StallTriageNurse', () => {
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
       expect(result.diagnosis).not.toBeNull();
-      expect(result.diagnosis!.action).toBe('nudge');
+      expect(result.diagnosis!.action).toBe('interrupt');
       expect(result.diagnosis!.confidence).toBe('low');
       expect(result.diagnosis!.summary).toContain('LLM diagnosis unavailable');
     });
@@ -819,15 +819,18 @@ describe('StallTriageNurse', () => {
         intelligence: mockIntelligence as any,
       });
 
-      // nudge fails, interrupt fails, unstick succeeds (with work indicators)
-      // Verification now requires work indicators or 100+ char growth.
-      // captureSessionOutput calls: gatherContext(1), verifyNudge(2), re-captureBeforeInterrupt(3),
-      //   verifyInterrupt(4), re-captureBeforeUnstick(5), verifyUnstick(6)
+      // nudge fails, interrupt fails, unstick succeeds (with new tool call evidence)
+      // Verification now requires: Sent N chars to topic, pending message keywords in
+      // new output, or NEW tool call activity (Read(, Write(, Bash(, etc.).
+      // captureSessionOutput calls:
+      //   gatherContext(1), verifyNudge(2),
+      //   re-capture before interrupt(3), verifyInterrupt(4),
+      //   re-capture before unstick(5), verifyUnstick(6)
       let verifyCallCount = 0;
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockImplementation(() => {
         verifyCallCount++;
-        if (verifyCallCount <= 5) return 'some output';     // gatherContext + verify nudge/interrupt + re-captures: same
-        return 'some output\nWrite tool completed... Bash executed successfully with new content appended here';  // verify unstick: has work indicators
+        if (verifyCallCount <= 5) return 'some output';     // gatherContext + verify + re-captures: same = fail
+        return 'some output\nSent 142 chars to topic';  // verify unstick: Telegram reply evidence
       });
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
@@ -921,8 +924,8 @@ describe('StallTriageNurse', () => {
 
       expect(result).toBeDefined();
       expect(result.diagnosis).not.toBeNull();
-      // The fallback nudge diagnosis
-      expect(result.diagnosis!.action).toBe('nudge');
+      // The fallback interrupt diagnosis (Layer 4 default changed from nudge to interrupt)
+      expect(result.diagnosis!.action).toBe('interrupt');
     });
 
     it('handles captureSessionOutput returning null', async () => {

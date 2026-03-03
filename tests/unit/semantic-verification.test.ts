@@ -189,7 +189,7 @@ describe('Semantic Verification', () => {
   describe('work indicator detection (recovered)', () => {
     it('accepts output with new Read tool activity', async () => {
       const before = 'session output';
-      const after = 'session output\nRead tool output: file contents here';
+      const after = 'session output\nRead(file.ts) output: file contents here';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
@@ -198,7 +198,7 @@ describe('Semantic Verification', () => {
 
     it('accepts output with new Write tool activity', async () => {
       const before = 'session output';
-      const after = 'session output\nWrite tool completed: updated file.ts';
+      const after = 'session output\nWrite(file.ts) completed: updated file.ts';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
@@ -207,7 +207,7 @@ describe('Semantic Verification', () => {
 
     it('accepts output with new Edit tool activity', async () => {
       const before = 'session output';
-      const after = 'session output\nEdit applied to src/index.ts';
+      const after = 'session output\nEdit(src/index.ts) applied changes';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('interrupt', createContext(before));
@@ -216,7 +216,7 @@ describe('Semantic Verification', () => {
 
     it('accepts output with new Bash tool activity', async () => {
       const before = 'session output';
-      const after = 'session output\nBash: running npm test';
+      const after = 'session output\nBash(npm test) running tests';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('unstick', createContext(before));
@@ -225,7 +225,7 @@ describe('Semantic Verification', () => {
 
     it('accepts output with new Grep tool activity', async () => {
       const before = 'session output';
-      const after = 'session output\nGrep found 5 matches';
+      const after = 'session output\nGrep(pattern) found 5 matches';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
@@ -234,7 +234,7 @@ describe('Semantic Verification', () => {
 
     it('accepts output with new Glob tool activity', async () => {
       const before = 'session output';
-      const after = 'session output\nGlob matched 12 files';
+      const after = 'session output\nGlob(**/*.ts) matched 12 files';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
@@ -250,9 +250,9 @@ describe('Semantic Verification', () => {
       expect(result).toBe(true);
     });
 
-    it('accepts output with thinking indicator', async () => {
+    it('accepts output with Sent chars to topic (Telegram reply evidence)', async () => {
       const before = 'session output';
-      const after = 'session output\nthinking about the problem...';
+      const after = 'session output\nSent 142 chars to topic 42';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
@@ -260,27 +260,31 @@ describe('Semantic Verification', () => {
     });
 
     it('does NOT count pre-existing work indicators as recovery', async () => {
-      // The "before" already had Read in it — same count doesn't indicate recovery
-      const before = 'Read tool output: old stuff';
-      const after = 'Read tool output: old stuff\nprompt echo';
+      // The "before" already had Read( in it — same count doesn't indicate recovery
+      const before = 'Read(file.ts) output: old stuff';
+      const after = 'Read(file.ts) output: old stuff\nprompt echo';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
-      // Same number of "Read" occurrences + growth < 100 = NOT recovered
+      // Same number of "Read(" occurrences, no telegram reply = NOT recovered
       expect(result).toBe(false);
     });
   });
 
-  describe('significant output growth (recovered)', () => {
-    it('accepts output that grew by 100+ chars without work indicators', async () => {
+  describe('output growth without work indicators (NOT recovered)', () => {
+    // The new verification logic requires explicit evidence of user-message handling:
+    // Telegram reply, pending message keywords, or new tool calls.
+    // Raw output growth alone is no longer sufficient — it was causing false positives
+    // where autonomous work was mistaken for recovery.
+
+    it('rejects output that grew by 100+ chars without work indicators', async () => {
       const before = 'session output';
-      // Add 120+ chars of non-work-indicator output
       const padding = 'a'.repeat(120);
       const after = `session output\n${padding}`;
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
-      expect(result).toBe(true);
+      expect(result).toBe(false);
     });
 
     it('rejects output that grew by only 50 chars without work indicators', async () => {
@@ -293,18 +297,17 @@ describe('Semantic Verification', () => {
       expect(result).toBe(false);
     });
 
-    it('rejects output that grew by exactly 100 chars (boundary)', async () => {
+    it('rejects output that grew by exactly 100 chars', async () => {
       const before = 'session output';
       const padding = 'x'.repeat(100);
       const after = `session output\n${padding}`;
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(before));
-      // Growth is exactly 101 (100 chars + 1 newline) > 100, so it passes
-      expect(result).toBe(true);
+      expect(result).toBe(false);
     });
 
-    it('rejects output that grew by 99 chars (just under boundary)', async () => {
+    it('rejects output that grew by 99 chars', async () => {
       const before = 'session output';
       const padding = 'x'.repeat(99);
       const after = `session output${padding}`;
@@ -326,7 +329,7 @@ describe('Semantic Verification', () => {
     });
 
     it('handles empty before output with work indicators', async () => {
-      const after = 'Read tool output: scanning files';
+      const after = 'Read(files.ts) output: scanning files';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const result = await nurse.verifyAction('nudge', createContext(''));
@@ -343,7 +346,7 @@ describe('Semantic Verification', () => {
 
     it('verifies each action type uses the same logic for nudge/interrupt/unstick', async () => {
       const before = 'session output';
-      const after = 'session output\nRead tool completed: new file content here';
+      const after = 'session output\nRead(file.ts) completed: new file content here';
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(after);
 
       const nudgeResult = await nurse.verifyAction('nudge', createContext(before));

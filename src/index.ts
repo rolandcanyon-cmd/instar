@@ -278,7 +278,8 @@ export { SleepWakeDetector } from './core/SleepWakeDetector.js';
 export { TelegramAdapter, TOPIC_STYLE, selectTopicEmoji } from './messaging/TelegramAdapter.js';
 export type { TelegramConfig } from './messaging/TelegramAdapter.js';
 export { classifyContent, validateTopicContent, getTopicPurpose } from './messaging/TopicContentValidator.js';
-export type { ContentValidationConfig, CategoryKeywords, ClassificationResult, ValidationResult } from './messaging/TopicContentValidator.js';
+export type { ContentValidationConfig, CategoryKeywords, ValidationResult } from './messaging/TopicContentValidator.js';
+export type { ClassificationResult as ContentClassificationResult } from './messaging/TopicContentValidator.js';
 export { NotificationBatcher } from './messaging/NotificationBatcher.js';
 export type { NotificationTier, BatchedNotification, BatcherConfig, BatcherStats } from './messaging/NotificationBatcher.js';
 

@@ -118,12 +118,25 @@ describe('AgentRegistry', () => {
       expect(agent!.type).toBe('standalone');
     });
 
-    it('detects port conflicts', async () => {
+    it('detects port conflicts with running agents', async () => {
       const { registerAgent } = await getRegistry();
-      registerAgent('/tmp/project-a', 'project-a', 4040, 'project-bound', 99999);
+      // Use process.pid (alive) so entry stays 'running' through cleanStaleEntries
+      registerAgent('/tmp/project-a', 'project-a', 4040, 'project-bound', process.pid);
       expect(() => {
         registerAgent('/tmp/project-b', 'project-b', 4040);
       }).toThrow(/Port 4040 is already in use/);
+    });
+
+    it('stale entries do not block port reuse', async () => {
+      const { registerAgent, getAgent } = await getRegistry();
+      // Register with a dead PID — will be marked stale on next registerAgent call
+      registerAgent('/tmp/project-a', 'project-a', 4040, 'project-bound', 999999);
+      // Another agent on the same port should succeed because project-a is stale
+      registerAgent('/tmp/project-b', 'project-b', 4040);
+      const agent = getAgent('/tmp/project-b');
+      expect(agent).not.toBeNull();
+      expect(agent!.port).toBe(4040);
+      expect(agent!.status).toBe('running');
     });
 
     it('same path can reuse same port', async () => {
@@ -138,7 +151,7 @@ describe('AgentRegistry', () => {
   describe('unregister', () => {
     it('removes agent by path', async () => {
       const { registerAgent, unregisterAgent, getAgent } = await getRegistry();
-      registerAgent('/tmp/my-project', 'my-project', 4040, 'project-bound', 99999);
+      registerAgent('/tmp/my-project', 'my-project', 4040, 'project-bound', process.pid);
       unregisterAgent('/tmp/my-project');
       const agent = getAgent('/tmp/my-project');
       expect(agent).toBeNull();
@@ -152,7 +165,7 @@ describe('AgentRegistry', () => {
     });
   });
 
-  describe('stale entry detection', () => {
+  describe('stale entry detection and pruning', () => {
     it('marks dead PID entries as stale', async () => {
       const { loadRegistry, saveRegistry, cleanStaleEntries } = await getRegistry();
       const reg = {
@@ -160,17 +173,91 @@ describe('AgentRegistry', () => {
         entries: [{
           name: 'dead-agent',
           type: 'project-bound' as const,
-          path: '/tmp/dead-project',
+          path: '/home/user/real-project', // Non-ephemeral path
           port: 4040,
-          pid: 999999, // Very unlikely to be a real PID
+          pid: 999999,
           status: 'running' as const,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          lastHeartbeat: '2026-01-01T00:00:00.000Z',
+          createdAt: new Date().toISOString(),
+          lastHeartbeat: new Date().toISOString(), // Recent — won't be expired
         }],
       };
       saveRegistry(reg);
       const cleaned = cleanStaleEntries(loadRegistry());
-      // Entry should still exist but be marked stale
+      // Entry marked stale but kept (recent heartbeat, non-ephemeral path)
+      expect(cleaned.entries).toHaveLength(1);
+      expect(cleaned.entries[0].status).toBe('stale');
+    });
+
+    it('prunes stale entries from ephemeral paths', async () => {
+      const { loadRegistry, saveRegistry, cleanStaleEntries } = await getRegistry();
+      const reg = {
+        version: 1 as const,
+        entries: [{
+          name: 'test-agent',
+          type: 'project-bound' as const,
+          path: '/tmp/instar-test-abc123',
+          port: 4040,
+          pid: 999999,
+          status: 'running' as const,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          lastHeartbeat: new Date().toISOString(),
+        }, {
+          name: 'var-folders-agent',
+          type: 'project-bound' as const,
+          path: '/var/folders/xx/yyyy/T/instar-test',
+          port: 4041,
+          pid: 999998,
+          status: 'running' as const,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          lastHeartbeat: new Date().toISOString(),
+        }],
+      };
+      saveRegistry(reg);
+      const cleaned = cleanStaleEntries(loadRegistry());
+      // Both ephemeral entries should be removed entirely
+      expect(cleaned.entries).toHaveLength(0);
+    });
+
+    it('prunes stale entries older than 1 hour', async () => {
+      const { loadRegistry, saveRegistry, cleanStaleEntries } = await getRegistry();
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const reg = {
+        version: 1 as const,
+        entries: [{
+          name: 'expired-agent',
+          type: 'project-bound' as const,
+          path: '/home/user/old-project', // Non-ephemeral
+          port: 4040,
+          pid: 999999,
+          status: 'running' as const,
+          createdAt: twoHoursAgo,
+          lastHeartbeat: twoHoursAgo, // 2 hours stale
+        }],
+      };
+      saveRegistry(reg);
+      const cleaned = cleanStaleEntries(loadRegistry());
+      // Dead PID + stale for >1 hour = removed
+      expect(cleaned.entries).toHaveLength(0);
+    });
+
+    it('keeps recently-stale entries from non-ephemeral paths', async () => {
+      const { loadRegistry, saveRegistry, cleanStaleEntries } = await getRegistry();
+      const reg = {
+        version: 1 as const,
+        entries: [{
+          name: 'recently-dead',
+          type: 'project-bound' as const,
+          path: '/home/user/my-project', // Non-ephemeral
+          port: 4040,
+          pid: 999999,
+          status: 'running' as const,
+          createdAt: new Date().toISOString(),
+          lastHeartbeat: new Date().toISOString(), // Just now
+        }],
+      };
+      saveRegistry(reg);
+      const cleaned = cleanStaleEntries(loadRegistry());
+      // Kept — stale but recent heartbeat, non-ephemeral path
       expect(cleaned.entries).toHaveLength(1);
       expect(cleaned.entries[0].status).toBe('stale');
     });
@@ -183,26 +270,34 @@ describe('AgentRegistry', () => {
       expect(port).toBe(5000);
     });
 
-    it('skips used ports', async () => {
+    it('skips ports used by running agents', async () => {
       const { registerAgent, allocatePort } = await getRegistry();
-      registerAgent('/tmp/project-a', 'a', 5000, 'project-bound', 99999);
-      registerAgent('/tmp/project-b', 'b', 5001, 'project-bound', 99999);
+      registerAgent('/tmp/project-a', 'a', 5000, 'project-bound', process.pid);
+      registerAgent('/tmp/project-b', 'b', 5001, 'project-bound', process.pid);
       const port = allocatePort('/tmp/project-c', 5000, 5010);
       expect(port).toBe(5002);
     });
 
+    it('reclaims ports from stale agents', async () => {
+      const { registerAgent, allocatePort } = await getRegistry();
+      // Dead PID — will be marked stale, port should be reclaimable
+      registerAgent('/tmp/project-a', 'a', 5000, 'project-bound', 999999);
+      const port = allocatePort('/tmp/project-c', 5000, 5010);
+      expect(port).toBe(5000); // Reclaimed from stale entry
+    });
+
     it('returns existing port for same agent', async () => {
       const { registerAgent, allocatePort } = await getRegistry();
-      registerAgent('/tmp/my-project', 'my-project', 5005, 'project-bound', 99999);
+      registerAgent('/tmp/my-project', 'my-project', 5005, 'project-bound', process.pid);
       const port = allocatePort('/tmp/my-project', 5000, 5010);
       expect(port).toBe(5005);
     });
 
-    it('throws when range exhausted', async () => {
+    it('throws when range exhausted by running agents', async () => {
       const { registerAgent, allocatePort } = await getRegistry();
-      registerAgent('/tmp/p0', 'p0', 5000, 'project-bound', 99999);
-      registerAgent('/tmp/p1', 'p1', 5001, 'project-bound', 99999);
-      registerAgent('/tmp/p2', 'p2', 5002, 'project-bound', 99999);
+      registerAgent('/tmp/p0', 'p0', 5000, 'project-bound', process.pid);
+      registerAgent('/tmp/p1', 'p1', 5001, 'project-bound', process.pid);
+      registerAgent('/tmp/p2', 'p2', 5002, 'project-bound', process.pid);
       expect(() => allocatePort('/tmp/new', 5000, 5002)).toThrow(/No free ports available/);
     });
   });
@@ -231,7 +326,7 @@ describe('AgentRegistry', () => {
   describe('heartbeat', () => {
     it('updates timestamp', async () => {
       const { registerAgent, heartbeat, getAgent } = await getRegistry();
-      registerAgent('/tmp/my-project', 'my-project', 4040, 'project-bound', 99999);
+      registerAgent('/tmp/my-project', 'my-project', 4040, 'project-bound', process.pid);
       const before = getAgent('/tmp/my-project')!.lastHeartbeat;
 
       // Small delay to ensure timestamp differs
@@ -246,16 +341,16 @@ describe('AgentRegistry', () => {
   describe('listing with filters', () => {
     it('lists all agents', async () => {
       const { registerAgent, listAgents } = await getRegistry();
-      registerAgent('/tmp/p1', 'agent-1', 4040, 'project-bound', 99999);
-      registerAgent('/tmp/p2', 'agent-2', 4041, 'standalone', 99999);
+      registerAgent('/tmp/p1', 'agent-1', 4040, 'project-bound', process.pid);
+      registerAgent('/tmp/p2', 'agent-2', 4041, 'standalone', process.pid);
       const all = listAgents();
       expect(all).toHaveLength(2);
     });
 
     it('filters by type', async () => {
       const { registerAgent, listAgents } = await getRegistry();
-      registerAgent('/tmp/p1', 'agent-1', 4040, 'project-bound', 99999);
-      registerAgent('/tmp/p2', 'agent-2', 4041, 'standalone', 99999);
+      registerAgent('/tmp/p1', 'agent-1', 4040, 'project-bound', process.pid);
+      registerAgent('/tmp/p2', 'agent-2', 4041, 'standalone', process.pid);
       const standalone = listAgents({ type: 'standalone' });
       expect(standalone).toHaveLength(1);
       expect(standalone[0].name).toBe('agent-2');
@@ -263,8 +358,8 @@ describe('AgentRegistry', () => {
 
     it('filters by status', async () => {
       const { registerAgent, updateStatus, listAgents } = await getRegistry();
-      registerAgent('/tmp/p1', 'agent-1', 4040, 'project-bound', 99999);
-      registerAgent('/tmp/p2', 'agent-2', 4041, 'project-bound', 99999);
+      registerAgent('/tmp/p1', 'agent-1', 4040, 'project-bound', process.pid);
+      registerAgent('/tmp/p2', 'agent-2', 4041, 'project-bound', process.pid);
       updateStatus('/tmp/p2', 'stopped');
       const stopped = listAgents({ status: 'stopped' });
       expect(stopped).toHaveLength(1);
@@ -324,8 +419,8 @@ describe('AgentRegistry', () => {
 
     it('listInstances returns all agents', async () => {
       const { registerAgent, listInstances } = await getRegistry();
-      registerAgent('/tmp/p1', 'a1', 4040, 'project-bound', 99999);
-      registerAgent('/tmp/p2', 'a2', 4041, 'standalone', 99999);
+      registerAgent('/tmp/p1', 'a1', 4040, 'project-bound', process.pid);
+      registerAgent('/tmp/p2', 'a2', 4041, 'standalone', process.pid);
       const instances = listInstances();
       expect(instances).toHaveLength(2);
     });

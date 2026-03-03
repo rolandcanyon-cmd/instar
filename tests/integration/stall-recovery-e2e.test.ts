@@ -300,8 +300,8 @@ describe('Stall Recovery E2E', () => {
       (env.deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockImplementation((name: string) => {
         captureCallCount++;
         if (captureCallCount <= 1) return 'Waiting for input...'; // gatherContext
-        // After nudge: show new work activity with sufficient growth
-        return 'Waiting for input...\nRead tool output: scanning files...\nWrite tool completed: updated config.json with new settings applied successfully';
+        // After nudge: show new tool call activity (Read( and Write( patterns)
+        return 'Waiting for input...\nRead(config.json) output: scanning files...\nWrite(config.json) completed: updated settings';
       });
 
       const result = await nurse.triage(3, 'idle-session', 'hello?', Date.now() - 300000);
@@ -344,8 +344,8 @@ describe('Stall Recovery E2E', () => {
       (env.deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockImplementation(() => {
         captureCallCount++;
         if (captureCallCount <= 5) return 'Hanging on network call...'; // same = verification fails
-        // After unstick: show work indicators
-        return 'Hanging on network call...\n^C\nBash tool executed: npm test passed successfully with all checks green';
+        // After unstick: show new tool call activity (Bash( pattern)
+        return 'Hanging on network call...\n^C\nBash(npm test) passed with all checks green';
       });
 
       const result = await nurse.triage(4, 'stuck-session', 'hello?', Date.now() - 600000);

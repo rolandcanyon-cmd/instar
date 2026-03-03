@@ -229,16 +229,50 @@ function migrateFromPortRegistry(): AgentRegistry {
 }
 
 /**
+ * Check if a path is in a temporary/ephemeral directory.
+ */
+function isEphemeralPath(p: string): boolean {
+  const normalized = path.resolve(p);
+  const tmpDir = os.tmpdir();
+  return normalized.startsWith(tmpDir) ||
+    normalized.startsWith('/tmp/') ||
+    normalized.startsWith('/var/folders/') ||
+    normalized.startsWith('/private/tmp/') ||
+    normalized.startsWith('/private/var/folders/');
+}
+
+const STALE_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+
+/**
  * Remove stale entries where the process is no longer running.
+ * Prunes entries that are stale AND either from ephemeral paths or expired (>1 hour).
  * Returns the cleaned registry (mutates in-place for efficiency).
  */
 export function cleanStaleEntries(registry: AgentRegistry): AgentRegistry {
+  const now = Date.now();
   registry.entries = registry.entries.filter(entry => {
+    // Mark running entries with dead processes as stale
     if (entry.status === 'running' && !isProcessAlive(entry.pid)) {
       console.log(`[AgentRegistry] Marking stale: ${entry.name} (port ${entry.port}, pid ${entry.pid} dead)`);
       entry.status = 'stale';
     }
-    return true; // Keep all entries — just update status
+
+    // Remove stale entries from ephemeral paths (test runs, temp dirs)
+    if (entry.status === 'stale' && isEphemeralPath(entry.path)) {
+      console.log(`[AgentRegistry] Pruning ephemeral: ${entry.name} (${entry.path})`);
+      return false;
+    }
+
+    // Remove stale entries that have been dead for over 1 hour
+    if (entry.status === 'stale') {
+      const heartbeat = entry.lastHeartbeat ? new Date(entry.lastHeartbeat).getTime() : 0;
+      if (now - heartbeat > STALE_EXPIRY_MS) {
+        console.log(`[AgentRegistry] Pruning expired: ${entry.name} (stale for ${Math.round((now - heartbeat) / 60_000)}m)`);
+        return false;
+      }
+    }
+
+    return true;
   });
   return registry;
 }
@@ -258,8 +292,10 @@ export function registerAgent(
 
     const canonicalPath = path.resolve(agentPath);
 
-    // Check for port conflicts with other agents
-    const conflict = registry.entries.find(e => e.port === port && e.path !== canonicalPath);
+    // Check for port conflicts with other RUNNING agents (stale entries can't own ports)
+    const conflict = registry.entries.find(
+      e => e.port === port && e.path !== canonicalPath && e.status === 'running',
+    );
     if (conflict) {
       throw new Error(
         `Port ${port} is already in use by "${conflict.name}" (pid ${conflict.pid}). ` +
@@ -407,8 +443,10 @@ export function allocatePort(
       return existing.port;
     }
 
-    // Find the first free port in range
-    const usedPorts = new Set(registry.entries.map(e => e.port));
+    // Find the first free port in range (only running entries claim ports)
+    const usedPorts = new Set(
+      registry.entries.filter(e => e.status === 'running').map(e => e.port),
+    );
     for (let port = rangeStart; port <= rangeEnd; port++) {
       if (!usedPorts.has(port)) {
         return port;
@@ -501,8 +539,10 @@ export function allocatePortByName(
       return existing.port;
     }
 
-    // Find the first free port in range
-    const usedPorts = new Set(registry.entries.map(e => e.port));
+    // Find the first free port in range (only running entries claim ports)
+    const usedPorts = new Set(
+      registry.entries.filter(e => e.status === 'running').map(e => e.port),
+    );
     for (let port = rangeStart; port <= rangeEnd; port++) {
       if (!usedPorts.has(port)) {
         return port;

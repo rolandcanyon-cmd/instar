@@ -684,7 +684,7 @@ describe('StallTriageNurse Enhancements', () => {
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
-      expect(result.diagnosis?.action).toBe('nudge');
+      expect(result.diagnosis?.action).toBe('interrupt');
       expect(result.diagnosis?.confidence).toBe('low');
     });
 
@@ -700,7 +700,7 @@ describe('StallTriageNurse Enhancements', () => {
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
-      expect(result.diagnosis?.action).toBe('nudge');
+      expect(result.diagnosis?.action).toBe('interrupt');
     });
 
     it('skips process-tree when getStuckProcesses not provided', async () => {
@@ -713,7 +713,7 @@ describe('StallTriageNurse Enhancements', () => {
 
       const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
-      expect(result.diagnosis?.action).toBe('nudge');
+      expect(result.diagnosis?.action).toBe('interrupt');
     });
 
     it('LLM > process-tree: uses LLM when both available and LLM succeeds', async () => {
@@ -1314,7 +1314,7 @@ describe('StallTriageNurse Enhancements', () => {
       expect(result.diagnosis?.summary).toContain('unresponsive');
     });
 
-    it('defaults to nudge when no terminal clues in fallback', async () => {
+    it('defaults to interrupt when no terminal clues in fallback', async () => {
       (deps.captureSessionOutput as ReturnType<typeof vi.fn>).mockReturnValue(
         'clean output with no indicators'
       );
@@ -1328,7 +1328,7 @@ describe('StallTriageNurse Enhancements', () => {
       const oneMinAgo = Date.now() - 60_000;
       const result = await nurse.triage(1, 'sess', 'hello', oneMinAgo);
 
-      expect(result.diagnosis?.action).toBe('nudge');
+      expect(result.diagnosis?.action).toBe('interrupt');
       expect(result.diagnosis?.confidence).toBe('low');
     });
   });
