@@ -24,6 +24,14 @@ import pc from 'picocolors';
 import { detectClaudePath, detectGhPath } from '../core/Config.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
 import type { SecretBackend } from '../core/SecretManager.js';
+import {
+  runDiscovery,
+  buildScenarioContext,
+  readSetupLock,
+  deleteSetupLock,
+  type SetupDiscoveryContext,
+  type SetupScenarioContext,
+} from './discovery.js';
 
 /**
  * Launch the conversational setup wizard via Claude Code.
@@ -75,157 +83,103 @@ export async function runSetup(): Promise<void> {
   console.log(pc.dim('  scoped access — not permission dialogs. See: README.md > Security Model'));
   console.log();
 
-  // Detect git context to pass to the conversational wizard
+  // ── Context Detection & Discovery ───────────────────────────────
   const projectDir = process.cwd();
-  let gitContext = '';
+
+  // Detect git context
+  let isInsideGitRepo = false;
+  let gitRepoName = '';
+  let gitRepoRoot = '';
   try {
-    const gitRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
+    gitRepoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
       cwd: projectDir,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
-    const repoName = path.basename(gitRoot);
-    gitContext = ` This directory is inside a git repository "${repoName}" at ${gitRoot}. Set up a project-bound agent here.`;
-  } catch {
-    gitContext = ' This directory is NOT inside a git repository. Set up a standalone agent at ~/.instar/agents/<name>/ using `npx instar init --standalone <name>`.';
-  }
+    gitRepoName = path.basename(gitRepoRoot);
+    isInsideGitRepo = true;
+  } catch { /* not in a git repo */ }
 
-  // Detect existing agent context for the multi-user decision tree (Phase 1)
-  const stateDir = path.join(projectDir, '.instar');
-  const existingConfig = fs.existsSync(path.join(stateDir, 'config.json'));
-  let detectionContext = '';
+  // Detect gh CLI status (no auto-install — graceful degradation)
+  let ghPath = detectGhPath();
+  let ghStatus: 'ready' | 'auth-needed' | 'unavailable' = 'unavailable';
 
-  if (existingConfig) {
-    // Read agent details for the wizard
-    let agentName = 'unknown';
-    let knownUsers: string[] = [];
-    let machinesPaired = 0;
-    let gitStateEnabled = false;
-    let telegramConfigured = false;
-    let registrationPolicy = 'admin-only';
-    let autonomyLevel = 'collaborative';
-
-    try {
-      const config = JSON.parse(fs.readFileSync(path.join(stateDir, 'config.json'), 'utf-8'));
-      agentName = config.projectName || 'unknown';
-      telegramConfigured = config.messaging?.some((m: { type: string; enabled?: boolean }) => m.type === 'telegram' && m.enabled !== false) || false;
-      gitStateEnabled = !!config.gitState?.enabled;
-      registrationPolicy = config.userRegistrationPolicy || 'admin-only';
-      autonomyLevel = config.agentAutonomy?.level || 'collaborative';
-    } catch { /* use defaults */ }
-
-    try {
-      const users = JSON.parse(fs.readFileSync(path.join(stateDir, 'users.json'), 'utf-8'));
-      knownUsers = users.map((u: { name: string }) => u.name);
-    } catch { /* empty */ }
-
-    try {
-      const registry = JSON.parse(fs.readFileSync(path.join(stateDir, 'machines', 'registry.json'), 'utf-8'));
-      machinesPaired = Object.keys(registry.machines || {}).filter(
-        (k: string) => registry.machines[k].status === 'active'
-      ).length;
-    } catch { /* zero */ }
-
-    detectionContext = ` EXISTING AGENT DETECTED: existingAgent=true, agentName="${agentName}", knownUsers=[${knownUsers.map(u => `"${u}"`).join(',')}], machinesPaired=${machinesPaired}, gitStateEnabled=${gitStateEnabled}, telegramConfigured=${telegramConfigured}, registrationPolicy="${registrationPolicy}", autonomyLevel="${autonomyLevel}". Present the 3-option decision tree: (1) "I'm a new user joining this agent", (2) "I'm an existing user on a new machine", (3) "I want to start fresh with a new agent".`;
+  if (!ghPath) {
+    // Don't auto-install — display install guidance instead
+    console.log(pc.dim('  GitHub CLI (gh) not found. To discover cloud-backed agents:'));
+    const platform = process.platform;
+    if (platform === 'darwin') {
+      console.log(pc.dim('    brew install gh'));
+    } else if (platform === 'linux') {
+      console.log(pc.dim('    sudo apt install gh'));
+    } else {
+      console.log(pc.dim('    https://cli.github.com/'));
+    }
+    console.log(pc.dim('  Continuing without GitHub discovery...'));
+    console.log();
   } else {
-    // No agent in CWD — check for existing standalone agents and GitHub backups
-    const standaloneDir = path.join(os.homedir(), '.instar', 'agents');
-    const existingStandalone: string[] = [];
-
-    if (fs.existsSync(standaloneDir)) {
-      try {
-        for (const name of fs.readdirSync(standaloneDir)) {
-          const configFile = path.join(standaloneDir, name, '.instar', 'config.json');
-          if (fs.existsSync(configFile)) {
-            existingStandalone.push(name);
-          }
-        }
-      } catch { /* non-fatal */ }
-    }
-
-    // Proactively ensure gh CLI is available for GitHub scanning
-    let ghPath = detectGhPath();
-    let ghStatus: 'ready' | 'installed' | 'auth-needed' | 'unavailable' = 'unavailable';
-
-    if (!ghPath) {
-      // Try to install gh
-      console.log(pc.dim('  Installing GitHub CLI for agent backup/restore...'));
-      try {
-        if (process.platform === 'darwin') {
-          execFileSync('brew', ['install', 'gh'], { stdio: 'pipe', timeout: 60000 });
-        } else {
-          // Linux — try apt, snap, or dnf
-          try {
-            execFileSync('sudo', ['apt', 'install', '-y', 'gh'], { stdio: 'pipe', timeout: 60000 });
-          } catch {
-            try {
-              execFileSync('snap', ['install', 'gh'], { stdio: 'pipe', timeout: 60000 });
-            } catch {
-              // Can't auto-install
-            }
-          }
-        }
-        ghPath = detectGhPath();
-        if (ghPath) {
-          ghStatus = 'installed';
-          console.log(`  ${pc.green('✓')} GitHub CLI installed`);
-        }
-      } catch {
-        console.log(pc.dim('  GitHub CLI not available — the wizard can help set it up.'));
-      }
-    }
-
-    // Check gh auth status
-    if (ghPath) {
-      try {
-        execFileSync(ghPath, ['auth', 'status'], { stdio: 'pipe', timeout: 5000 });
-        ghStatus = 'ready';
-      } catch {
-        ghStatus = 'auth-needed';
-      }
-    }
-
-    // Scan for GitHub-backed agents (only if gh is ready)
-    let githubAgents: string[] = [];
-    if (ghStatus === 'ready' && ghPath) {
-      try {
-        const ghResult = execFileSync(ghPath, ['repo', 'list', '--json', 'name', '--limit', '100'], {
-          encoding: 'utf-8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: 15000,
-        }).trim();
-        if (ghResult) {
-          const repos = JSON.parse(ghResult) as Array<{ name: string }>;
-          githubAgents = repos
-            .filter(r => r.name.startsWith('instar-'))
-            .map(r => r.name.replace(/^instar-/, ''));
-        }
-      } catch {
-        // Scan failed — wizard will handle
-      }
-    }
-
-    // Build detection context with full status
-    detectionContext = ` No agent in current directory.`;
-    detectionContext += ` ghStatus="${ghStatus}".`;
-
-    if (existingStandalone.length > 0) {
-      detectionContext += ` EXISTING STANDALONE AGENTS on this machine: [${existingStandalone.map(n => `"${n}"`).join(',')}] at ${standaloneDir}/.`;
-    }
-    if (githubAgents.length > 0) {
-      detectionContext += ` GITHUB BACKUPS found: [${githubAgents.map(n => `"${n}"`).join(',')}] (repos: ${githubAgents.map(n => `instar-${n}`).join(', ')}).`;
-      detectionContext += ` Offer to restore from GitHub backup before suggesting a new agent.`;
-    }
-    if (ghStatus === 'auth-needed') {
-      detectionContext += ` GitHub CLI is installed but NOT authenticated. The wizard should walk the user through "gh auth login --web" to enable GitHub scanning and cloud backup.`;
-    }
-    if (ghStatus === 'unavailable') {
-      detectionContext += ` GitHub CLI could not be installed automatically. The wizard should ask the user "Have you used Instar before on another machine?" and if yes, help them install gh manually to scan for backups.`;
-    }
-    if (existingStandalone.length === 0 && githubAgents.length === 0 && ghStatus === 'ready') {
-      detectionContext += ` No existing agents found locally or on GitHub.`;
+    // Check auth status
+    try {
+      execFileSync(ghPath, ['auth', 'status'], { stdio: 'pipe', timeout: 5000 });
+      ghStatus = 'ready';
+    } catch {
+      ghStatus = 'auth-needed';
     }
   }
+
+  // Check for interrupted setup
+  const existingLock = readSetupLock();
+  if (existingLock) {
+    console.log(pc.yellow(`  A previous setup was interrupted during "${existingLock.phase}".`));
+    console.log(pc.dim(`  Agent: ${existingLock.agentName}, started: ${existingLock.startedAt}`));
+    console.log(pc.dim('  The wizard will offer to resume or start over.'));
+    console.log();
+  }
+
+  // Run comprehensive discovery
+  console.log(pc.dim('  Scanning for existing agents...'));
+  const discovery = runDiscovery(projectDir, ghPath, ghStatus);
+  const scenarioContext = buildScenarioContext(discovery, isInsideGitRepo);
+
+  // Report discovery results
+  const totalFound = discovery.merged_agents.length;
+  if (totalFound > 0) {
+    console.log(`  ${pc.green('✓')} Found ${totalFound} agent${totalFound !== 1 ? 's' : ''}`);
+  } else {
+    console.log(`  ${pc.green('✓')} No existing agents found — fresh install`);
+  }
+  if (discovery.zombie_entries.length > 0) {
+    console.log(pc.dim(`    (${discovery.zombie_entries.length} stale registry entries excluded)`));
+  }
+  if (discovery.scan_errors.length > 0) {
+    for (const err of discovery.scan_errors) {
+      console.log(pc.dim(`    ⚠ ${err}`));
+    }
+  }
+  console.log();
+
+  // Build structured context for the wizard (replaces ad-hoc string interpolation)
+  const gitContext = isInsideGitRepo
+    ? ` This directory is inside a git repository "${gitRepoName}" at ${gitRepoRoot}. Set up a project-bound agent here.`
+    : ' This directory is NOT inside a git repository. Set up a standalone agent at ~/.instar/agents/<name>/ using `npx instar init --standalone <name>`.';
+
+  // Structured JSON context — the wizard parses this, not string fragments
+  const discoveryJson = JSON.stringify(discovery, null, 2);
+  const scenarioJson = JSON.stringify(scenarioContext, null, 2);
+  const lockJson = existingLock ? JSON.stringify(existingLock, null, 2) : 'null';
+
+  const detectionContext = `
+--- BEGIN UNTRUSTED DISCOVERY DATA (JSON) ---
+${discoveryJson}
+--- END UNTRUSTED DISCOVERY DATA ---
+
+--- BEGIN SCENARIO CONTEXT (JSON) ---
+${scenarioJson}
+--- END SCENARIO CONTEXT ---
+
+--- BEGIN SETUP LOCK ---
+${lockJson}
+--- END SETUP LOCK ---`;
 
   // Pre-install Playwright browser binaries AND register the MCP server so
   // ALL Claude Code sessions (including the secret-setup micro-session) have
@@ -715,4 +669,174 @@ WantedBy=default.target
   } catch {
     return false;
   }
+}
+
+// ── Non-Interactive Setup ──────────────────────────────────────────
+// For CI/CD and automation. No LLM wizard — all config via CLI flags.
+
+interface NonInteractiveOptions {
+  name?: string;
+  user?: string;
+  telegramToken?: string;
+  telegramGroup?: string;
+  scenario?: string;
+}
+
+/**
+ * Run setup without the LLM wizard. Requires all necessary flags.
+ * Returns exit code 0 on success, throws on failure.
+ */
+export async function runNonInteractiveSetup(opts: NonInteractiveOptions): Promise<void> {
+  const { resolveScenario } = await import('./discovery.js');
+
+  // Validate required flags
+  const missing: string[] = [];
+  if (!opts.name) missing.push('--name');
+  if (!opts.user) missing.push('--user');
+  if (!opts.scenario) missing.push('--scenario');
+
+  if (missing.length > 0) {
+    console.error(pc.red(`\n  Missing required flags for non-interactive setup: ${missing.join(', ')}`));
+    console.error(pc.dim('\n  Example:'));
+    console.error(pc.dim('    npx instar setup --non-interactive --name my-agent --user deploy-bot --scenario 3'));
+    console.error(pc.dim('\n  Scenarios: 1-8 (see docs/specs/GUIDED-SETUP-SPEC.md for details)\n'));
+    process.exit(1);
+  }
+
+  const scenarioNum = parseInt(opts.scenario!, 10);
+  if (isNaN(scenarioNum) || scenarioNum < 1 || scenarioNum > 8) {
+    console.error(pc.red(`\n  Invalid scenario: ${opts.scenario}. Must be 1-8.\n`));
+    process.exit(1);
+  }
+
+  const projectDir = process.cwd();
+  const agentName = opts.name!;
+  const userName = opts.user!;
+
+  // Determine setup type from scenario
+  const isRepo = [3, 4, 5, 6].includes(scenarioNum);
+  const isMultiUser = [5, 6, 7, 8].includes(scenarioNum);
+  const isMultiMachine = [2, 4, 6, 7].includes(scenarioNum);
+
+  console.log(pc.bold(`\n  Non-interactive setup: ${agentName}`));
+  console.log(pc.dim(`  Scenario ${scenarioNum}: ${isRepo ? 'repo' : 'standalone'}, ${isMultiUser ? 'multi' : 'single'}-user, ${isMultiMachine ? 'multi' : 'single'}-machine`));
+
+  // Create agent directory structure
+  const stateDir = isRepo
+    ? path.join(projectDir, '.instar')
+    : path.join(os.homedir(), '.instar', 'agents', agentName, '.instar');
+  const agentDir = isRepo ? projectDir : path.join(os.homedir(), '.instar', 'agents', agentName);
+
+  fs.mkdirSync(path.join(stateDir, 'state', 'sessions'), { recursive: true });
+  fs.mkdirSync(path.join(stateDir, 'state', 'jobs'), { recursive: true });
+  fs.mkdirSync(path.join(stateDir, 'logs'), { recursive: true });
+
+  // Build config
+  const config: Record<string, unknown> = {
+    projectName: agentName,
+    port: 4040,
+    sessions: {
+      tmuxPath: '/opt/homebrew/bin/tmux',
+      claudePath: '/usr/local/bin/claude',
+      projectDir: agentDir,
+      maxSessions: 3,
+      protectedSessions: [`${agentName}-server`],
+      completionPatterns: ['has been automatically paused', 'Session ended', 'Interrupted by user'],
+    },
+    scheduler: { jobsFile: path.join(stateDir, 'jobs.json'), enabled: false, maxParallelJobs: 1 },
+    users: [],
+    messaging: [] as Record<string, unknown>[],
+    monitoring: { quotaTracking: false, memoryMonitoring: true, healthCheckIntervalMs: 30000 },
+  };
+
+  // Add Telegram if provided
+  if (opts.telegramToken && opts.telegramGroup) {
+    (config.messaging as Record<string, unknown>[]).push({
+      type: 'telegram',
+      enabled: true,
+      config: {
+        token: opts.telegramToken,
+        chatId: opts.telegramGroup,
+        pollIntervalMs: 2000,
+        stallTimeoutMinutes: 5,
+      },
+    });
+  }
+
+  // Multi-user additions
+  if (isMultiUser) {
+    config.userRegistrationPolicy = 'admin-only';
+    config.agentAutonomy = { level: 'collaborative' };
+
+    // Generate recovery key
+    const crypto = await import('node:crypto');
+    const bytes = crypto.randomBytes(32);
+    const chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+    let key = '';
+    let num = BigInt('0x' + bytes.toString('hex'));
+    while (key.length < 44) {
+      key += chars[Number(num % 58n)];
+      num = num / 58n;
+    }
+
+    // Hash for storage, output key to stdout
+    const hash = crypto.createHash('sha256').update(key).digest('hex');
+    config.recoveryKeyHash = hash;
+
+    // Recovery key to stdout (single line for capture)
+    console.log(key);
+  }
+
+  // Write config
+  fs.writeFileSync(path.join(stateDir, 'config.json'), JSON.stringify(config, null, 2));
+
+  // Write AGENT.md
+  fs.writeFileSync(path.join(stateDir, 'AGENT.md'), `# Agent Identity
+
+**Name**: ${agentName}
+**Created**: ${new Date().toISOString().split('T')[0]}
+
+## Who I Am
+
+I am ${agentName}, set up via non-interactive mode.
+
+## Operating Principles
+
+- Be genuinely helpful
+- Research before asking
+- When in doubt, ask ${userName}
+`);
+
+  // Write USER.md
+  fs.writeFileSync(path.join(stateDir, 'USER.md'), `# User Profile: ${userName}
+
+**Name**: ${userName}
+**Role**: Admin
+`);
+
+  // Write MEMORY.md
+  fs.writeFileSync(path.join(stateDir, 'MEMORY.md'), `# Agent Memory
+
+## Key Facts
+
+- Initialized on ${new Date().toISOString().split('T')[0]} (non-interactive)
+- Primary user: ${userName}
+`);
+
+  // Write empty jobs.json and users.json
+  fs.writeFileSync(path.join(stateDir, 'jobs.json'), '[]');
+  fs.writeFileSync(path.join(stateDir, 'users.json'), JSON.stringify([{ name: userName, role: 'admin' }], null, 2));
+
+  // Set file permissions on sensitive files
+  if (opts.telegramToken) {
+    try {
+      fs.chmodSync(path.join(stateDir, 'config.json'), 0o600);
+    } catch { /* non-fatal on Windows */ }
+  }
+
+  console.log(pc.green(`\n  ✓ Agent "${agentName}" configured at ${stateDir}`));
+  if (opts.telegramToken) {
+    console.log(pc.green('  ✓ Telegram configured'));
+  }
+  console.log(pc.dim(`\n  Start with: instar server start --dir ${agentDir}\n`));
 }

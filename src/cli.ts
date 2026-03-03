@@ -287,7 +287,13 @@ program
 program
   .command('setup')
   .description('Interactive setup wizard (same as running `instar` with no args)')
-  .action(async () => {
+  .option('--non-interactive', 'Run setup without LLM wizard (requires all flags)')
+  .option('--name <name>', 'Agent name (non-interactive)')
+  .option('--user <user>', 'User name (non-interactive)')
+  .option('--telegram-token <token>', 'Telegram bot token (non-interactive)')
+  .option('--telegram-group <group>', 'Telegram group/chat ID (non-interactive)')
+  .option('--scenario <number>', 'Scenario number 1-8 (non-interactive)')
+  .action(async (opts) => {
     const [major, minor] = process.versions.node.split('.').map(Number);
     if (major < 20 || (major === 20 && minor < 12)) {
       console.error(`\n  Instar setup requires Node.js 20.12 or later.`);
@@ -295,7 +301,10 @@ program
       console.error(`\n  Upgrade: https://nodejs.org/en/download\n`);
       process.exit(1);
     }
-    const { runSetup } = await import('./commands/setup.js');
+    const { runSetup, runNonInteractiveSetup } = await import('./commands/setup.js');
+    if (opts.nonInteractive) {
+      return runNonInteractiveSetup(opts);
+    }
     return runSetup();
   });
 
