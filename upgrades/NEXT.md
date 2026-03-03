@@ -1,19 +1,26 @@
 # Upgrade Guide — vNEXT
 
 <!-- bump: patch -->
+<!-- Valid values: patch, minor, major -->
+<!-- patch = bug fixes, refactors, test additions, doc updates -->
+<!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
+<!-- major = breaking changes to existing APIs or behavior -->
 
 ## What Changed
 
-`AskUserQuestion` is now completely banned from the setup wizard. A new `## CRITICAL: NEVER Use AskUserQuestion` section at the top of the skill prohibits its use at any step. All choice points now use inline numbered text options with typed user responses.
-
-The previous fix (v0.12.3) only addressed Entry Point B. This fix applies the same pattern globally — every step that presents options now uses inline numbered text instead of the multichoice overlay.
+<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
+<!-- Write this for the AGENT — they need to understand the system deeply. -->
 
 ## What to Tell Your User
 
-- **Setup wizard improvement**: "All wizard choices now show inline instead of in popup menus. No more hidden or truncated text."
+<!-- Write talking points the agent should relay to their user. -->
+<!-- This should be warm, conversational, user-facing — not a changelog. -->
+<!-- Focus on what THEY can now do, not internal plumbing. -->
+
+- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| Overlay-free wizard | Automatic — just run `npx instar` |
+| [Capability] | [Endpoint, command, or "automatic"] |
