@@ -1,26 +1,19 @@
 # Upgrade Guide — vNEXT
 
 <!-- bump: patch -->
-<!-- Valid values: patch, minor, major -->
-<!-- patch = bug fixes, refactors, test additions, doc updates -->
-<!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
-<!-- major = breaking changes to existing APIs or behavior -->
 
 ## What Changed
 
-<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
-<!-- Write this for the AGENT — they need to understand the system deeply. -->
+Job topics that were eagerly created by versions before v0.12.7 (when `on-alert` became the default notification mode) are now cleaned up on startup. When `ensureJobTopics` runs, it detects stale topic mappings for jobs in `on-alert` or `never` mode, closes the Telegram forum topics, and removes the mappings from state. This eliminates the visual noise of empty job topics cluttering the Telegram group.
+
+The cleanup is idempotent — topics that are already closed or deleted are handled gracefully.
 
 ## What to Tell Your User
 
-<!-- Write talking points the agent should relay to their user. -->
-<!-- This should be warm, conversational, user-facing — not a changelog. -->
-<!-- Focus on what THEY can now do, not internal plumbing. -->
-
-- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
+- **Quieter Telegram**: "Job topics that were created before the quiet-by-default update will be automatically cleaned up. Your Telegram group should be much less cluttered now — only jobs that actually need your attention will have topics."
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| [Capability] | [Endpoint, command, or "automatic"] |
+| Stale job topic cleanup | Automatic on startup — no action needed |
