@@ -694,6 +694,21 @@ export class TelegramAdapter implements MessagingAdapter {
         this.config.dashboardTopicId = topic.topicId;
         this.persistDashboardTopicId(topic.topicId);
         console.log(`[telegram] Created Dashboard topic: ${topic.topicId}`);
+
+        // Send a one-time setup hint: mute this topic to avoid unread badges.
+        // The bot can't mute topics for users (client-side setting), so we guide them.
+        try {
+          await this.sendToTopic(topic.topicId, [
+            '💡 *Tip*: Mute this topic to avoid notification badges.',
+            '',
+            'Long-press this topic → Mute → Forever.',
+            '',
+            '_The latest dashboard link will always be pinned here._',
+          ].join('\n'), { silent: true });
+        } catch {
+          // @silent-fallback-ok — guidance message is nice-to-have
+        }
+
         return topic.topicId;
       } catch (err) {
         DegradationReporter.getInstance().report({
@@ -788,8 +803,19 @@ export class TelegramAdapter implements MessagingAdapter {
       // The user checks it when they need the link, they don't need a buzz every restart.
       const result = await this.sendToTopic(topicId, message, { silent: true });
 
-      // Pin the message for easy access
+      // Pin rotation: unpin old pins in this topic, then pin the new message.
+      // This ensures there's always exactly ONE pinned message with the latest link.
       if (result.messageId) {
+        try {
+          // Unpin all previous pins in the dashboard topic
+          await this.apiCall('unpinAllForumTopicMessages', {
+            chat_id: this.config.chatId,
+            message_thread_id: topicId,
+          });
+        } catch {
+          // @silent-fallback-ok — unpinning old messages is best-effort
+        }
+
         try {
           await this.apiCall('pinChatMessage', {
             chat_id: this.config.chatId,

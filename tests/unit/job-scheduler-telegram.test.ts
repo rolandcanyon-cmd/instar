@@ -190,7 +190,7 @@ describe('JobScheduler Telegram notifications', () => {
       };
       scheduler.setTelegram(mockTelegram as unknown as import('../../src/messaging/TelegramAdapter.js').TelegramAdapter);
 
-      injectJobs([{ slug: 'tg-job', name: 'TG Job', topicId: 42 }]);
+      injectJobs([{ slug: 'tg-job', name: 'TG Job', topicId: 42, telegramNotify: true }]);
       const session = createSession({ jobSlug: 'tg-job', status: 'completed' });
 
       await scheduler.notifyJobComplete(session.id, session.tmuxSession);
@@ -208,7 +208,7 @@ describe('JobScheduler Telegram notifications', () => {
       };
       scheduler.setTelegram(mockTelegram as unknown as import('../../src/messaging/TelegramAdapter.js').TelegramAdapter);
 
-      injectJobs([{ slug: 'recreate-job', name: 'Recreate Job', topicId: 42 }]);
+      injectJobs([{ slug: 'recreate-job', name: 'Recreate Job', topicId: 42, telegramNotify: true }]);
       const session = createSession({ jobSlug: 'recreate-job', status: 'completed' });
 
       await scheduler.notifyJobComplete(session.id, session.tmuxSession);
@@ -226,7 +226,7 @@ describe('JobScheduler Telegram notifications', () => {
       };
       scheduler.setMessenger(mockMessenger);
 
-      injectJobs([{ slug: 'msg-job', name: 'Msg Job' }]);
+      injectJobs([{ slug: 'msg-job', name: 'Msg Job', telegramNotify: true }]);
       const session = createSession({ jobSlug: 'msg-job', status: 'completed' });
 
       await scheduler.notifyJobComplete(session.id, session.tmuxSession);
@@ -271,7 +271,7 @@ describe('JobScheduler Telegram notifications', () => {
       };
       scheduler.setTelegram(mockTelegram as unknown as import('../../src/messaging/TelegramAdapter.js').TelegramAdapter);
 
-      injectJobs([{ slug: 'dur-job', name: 'Duration Job', topicId: 10 }]);
+      injectJobs([{ slug: 'dur-job', name: 'Duration Job', topicId: 10, telegramNotify: true }]);
       // Create session that started 5 minutes ago
       const session = createSession({
         jobSlug: 'dur-job',

@@ -96,6 +96,11 @@ export class AutoUpdater {
   private sessionMonitor: SessionMonitorLike | null = null;
   private deferralTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Loop prevention — track version mismatch notifications to avoid spam
+  private notifiedVersionMismatch: string | null = null;
+  // Restart notification dedup — only notify once per version
+  private lastNotifiedRestartVersion: string | null = null;
+
   constructor(
     updateChecker: UpdateChecker,
     state: StateManager,
@@ -276,6 +281,28 @@ export class AutoUpdater {
 
       console.log(`[AutoUpdater] Update available: ${info.currentVersion} → ${info.latestVersion}`);
 
+      // LOOP BREAKER: If we already applied this version, the binary resolution
+      // is broken (e.g., npx cache vs global install). Don't keep re-applying.
+      // This prevents the update→restart→detect→update→restart loop.
+      if (this.lastAppliedVersion === info.latestVersion) {
+        console.log(
+          `[AutoUpdater] Skipping — v${info.latestVersion} was already applied ` +
+          `(at ${this.lastApply}) but getInstalledVersion() still reports v${info.currentVersion}. ` +
+          `Binary resolution mismatch — manual restart may be needed.`
+        );
+        // Only notify once about the mismatch
+        if (!this.notifiedVersionMismatch) {
+          this.notifiedVersionMismatch = info.latestVersion;
+          await this.notify(
+            `Updated to v${info.latestVersion} but the running server is still on v${info.currentVersion}. ` +
+            `This usually means the installed binary path differs from the running one. ` +
+            `A manual restart of the server process should pick up the new version.`
+          );
+        }
+        this.saveState();
+        return;
+      }
+
       // Track first detection time (don't reset on subsequent detections of newer versions)
       if (!this.pendingUpdateDetectedAt) {
         this.pendingUpdateDetectedAt = new Date().toISOString();
@@ -432,13 +459,17 @@ export class AutoUpdater {
           `Update to v${newVersion} was deferred for active sessions, but the maximum wait has been reached. Restarting now.`
         );
       } else if (hasRunningSessions) {
-        // Sessions exist but aren't blocking — user needs a heads-up
-        const delaySecs = this.config.preRestartDelaySecs;
-        await this.notify(
-          `Just updated to v${newVersion}. Server restarting in ${delaySecs} seconds. ` +
-          `${runningSessions.length} session(s) will resume after restart.`
-        );
+        // Sessions exist but aren't blocking — user needs a heads-up.
+        // But only notify ONCE per version to prevent spam in restart loops.
+        if (this.lastNotifiedRestartVersion !== newVersion) {
+          this.lastNotifiedRestartVersion = newVersion;
+          const delaySecs = this.config.preRestartDelaySecs;
+          await this.notify(
+            `Just updated to v${newVersion}. Restarting to pick up the changes.`
+          );
+        }
         // Give sessions a moment to checkpoint
+        const delaySecs = this.config.preRestartDelaySecs;
         if (delaySecs > 0) {
           console.log(`[AutoUpdater] Pre-restart delay: ${delaySecs}s for ${runningSessions.length} session(s)`);
           await new Promise(r => setTimeout(r, delaySecs * 1000));

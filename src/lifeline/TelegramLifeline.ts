@@ -641,16 +641,37 @@ export class TelegramLifeline {
 
   // ── Notifications ─────────────────────────────────────────
 
+  /** Timestamp of last "server down" notification — for rate limiting. */
+  private lastServerDownNotifyAt = 0;
+  /** Suppressed "server down" count during rate limit window. */
+  private suppressedServerDownCount = 0;
+  /** Minimum interval between "server down" notifications (30 minutes). */
+  private static readonly SERVER_DOWN_RATE_LIMIT_MS = 30 * 60_000;
+
   private async notifyServerDown(reason: string): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastServerDownNotifyAt;
+
+    // Rate limit: don't spam "server went down" if it keeps cycling
+    if (this.lastServerDownNotifyAt > 0 && elapsed < TelegramLifeline.SERVER_DOWN_RATE_LIMIT_MS) {
+      this.suppressedServerDownCount++;
+      console.log(`[Lifeline] Suppressing duplicate "server down" notification (${this.suppressedServerDownCount} suppressed, next allowed in ${Math.round((TelegramLifeline.SERVER_DOWN_RATE_LIMIT_MS - elapsed) / 60_000)}m)`);
+      return;
+    }
+
+    this.lastServerDownNotifyAt = now;
     const topicId = this.lifelineTopicId ?? 1;
     const status = this.supervisor.getStatus();
-    await this.sendToTopic(topicId,
-      `Server went down: ${reason}\n\n` +
-      `Your messages will be queued until recovery.\n` +
-      `Auto-restart attempt ${status.restartAttempts + 1}/5 in progress...\n` +
-      `Use /lifeline status to check or /lifeline doctor to diagnose.\n` +
-      `You'll be notified when the server recovers.`
-    ).catch(() => {});
+
+    let message = `Server went down: ${reason}\n\n` +
+      `Your messages will be queued until recovery. Use /lifeline status to check.`;
+
+    if (this.suppressedServerDownCount > 0) {
+      message += `\n\n(${this.suppressedServerDownCount} similar notifications were suppressed since the last alert)`;
+    }
+    this.suppressedServerDownCount = 0;
+
+    await this.sendToTopic(topicId, message).catch(() => {});
   }
 
   private async notifyCircuitBroken(totalFailures: number, lastCrashOutput: string): Promise<void> {
