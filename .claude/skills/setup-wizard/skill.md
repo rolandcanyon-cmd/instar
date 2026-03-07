@@ -1283,9 +1283,11 @@ Tell the user:
 
 **Wait for confirmation.**
 
-**Option A: Dashboard QR (preferred — no external browser needed)**
+**Option A: Dashboard QR (preferred)**
 
-The agent's dashboard serves the QR code at `GET /whatsapp/qr`. Open this in the browser:
+The dashboard renders the WhatsApp QR code after PIN authentication. **Do NOT navigate directly to `/whatsapp/qr`** — that API endpoint requires a Bearer auth header which browsers can't pass via URL. Instead, use the dashboard UI:
+
+**Step 1: Navigate to dashboard**
 
 **If using Playwright:**
 ```
@@ -1297,22 +1299,53 @@ mcp__playwright__browser_navigate({ url: "http://localhost:<PORT>/dashboard" })
 mcp__claude-in-chrome__navigate({ url: "http://localhost:<PORT>/dashboard", tabId: <tab_id> })
 ```
 
-Navigate to the WhatsApp section of the dashboard. The QR code should be visible.
+**Step 2: Authenticate with PIN**
 
-Tell the user:
+The dashboard requires a PIN (the `authToken` from `.instar/config.json`). Read the PIN:
+```bash
+jq -r '.authToken' <project_dir>/.instar/config.json
+```
+
+Take a snapshot to find the PIN input field, enter the PIN, and click Connect/Submit.
+
+**Step 3: Open WhatsApp QR panel**
+
+After authenticating, look for a "WhatsApp" button in the dashboard header. Click it to open the QR panel. The dashboard fetches `/whatsapp/qr` with the auth token internally and renders the QR code using the qrcode.js library.
+
+**Step 4: Wait for QR to appear**
+
+The WhatsApp adapter may take a few seconds to generate the first QR code after server start. If the QR panel shows "disconnected" or no QR:
+- Wait 5 seconds and refresh the panel (click the WhatsApp button again)
+- Retry up to 6 times (30 seconds total)
+- The Baileys adapter needs time to initialize and receive the first QR from WhatsApp servers
+
+Once the QR is visible, tell the user:
 
 > A QR code should be visible in the browser window. On your phone:
 > 1. Open WhatsApp
 > 2. Go to **Settings → Linked Devices → Link a Device**
 > 3. Scan the QR code in the browser
+>
+> Note: The QR code refreshes every ~20 seconds — that's normal. Just scan the current one.
 
-**Option B: WhatsApp Web direct (fallback if dashboard QR isn't rendering)**
+**Option B: Fetch QR via API and display (fallback if dashboard doesn't render)**
 
-Navigate to `https://web.whatsapp.com` in the browser. The QR code there works the same way — scan it with WhatsApp on your phone.
+If the dashboard QR panel isn't working, fetch the QR data via API and display it:
 
-> If you don't see a QR code in the dashboard, I've opened WhatsApp Web instead. Scan the QR code there with your phone.
+```bash
+QR_DATA=$(curl -s -H "Authorization: Bearer <AUTH_TOKEN>" http://localhost:<PORT>/whatsapp/qr | jq -r '.qr')
+```
 
-**Note:** This approach requires the Baileys session to NOT be simultaneously connected. If the server's Baileys adapter already took the QR, WhatsApp Web won't show one. In that case, use the dashboard QR endpoint or the pairing code fallback.
+If `QR_DATA` is not null, you can render it in the browser using JavaScript:
+```
+mcp__playwright__browser_evaluate({ expression: "document.body.innerHTML = '<div id=\"qr\"></div><script src=\"https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js\"></' + 'script><script>QRCode.toCanvas(document.createElement(\"canvas\"), \"QR_DATA_HERE\", {width:300}, (e,c) => document.getElementById(\"qr\").appendChild(c))</' + 'script>'" })
+```
+
+Or simply relay the QR data to the user and suggest they use the pairing code method instead (Option C fallback).
+
+**Option C: Do NOT use WhatsApp Web (web.whatsapp.com) directly**
+
+WhatsApp Web connects as its own linked device. The Baileys adapter is ALSO a linked device. WhatsApp only allows one web session at a time, so opening WhatsApp Web would conflict with the Baileys connection. Always use the dashboard QR or API QR — these are the Baileys adapter's QR, not a separate session.
 
 **Step 4: Wait for connection**
 
