@@ -301,15 +301,27 @@ export class BaileysBackend {
           const jid = msg.key.remoteJid;
           if (!jid) continue;
 
-          // Extract text from various message types
-          const text =
+          // Extract text from various message types.
+          // For media without captions, generate a placeholder so messages aren't silently dropped.
+          const captionOrText =
             msg.message.conversation ??
             msg.message.extendedTextMessage?.text ??
             msg.message.imageMessage?.caption ??
             msg.message.videoMessage?.caption ??
             null;
 
-          if (!text) continue; // Skip non-text messages for now
+          const mediaPlaceholder =
+            msg.message.imageMessage ? '[Image]' :
+            msg.message.videoMessage ? '[Video]' :
+            msg.message.audioMessage ? '[Audio]' :
+            msg.message.documentMessage ? `[Document: ${msg.message.documentMessage.fileName ?? 'file'}]` :
+            msg.message.stickerMessage ? '[Sticker]' :
+            msg.message.locationMessage ? '[Location]' :
+            null;
+
+          const text = captionOrText ?? mediaPlaceholder;
+
+          if (!text) continue;
 
           const senderName = msg.pushName ?? undefined;
           const timestamp = msg.messageTimestamp;
