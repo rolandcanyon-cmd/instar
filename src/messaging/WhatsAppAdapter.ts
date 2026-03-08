@@ -721,15 +721,19 @@ export class WhatsAppAdapter implements MessagingAdapter {
     return ++this.reconnectAttempts;
   }
 
-  /** Get the Baileys config with defaults. */
+  /** Get the Baileys config with defaults.
+   * Falls back to top-level WhatsApp config values for authMethod and
+   * pairingPhoneNumber, since users commonly place these at the top level
+   * of the WhatsApp config object rather than nested under "baileys". */
   getBaileysConfig(): Required<BaileysConfig> {
     const bc = this.config.baileys ?? {};
+    const topLevel = this.config as Record<string, unknown>;
     return {
       authDir: bc.authDir ?? path.join(this.stateDir, 'whatsapp-auth'),
       markOnline: bc.markOnline ?? false,
       maxReconnectAttempts: bc.maxReconnectAttempts ?? 10,
-      authMethod: bc.authMethod ?? 'qr',
-      pairingPhoneNumber: bc.pairingPhoneNumber ?? '',
+      authMethod: bc.authMethod ?? (topLevel.authMethod as BaileysConfig['authMethod']) ?? 'qr',
+      pairingPhoneNumber: bc.pairingPhoneNumber ?? (topLevel.pairingPhoneNumber as string) ?? '',
     };
   }
 }

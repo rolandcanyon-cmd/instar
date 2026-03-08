@@ -61,6 +61,7 @@ export class BaileysBackend {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private socket: any = null; // Baileys WASocket
+  private _pairingCodeRequested = false;
 
   constructor(
     adapter: WhatsAppAdapter,
@@ -109,15 +110,38 @@ export class BaileysBackend {
       this.socket.ev.on('connection.update', async (update: any) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr && this.config.authMethod === 'qr') {
-          this.adapter.setConnectionState('qr-pending');
-          this.adapter.setQrCode(qr);
-          this.handlers.onQrCode(qr);
+        if (qr) {
+          if (this.config.authMethod === 'qr') {
+            this.adapter.setConnectionState('qr-pending');
+            this.adapter.setQrCode(qr);
+            this.handlers.onQrCode(qr);
+          }
+
+          // Pairing code auth: request on first QR event.
+          // The QR event indicates the socket is connected to WhatsApp servers
+          // and ready for auth. requestPairingCode() is an alternative to QR scanning.
+          // This CANNOT be in the connection === 'open' block because 'open' only
+          // fires AFTER auth completes — chicken-and-egg problem.
+          if (this.config.authMethod === 'pairing-code' && this.config.pairingPhoneNumber && !this._pairingCodeRequested) {
+            this._pairingCodeRequested = true;
+            try {
+              const code = await this.socket.requestPairingCode(this.config.pairingPhoneNumber);
+              console.log('[whatsapp] Pairing code:', code);
+              this.handlers.onPairingCode(code);
+            } catch (pairErr) {
+              console.error('[baileys] Failed to request pairing code:', pairErr);
+              this._pairingCodeRequested = false; // Allow retry on next QR event
+              this.handlers.onError(new Error(
+                `Failed to request pairing code: ${pairErr instanceof Error ? pairErr.message : pairErr}`,
+              ));
+            }
+          }
         }
 
         if (connection === 'open') {
           this.connected = true;
           this.reconnectAttempts = 0;
+          this._pairingCodeRequested = false; // Reset for future reconnections
           const me = this.socket?.user;
           this.phoneNumber = me?.id?.split(':')[0] ?? null;
           this.adapter.setConnectionState('connected', this.phoneNumber ?? undefined);
@@ -147,20 +171,6 @@ export class BaileysBackend {
           };
           this.adapter.setBackendCapabilities(capabilities);
           this.handlers.onConnected(this.phoneNumber ?? 'unknown');
-
-          // Pairing code auth — request AFTER connection is open
-          // (moved here from below to ensure socket is in a stable state)
-          if (this.config.authMethod === 'pairing-code' && this.config.pairingPhoneNumber && !this.phoneNumber) {
-            try {
-              const code = await this.socket.requestPairingCode(this.config.pairingPhoneNumber);
-              this.handlers.onPairingCode(code);
-            } catch (pairErr) {
-              console.error('[baileys] Failed to request pairing code:', pairErr);
-              this.handlers.onError(new Error(
-                `Failed to request pairing code: ${pairErr instanceof Error ? pairErr.message : pairErr}`,
-              ));
-            }
-          }
         }
 
         if (connection === 'close') {
@@ -184,10 +194,34 @@ export class BaileysBackend {
             || errorMessage.includes('Connection Failure');
 
           if (loggedOut) {
-            // Session expired — need new QR scan
-            this.adapter.setConnectionState('disconnected');
-            this.handlers.onDisconnected('logged-out', false);
-            console.log('[baileys] Session expired. Delete auth state and restart to re-authenticate.');
+            // Check if this is a stale credential from incomplete pairing.
+            // When a pairing code is generated but never completed, Baileys saves
+            // partial creds. On restart, it tries to login with them → 401.
+            // If creds are < 5 minutes old, auto-clear and retry instead of giving up.
+            const credsPath = path.join(this.config.authDir, 'creds.json');
+            let isStaleIncomplete = false;
+            try {
+              const stat = fs.statSync(credsPath);
+              const ageMs = Date.now() - stat.mtimeMs;
+              isStaleIncomplete = ageMs < 5 * 60 * 1000; // < 5 minutes old
+            } catch { /* no creds file = not stale */ }
+
+            if (isStaleIncomplete) {
+              console.log('[baileys] 401 with recent credentials — likely incomplete pairing. Clearing auth state and retrying.');
+              try {
+                fs.rmSync(this.config.authDir, { recursive: true, force: true });
+                fs.mkdirSync(this.config.authDir, { recursive: true });
+              } catch (clearErr) {
+                console.error('[baileys] Failed to clear auth state:', clearErr);
+              }
+              this._pairingCodeRequested = false;
+              this.scheduleReconnect();
+            } else {
+              // Session expired — need new QR scan
+              this.adapter.setConnectionState('disconnected');
+              this.handlers.onDisconnected('logged-out', false);
+              console.log('[baileys] Session expired. Delete auth state and restart to re-authenticate.');
+            }
           } else if (isTerminalFailure) {
             // Registration/connection failure — likely Baileys version incompatibility or protocol change
             const reason = statusCode === 405 || errorMessage.includes('405')

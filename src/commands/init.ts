@@ -2235,7 +2235,17 @@ function isTelegramConfigured(stateDir: string): boolean {
 }
 
 /**
- * Install scripts for configured integrations (e.g., Telegram relay).
+ * Check if WhatsApp is configured in config.json.
+ */
+function isWhatsAppConfigured(stateDir: string): boolean {
+  const config = readConfig(stateDir);
+  if (!config) return false;
+  const messaging = config.messaging as Array<{ type: string; enabled: boolean }> | undefined;
+  return !!messaging?.some(m => m.type === 'whatsapp' && m.enabled);
+}
+
+/**
+ * Install scripts for configured integrations (e.g., Telegram relay, WhatsApp relay).
  * Called during refresh to ensure scripts exist for all configured integrations.
  */
 function refreshScripts(projectDir: string, stateDir: string): void {
@@ -2246,6 +2256,11 @@ function refreshScripts(projectDir: string, stateDir: string): void {
   // Install telegram-reply.sh if Telegram is configured
   if (isTelegramConfigured(stateDir)) {
     installTelegramRelay(projectDir, port);
+  }
+
+  // Install whatsapp-reply.sh if WhatsApp is configured
+  if (isWhatsAppConfigured(stateDir)) {
+    installWhatsAppRelay(projectDir, port);
   }
 
   // Always install smart-fetch.py (agentic web conventions)
@@ -2323,6 +2338,87 @@ fi
 }
 
 /**
+ * Install the WhatsApp relay script that Claude uses to send responses
+ * back to WhatsApp JIDs via the instar server API.
+ */
+function installWhatsAppRelay(projectDir: string, port: number): void {
+  const scriptsDir = path.join(projectDir, '.instar', 'scripts');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+
+  const scriptContent = `#!/bin/bash
+# whatsapp-reply.sh — Send a message back to a WhatsApp JID via instar server.
+#
+# Usage:
+#   .instar/scripts/whatsapp-reply.sh JID "message text"
+#   echo "message text" | .instar/scripts/whatsapp-reply.sh JID
+#   cat <<'EOF' | .instar/scripts/whatsapp-reply.sh JID
+#   Multi-line message here
+#   EOF
+#
+# JID format: phone@s.whatsapp.net (e.g., 12345678901@s.whatsapp.net)
+
+JID="$1"
+shift
+
+if [ -z "$JID" ]; then
+  echo "Usage: whatsapp-reply.sh JID [message]" >&2
+  exit 1
+fi
+
+# Read message from args or stdin
+if [ $# -gt 0 ]; then
+  MSG="$*"
+else
+  MSG="$(cat)"
+fi
+
+if [ -z "$MSG" ]; then
+  echo "No message provided" >&2
+  exit 1
+fi
+
+PORT="\${INSTAR_PORT:-${port}}"
+
+# Read auth token from config (if present)
+AUTH_TOKEN=""
+if [ -f ".instar/config.json" ]; then
+  AUTH_TOKEN=$(python3 -c "import json; print(json.load(open('.instar/config.json')).get('authToken',''))" 2>/dev/null)
+fi
+
+# Escape for JSON
+JSON_MSG=$(printf '%s' "$MSG" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null)
+if [ -z "$JSON_MSG" ]; then
+  JSON_MSG="$(printf '%s' "$MSG" | sed 's/\\\\\\\\/\\\\\\\\\\\\\\\\/g; s/"/\\\\\\\\"/g' | sed ':a;N;$!ba;s/\\\\n/\\\\\\\\n/g')"
+  JSON_MSG="\\"$JSON_MSG\\""
+fi
+
+if [ -n "$AUTH_TOKEN" ]; then
+  RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST "http://localhost:\${PORT}/whatsapp/send/\${JID}" \\
+    -H 'Content-Type: application/json' \\
+    -H "Authorization: Bearer \${AUTH_TOKEN}" \\
+    -d "{\\"text\\":\${JSON_MSG}}")
+else
+  RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST "http://localhost:\${PORT}/whatsapp/send/\${JID}" \\
+    -H 'Content-Type: application/json' \\
+    -d "{\\"text\\":\${JSON_MSG}}")
+fi
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+BODY=$(echo "$RESPONSE" | sed '$d')
+
+if [ "$HTTP_CODE" = "200" ]; then
+  echo "Sent $(echo "$MSG" | wc -c | tr -d ' ') chars to $JID"
+else
+  echo "Failed (HTTP $HTTP_CODE): $BODY" >&2
+  exit 1
+fi
+`;
+
+  const scriptPath = path.join(scriptsDir, 'whatsapp-reply.sh');
+  fs.writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
+}
+
+/**
  * Append missing sections to CLAUDE.md without overwriting user customizations.
  * Reads config.json for port, checks for known section headers, appends if missing.
  * Also adds Telegram relay section if Telegram is configured.
@@ -2392,6 +2488,25 @@ You have a built-in evolution system with four subsystems that track your growth
 
 **Dashboard**: \`curl http://localhost:${port}/evolution\`
 **Skills**: \`/evolve\`, \`/learn\`, \`/gaps\`, \`/commit-action\`
+`);
+  }
+
+  // Check for WhatsApp Relay section (add if WhatsApp is configured)
+  if (isWhatsAppConfigured(stateDir) && !content.includes('WhatsApp Relay')) {
+    additions.push(`
+## WhatsApp Relay
+
+When user input starts with \`[whatsapp:JID]\` (e.g., \`[whatsapp:12345678901@s.whatsapp.net] hello\`), the message came from a user via WhatsApp.
+
+**Response relay:** After completing your work, relay your response back:
+
+\`\`\`bash
+cat <<'EOF' | .instar/scripts/whatsapp-reply.sh JID
+Your response text here
+EOF
+\`\`\`
+
+Strip the \`[whatsapp:JID]\` prefix before interpreting the message. Respond naturally, then relay. Only relay your conversational text — not tool output or internal reasoning.
 `);
   }
 

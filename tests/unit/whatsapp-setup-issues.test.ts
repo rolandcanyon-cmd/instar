@@ -143,17 +143,19 @@ describe('Issue 2: Baileys connection failure error handling', () => {
     expect(src).toContain('err?.statusCode');
   });
 
-  it('terminal failures do NOT trigger reconnect', () => {
+  it('terminal failures (405/403) do NOT trigger reconnect', () => {
     const connectionCloseSection = src.substring(
       src.indexOf("if (connection === 'close')"),
       src.indexOf('// Message events'),
     );
 
-    // isTerminalFailure block should not contain scheduleReconnect
-    const terminalBlock = connectionCloseSection.substring(
-      connectionCloseSection.indexOf('isTerminalFailure'),
-      connectionCloseSection.indexOf('// Transient failure'),
-    );
+    // The "else if (isTerminalFailure)" block should not contain scheduleReconnect.
+    // Note: the loggedOut block above it CAN have scheduleReconnect for stale cred recovery,
+    // so we specifically check the isTerminalFailure else-if block.
+    const terminalBlockStart = connectionCloseSection.indexOf('} else if (isTerminalFailure)');
+    const terminalBlockEnd = connectionCloseSection.indexOf('} else {', terminalBlockStart + 1);
+    const terminalBlock = connectionCloseSection.substring(terminalBlockStart, terminalBlockEnd);
+    expect(terminalBlock).toContain("Don't reconnect");
     expect(terminalBlock).not.toContain('scheduleReconnect');
   });
 
@@ -186,9 +188,9 @@ describe('Issue 2: Baileys connection failure error handling', () => {
   });
 });
 
-// ── Issue 3: Pairing code timing ─────────────────────────────
+// ── Issue 3: Pairing code timing (fixed: request on QR event, not connection open) ──
 
-describe('Issue 3: Pairing code requests after connection open', () => {
+describe('Issue 3: Pairing code requests on QR event', () => {
   const baileysBackendPath = path.join(process.cwd(), 'src/messaging/backends/BaileysBackend.ts');
   let src: string;
 
@@ -196,30 +198,68 @@ describe('Issue 3: Pairing code requests after connection open', () => {
     src = fs.readFileSync(baileysBackendPath, 'utf-8');
   });
 
-  it('requestPairingCode is called inside the connection open handler', () => {
-    const openSection = src.substring(
-      src.indexOf("connection === 'open'"),
-      src.indexOf("connection === 'close'"),
+  it('requestPairingCode is called in the QR event handler, NOT inside connection open', () => {
+    // The fix: pairing code must be requested when QR fires (socket connected to WA servers),
+    // NOT after connection === 'open' (which only fires AFTER auth completes — chicken-and-egg).
+    const qrSection = src.substring(
+      src.indexOf('if (qr)'),
+      src.indexOf("if (connection === 'open')"),
     );
-    expect(openSection).toContain('requestPairingCode');
+    expect(qrSection).toContain('requestPairingCode');
+
+    // Should NOT be in the connection open block
+    const openSection = src.substring(
+      src.indexOf("if (connection === 'open')"),
+      src.indexOf("if (connection === 'close')"),
+    );
+    expect(openSection).not.toContain('requestPairingCode');
+  });
+
+  it('uses _pairingCodeRequested flag to prevent duplicate requests', () => {
+    expect(src).toContain('_pairingCodeRequested');
+    // Should check the flag before requesting
+    const qrSection = src.substring(
+      src.indexOf('if (qr)'),
+      src.indexOf("if (connection === 'open')"),
+    );
+    expect(qrSection).toContain('!this._pairingCodeRequested');
+    // Should set it to true before calling
+    expect(qrSection).toContain('this._pairingCodeRequested = true');
+  });
+
+  it('resets _pairingCodeRequested on failure to allow retry', () => {
+    const qrSection = src.substring(
+      src.indexOf('if (qr)'),
+      src.indexOf("if (connection === 'open')"),
+    );
+    // In the catch block, should reset the flag
+    const catchIdx = qrSection.indexOf('catch (pairErr)');
+    expect(catchIdx).toBeGreaterThan(-1);
+    const catchBlock = qrSection.substring(catchIdx, catchIdx + 200);
+    expect(catchBlock).toContain('this._pairingCodeRequested = false');
+  });
+
+  it('resets _pairingCodeRequested on successful connection for future reconnections', () => {
+    const openSection = src.substring(
+      src.indexOf("if (connection === 'open')"),
+      src.indexOf("if (connection === 'close')"),
+    );
+    expect(openSection).toContain('this._pairingCodeRequested = false');
   });
 
   it('requestPairingCode is NOT called outside the connection handler', () => {
-    // The old code had requestPairingCode at the end of connect() outside any handler
     const afterHandlers = src.substring(src.indexOf("// Message events"));
     const connectEnd = afterHandlers.substring(0, afterHandlers.indexOf('disconnect'));
     expect(connectEnd).not.toContain('requestPairingCode');
   });
 
   it('requestPairingCode has error handling', () => {
-    const openSection = src.substring(
-      src.indexOf("connection === 'open'"),
-      src.indexOf("connection === 'close'"),
+    const qrSection = src.substring(
+      src.indexOf('if (qr)'),
+      src.indexOf("if (connection === 'open')"),
     );
-    // Should be wrapped in try/catch
-    const pairSection = openSection.substring(openSection.indexOf('requestPairingCode') - 200);
-    expect(pairSection).toContain('catch');
-    expect(pairSection).toContain('Failed to request pairing code');
+    expect(qrSection).toContain('catch');
+    expect(qrSection).toContain('Failed to request pairing code');
   });
 });
 
@@ -383,6 +423,126 @@ describe('WhatsApp adapter error reporting', () => {
     const qrStart = src.indexOf("router.get('/whatsapp/qr'");
     const qrSection = src.substring(qrStart, qrStart + 500);
     expect(qrSection).toContain('lastError');
+  });
+});
+
+// ── Issue 6: Config structure mismatch (getBaileysConfig fallback) ──
+
+describe('Issue 6: getBaileysConfig() falls back to top-level config', () => {
+  const adapterPath = path.join(process.cwd(), 'src/messaging/WhatsAppAdapter.ts');
+  let src: string;
+
+  beforeEach(() => {
+    src = fs.readFileSync(adapterPath, 'utf-8');
+  });
+
+  it('getBaileysConfig falls back to top-level authMethod when baileys key is missing', () => {
+    const fnStart = src.indexOf('getBaileysConfig()');
+    const fnEnd = src.indexOf('\n  }', fnStart);
+    const fnBody = src.substring(fnStart, fnEnd);
+    // Should reference topLevel or this.config for authMethod fallback
+    expect(fnBody).toContain('topLevel.authMethod');
+  });
+
+  it('getBaileysConfig falls back to top-level pairingPhoneNumber when baileys key is missing', () => {
+    const fnStart = src.indexOf('getBaileysConfig()');
+    const fnEnd = src.indexOf('\n  }', fnStart);
+    const fnBody = src.substring(fnStart, fnEnd);
+    expect(fnBody).toContain('topLevel.pairingPhoneNumber');
+  });
+
+  it('getBaileysConfig prefers nested baileys values over top-level', () => {
+    const fnStart = src.indexOf('getBaileysConfig()');
+    const fnEnd = src.indexOf('\n  }', fnStart);
+    const fnBody = src.substring(fnStart, fnEnd);
+    // bc.authMethod should be checked first (before topLevel)
+    const bcIndex = fnBody.indexOf('bc.authMethod');
+    const topLevelIndex = fnBody.indexOf('topLevel.authMethod');
+    expect(bcIndex).toBeLessThan(topLevelIndex);
+  });
+
+  it('getBaileysConfig defaults to qr when neither nested nor top-level authMethod exists', () => {
+    const fnStart = src.indexOf('getBaileysConfig()');
+    const fnEnd = src.indexOf('\n  }', fnStart);
+    const fnBody = src.substring(fnStart, fnEnd);
+    // Should have 'qr' as final fallback
+    expect(fnBody).toContain("?? 'qr'");
+  });
+});
+
+// ── Issue 7: Stale credential handling (401 after incomplete pairing) ──
+
+describe('Issue 7: Stale credential auto-clear on 401', () => {
+  const baileysBackendPath = path.join(process.cwd(), 'src/messaging/backends/BaileysBackend.ts');
+  let src: string;
+
+  beforeEach(() => {
+    src = fs.readFileSync(baileysBackendPath, 'utf-8');
+  });
+
+  it('checks creds.json age when receiving a 401 (loggedOut)', () => {
+    const loggedOutSection = src.substring(
+      src.indexOf('if (loggedOut)'),
+      src.indexOf('} else if (isTerminalFailure)'),
+    );
+    expect(loggedOutSection).toContain('creds.json');
+    expect(loggedOutSection).toContain('statSync');
+    expect(loggedOutSection).toContain('ageMs');
+  });
+
+  it('uses 5-minute threshold to distinguish stale incomplete pairing from real logout', () => {
+    const loggedOutSection = src.substring(
+      src.indexOf('if (loggedOut)'),
+      src.indexOf('} else if (isTerminalFailure)'),
+    );
+    expect(loggedOutSection).toContain('5 * 60 * 1000');
+  });
+
+  it('auto-clears auth directory when credentials are stale from incomplete pairing', () => {
+    const loggedOutSection = src.substring(
+      src.indexOf('if (loggedOut)'),
+      src.indexOf('} else if (isTerminalFailure)'),
+    );
+    expect(loggedOutSection).toContain('rmSync');
+    expect(loggedOutSection).toContain('recursive: true');
+    expect(loggedOutSection).toContain('force: true');
+    // Should recreate the directory after clearing
+    expect(loggedOutSection).toContain('mkdirSync');
+  });
+
+  it('schedules reconnect after clearing stale credentials', () => {
+    const loggedOutSection = src.substring(
+      src.indexOf('if (isStaleIncomplete)'),
+      src.indexOf('} else {'),
+    );
+    expect(loggedOutSection).toContain('scheduleReconnect');
+  });
+
+  it('resets _pairingCodeRequested after clearing stale credentials', () => {
+    const loggedOutSection = src.substring(
+      src.indexOf('if (isStaleIncomplete)'),
+      src.indexOf('} else {'),
+    );
+    expect(loggedOutSection).toContain('this._pairingCodeRequested = false');
+  });
+
+  it('still treats genuine logout (old creds) as terminal', () => {
+    const loggedOutSection = src.substring(
+      src.indexOf('if (loggedOut)'),
+      src.indexOf('} else if (isTerminalFailure)'),
+    );
+    // The else branch (not stale) should call onDisconnected with logged-out
+    expect(loggedOutSection).toContain("onDisconnected('logged-out', false)");
+  });
+
+  it('handles missing creds.json gracefully (no crash)', () => {
+    const loggedOutSection = src.substring(
+      src.indexOf('if (loggedOut)'),
+      src.indexOf('} else if (isTerminalFailure)'),
+    );
+    // Should have try/catch around statSync
+    expect(loggedOutSection).toContain('catch');
+    expect(loggedOutSection).toContain('no creds file');
   });
 });
 

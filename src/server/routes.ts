@@ -2245,6 +2245,40 @@ export function createRoutes(ctx: RouteContext): Router {
     });
   });
 
+  // Send a WhatsApp message to a JID (used by whatsapp-reply.sh from Claude sessions)
+  router.post('/whatsapp/send/:jid', async (req, res) => {
+    if (!ctx.whatsapp) {
+      res.status(503).json({ error: 'WhatsApp not configured' });
+      return;
+    }
+
+    const { jid } = req.params;
+    if (!jid) {
+      res.status(400).json({ error: 'jid parameter required' });
+      return;
+    }
+    const { text } = req.body;
+    if (!text || typeof text !== 'string') {
+      res.status(400).json({ error: '"text" field required' });
+      return;
+    }
+    if (text.length > 40000) {
+      res.status(400).json({ error: '"text" must be 40000 characters or fewer' });
+      return;
+    }
+
+    try {
+      await ctx.whatsapp.send({
+        content: text,
+        userId: jid,
+        channel: { type: 'whatsapp', identifier: jid },
+      });
+      res.json({ ok: true, jid });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   router.get('/messaging/bridge', (_req, res) => {
     if (!ctx.messageBridge) {
       res.status(503).json({ error: 'Message bridge not configured' });

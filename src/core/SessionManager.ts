@@ -699,6 +699,34 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Inject a WhatsApp message into a tmux session.
+   * Tags with [whatsapp:JID] and handles long messages via temp files.
+   */
+  injectWhatsAppMessage(tmuxSession: string, jid: string, text: string, senderName?: string): void {
+    const FILE_THRESHOLD = 500;
+
+    // Build tag: [whatsapp:12345678901@s.whatsapp.net from Justin]
+    const nameTag = senderName ? ` from ${senderName.replace(/[\[\]]/g, '')}` : '';
+    const tag = `[whatsapp:${jid}${nameTag}]`;
+    const taggedText = `${tag} ${text}`;
+
+    if (taggedText.length <= FILE_THRESHOLD) {
+      this.injectMessage(tmuxSession, taggedText);
+      return;
+    }
+
+    // Write full message to temp file
+    const tmpDir = path.join('/tmp', 'instar-whatsapp');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const filename = `msg-${jid.split('@')[0]}-${Date.now()}.txt`;
+    const filepath = path.join(tmpDir, filename);
+    fs.writeFileSync(filepath, taggedText);
+
+    const ref = `${tag} [Long message saved to ${filepath} — read it to see the full message]`;
+    this.injectMessage(tmuxSession, ref);
+  }
+
+  /**
    * Send text to a tmux session via send-keys.
    * For multi-line text, uses bracketed paste mode escape sequences so the
    * terminal treats newlines as literal text rather than Enter keypresses.

@@ -942,6 +942,63 @@ function wireTelegramRouting(
 }
 
 /**
+ * Wire WhatsApp message routing: incoming messages → Claude sessions.
+ *
+ * Similar to wireTelegramRouting but for WhatsApp JIDs instead of Telegram topics.
+ * Maps JIDs to sessions, spawns new sessions for new conversations,
+ * injects messages into existing sessions, and handles respawning.
+ */
+function wireWhatsAppRouting(
+  whatsapp: import('../messaging/WhatsAppAdapter.js').WhatsAppAdapter,
+  sessionManager: SessionManager,
+): void {
+  whatsapp.onMessage(async (msg) => {
+    const jid = msg.channel?.identifier;
+    if (!jid) return;
+
+    const text = msg.content;
+    const senderName = (msg.metadata?.senderName as string) ?? undefined;
+
+    // Check for existing session
+    const targetSession = whatsapp.getSessionForChannel(jid);
+
+    if (targetSession) {
+      // Session exists — check if alive
+      if (sessionManager.isSessionAlive(targetSession)) {
+        console.log(`[whatsapp→session] Injecting into ${targetSession}: "${text.slice(0, 80)}"`);
+        sessionManager.injectWhatsAppMessage(targetSession, jid, text, senderName);
+      } else {
+        // Session died — respawn
+        console.log(`[whatsapp→session] Session "${targetSession}" died, respawning...`);
+        try {
+          const replyInstruction = `(IMPORTANT: Relay all responses back via: cat <<'EOF' | .instar/scripts/whatsapp-reply.sh ${jid}\nYour response\nEOF)`;
+          const bootstrap = `[whatsapp:${jid}] ${text} ${replyInstruction}`;
+          const sessionName = `wa-${jid.split('@')[0].slice(-6)}`;
+          const newSession = await sessionManager.spawnInteractiveSession(bootstrap, sessionName);
+          whatsapp.registerSession(jid, newSession);
+          console.log(`[whatsapp→session] Respawned "${newSession}" for ${jid}`);
+        } catch (err) {
+          console.error(`[whatsapp→session] Respawn failed:`, err);
+        }
+      }
+    } else {
+      // No session — auto-spawn
+      console.log(`[whatsapp→session] No session for ${jid}, auto-spawning...`);
+      try {
+        const replyInstruction = `(IMPORTANT: Relay all responses back via: cat <<'EOF' | .instar/scripts/whatsapp-reply.sh ${jid}\nYour response\nEOF)`;
+        const bootstrap = `[whatsapp:${jid}${senderName ? ` from ${senderName}` : ''}] ${text} ${replyInstruction}`;
+        const sessionName = `wa-${jid.split('@')[0].slice(-6)}`;
+        const newSession = await sessionManager.spawnInteractiveSession(bootstrap, sessionName);
+        whatsapp.registerSession(jid, newSession);
+        console.log(`[whatsapp→session] Spawned "${newSession}" for ${jid}`);
+      } catch (err) {
+        console.error(`[whatsapp→session] Auto-spawn failed:`, err);
+      }
+    }
+  });
+}
+
+/**
  * Ensure the Agent Attention topic exists — the agent's direct line to the user.
  * Created once on first server start, persisted in state.
  */
@@ -1807,6 +1864,10 @@ export async function startServer(options: StartOptions): Promise<void> {
           );
           await baileysBackend.connect();
         }
+
+        // Wire WhatsApp → Claude session routing
+        wireWhatsAppRouting(whatsappAdapter, sessionManager);
+        console.log(pc.green('  WhatsApp message routing: wired'));
 
         // Wire cross-platform alerts if both adapters are available
         if (telegram && whatsappAdapter) {
