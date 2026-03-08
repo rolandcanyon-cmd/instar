@@ -971,7 +971,7 @@ function wireWhatsAppRouting(
           const newSession = await sessionManager.spawnInteractiveSession(bootstrap, sessionName);
           whatsapp.registerSession(jid, newSession);
           console.log(`[whatsapp→session] Respawned "${newSession}" for ${jid}`);
-        } catch (err) {
+        } catch (err) { // @silent-fallback-ok — matches Telegram respawn pattern
           console.error(`[whatsapp→session] Respawn failed:`, err);
         }
       }
@@ -985,7 +985,7 @@ function wireWhatsAppRouting(
         const newSession = await sessionManager.spawnInteractiveSession(bootstrap, sessionName);
         whatsapp.registerSession(jid, newSession);
         console.log(`[whatsapp→session] Spawned "${newSession}" for ${jid}`);
-      } catch (err) {
+      } catch (err) { // @silent-fallback-ok — matches Telegram auto-spawn pattern
         console.error(`[whatsapp→session] Auto-spawn failed:`, err);
       }
     }
