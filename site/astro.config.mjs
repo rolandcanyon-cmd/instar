@@ -75,6 +75,7 @@ export default defineConfig({
         {
           label: 'Guides',
           items: [
+            { label: 'Agent Communication', slug: 'guides/agent-communication' },
             { label: 'Security Model', slug: 'guides/security' },
             { label: 'vs OpenClaw', slug: 'guides/vs-openclaw' },
           ],

@@ -123,6 +123,27 @@ The Instar server exposes a REST API on `localhost:4040` (configurable). All end
 | GET | `/messages/outbox` | Inter-agent outbox |
 | GET | `/messages/dead-letter` | Dead letter queue |
 
+## Threadline (MCP Tools)
+
+These tools are registered as an MCP server and called by Claude Code (or any MCP client) via stdio transport. They are registered automatically on server boot.
+
+| Tool | Description |
+|------|-------------|
+| `threadline_discover` | Find Threadline-capable agents. Scope: `local` (same machine) or `network` (known remotes). Optional capability filter |
+| `threadline_send` | Send a message to an agent. Creates or resumes a persistent thread. Optional `waitForReply` (default true, 120s timeout) |
+| `threadline_history` | Retrieve conversation history from a thread. Supports pagination via `limit` and `before` timestamp |
+| `threadline_agents` | List known agents with status, capabilities, framework, trust level, and active thread count |
+| `threadline_delete` | Delete a thread permanently. Requires `confirm: true` |
+
+### Threadline REST Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/messages/inbox` | Inter-agent inbox |
+| GET | `/messages/outbox` | Inter-agent outbox |
+| GET | `/messages/dead-letter` | Dead letter queue |
+| POST | `/messages/send` | Send a message (used internally by MCP tools) |
+
 ## Serendipity Protocol
 
 | Method | Path | Description |
