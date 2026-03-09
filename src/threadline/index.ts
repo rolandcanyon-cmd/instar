@@ -67,3 +67,20 @@ export type {
   RateLimitResult,
   RateLimitStatus,
 } from './RateLimiter.js';
+
+export { MCPAuth } from './MCPAuth.js';
+export type {
+  MCPTokenScope,
+  MCPTokenInfo,
+  MCPTokenCreateResult,
+} from './MCPAuth.js';
+
+export { ThreadlineMCPServer } from './ThreadlineMCPServer.js';
+export type {
+  ThreadlineMCPServerConfig,
+  ThreadlineMCPDeps,
+  SendMessageParams,
+  SendMessageResult,
+  ThreadHistoryMessage,
+  ThreadHistoryResult,
+} from './ThreadlineMCPServer.js';
