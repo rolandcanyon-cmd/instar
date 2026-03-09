@@ -123,6 +123,13 @@ The Instar server exposes a REST API on `localhost:4040` (configurable). All end
 | GET | `/messages/outbox` | Inter-agent outbox |
 | GET | `/messages/dead-letter` | Dead letter queue |
 
+## Serendipity Protocol
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/serendipity/stats` | Pending, processed, and invalid finding counts with details |
+| GET | `/serendipity/findings` | List all pending findings (full JSON) |
+
 ## Backup
 
 | Method | Path | Description |

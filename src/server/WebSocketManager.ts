@@ -31,6 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
+import type { HookEventReceiver } from '../monitoring/HookEventReceiver.js';
 
 interface ClientState {
   ws: WebSocket;
@@ -49,6 +50,7 @@ export class WebSocketManager {
   private state: StateManager;
   private authToken?: string;
   private registryPath?: string;
+  private hookEventReceiver?: HookEventReceiver;
 
   constructor(options: {
     server: HttpServer;
@@ -56,10 +58,12 @@ export class WebSocketManager {
     state: StateManager;
     authToken?: string;
     instarDir?: string;
+    hookEventReceiver?: HookEventReceiver;
   }) {
     this.sessionManager = options.sessionManager;
     this.state = options.state;
     this.authToken = options.authToken;
+    this.hookEventReceiver = options.hookEventReceiver;
     if (options.instarDir) {
       this.registryPath = path.join(options.instarDir, 'topic-session-registry.json');
     }
@@ -302,15 +306,33 @@ export class WebSocketManager {
   private buildSessionList() {
     const running = this.sessionManager.listRunningSessions();
     const displayNames = this.getTopicDisplayNames();
-    return running.map(s => ({
-      id: s.id,
-      name: displayNames.get(s.tmuxSession) || s.name,
-      tmuxSession: s.tmuxSession,
-      status: s.status,
-      startedAt: s.startedAt,
-      jobSlug: s.jobSlug,
-      model: s.model,
-    }));
+    return running.map(s => {
+      const base: Record<string, unknown> = {
+        id: s.id,
+        name: displayNames.get(s.tmuxSession) || s.name,
+        tmuxSession: s.tmuxSession,
+        status: s.status,
+        startedAt: s.startedAt,
+        jobSlug: s.jobSlug,
+        model: s.model,
+        type: s.jobSlug ? 'job' : 'interactive',
+      };
+
+      // Enrich with hook event telemetry when available
+      if (this.hookEventReceiver) {
+        const summary = this.hookEventReceiver.getSessionSummary(s.tmuxSession);
+        if (summary) {
+          base.telemetry = {
+            eventCount: summary.eventCount,
+            toolsUsed: summary.toolsUsed,
+            subagentsSpawned: summary.subagentsSpawned,
+            lastActivity: summary.lastEvent,
+          };
+        }
+      }
+
+      return base;
+    });
   }
 
   private sendSessionList(ws: WebSocket): void {

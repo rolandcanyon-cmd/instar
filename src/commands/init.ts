@@ -33,7 +33,7 @@ import path from 'node:path';
 import pc from 'picocolors';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { detectTmuxPath, detectClaudePath, detectGitPath, detectGhPath, ensureStateDir, standaloneAgentsDir } from '../core/Config.js';
+import { detectTmuxPath, detectClaudePath, detectGitPath, detectGhPath, ensureStateDir, standaloneAgentsDir, getInstarVersion } from '../core/Config.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { allocatePort, registerAgent, validateAgentName } from '../core/AgentRegistry.js';
 import { defaultIdentity } from '../scaffold/bootstrap.js';
@@ -299,6 +299,9 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   installGitSyncGate(projectDir);
   console.log(`  ${pc.green('✓')} Created .claude/scripts/git-sync-gate.sh (git sync pre-screening)`);
 
+  installSerendipityCapture(projectDir);
+  console.log(`  ${pc.green('✓')} Created .instar/scripts/serendipity-capture.sh`);
+
   // Create .claude/skills/ directory and install built-in skills
   const skillsDir = path.join(projectDir, '.claude', 'skills');
   fs.mkdirSync(skillsDir, { recursive: true });
@@ -357,6 +360,12 @@ node_modules/
   } catch {
     // Git not available — that's fine
   }
+
+  // Record current version so first server start doesn't dump all historical upgrade guides
+  const freshVersionFile = path.join(stateDir, 'state', 'last-migrated-version.json');
+  const freshVersionDir = path.dirname(freshVersionFile);
+  if (!fs.existsSync(freshVersionDir)) fs.mkdirSync(freshVersionDir, { recursive: true });
+  fs.writeFileSync(freshVersionFile, JSON.stringify({ version: getInstarVersion(), migratedAt: new Date().toISOString() }));
 
   // Register in global agent registry
   try {
@@ -600,6 +609,10 @@ async function initExistingProject(options: InitOptions): Promise<void> {
   installGitSyncGate(projectDir);
   console.log(pc.green('  Created:') + ' .claude/scripts/git-sync-gate.sh (git sync pre-screening)');
 
+  // Install serendipity capture script
+  installSerendipityCapture(projectDir);
+  console.log(pc.green('  Created:') + ' .instar/scripts/serendipity-capture.sh');
+
   // Create .claude/skills/ directory and install built-in skills
   const skillsDir = path.join(projectDir, '.claude', 'skills');
   fs.mkdirSync(skillsDir, { recursive: true });
@@ -640,6 +653,11 @@ async function initExistingProject(options: InitOptions): Promise<void> {
       console.log(pc.green('  Updated:') + ' CLAUDE.md (added agency principles)');
     }
   }
+
+  // Record current version so first server start doesn't dump all historical upgrade guides
+  const existingVersionFile = path.join(stateDir, 'state', 'last-migrated-version.json');
+  if (!fs.existsSync(path.dirname(existingVersionFile))) fs.mkdirSync(path.dirname(existingVersionFile), { recursive: true });
+  fs.writeFileSync(existingVersionFile, JSON.stringify({ version: getInstarVersion(), migratedAt: new Date().toISOString() }));
 
   // Register in global agent registry
   try {
@@ -842,6 +860,12 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
   } catch {
     // Non-fatal
   }
+
+  // Record current version so first server start doesn't dump all historical upgrade guides
+  const standaloneVersionFile = path.join(stateDir, 'state', 'last-migrated-version.json');
+  const standaloneVersionDir = path.dirname(standaloneVersionFile);
+  if (!fs.existsSync(standaloneVersionDir)) fs.mkdirSync(standaloneVersionDir, { recursive: true });
+  fs.writeFileSync(standaloneVersionFile, JSON.stringify({ version: getInstarVersion(), migratedAt: new Date().toISOString() }));
 
   // Register in global agent registry
   try {
@@ -1576,6 +1600,114 @@ Your feedback is stored locally AND forwarded to the instar maintainers. When th
 **User feedback matters too.** When your user says "this isn't working" or "I wish I could..." — capture it with their original words. User language carries context that technical rephrasing loses.
 `,
     },
+    'triage-findings': {
+      name: 'triage-findings',
+      description: 'Review and route pending serendipity findings captured by sub-agents.',
+      content: `---
+name: triage-findings
+description: Review and route pending serendipity findings captured by sub-agents.
+metadata:
+  user_invocable: "true"
+---
+
+# /triage-findings
+
+Review pending serendipity findings — discoveries captured by sub-agents during focused tasks. Route each finding to the appropriate destination: Evolution proposals, dismiss, or flag for manual review.
+
+## Steps
+
+1. **List pending findings**:
+
+\\\`\\\`\\\`bash
+ls .instar/state/serendipity/*.json 2>/dev/null
+\\\`\\\`\\\`
+
+If no findings exist, report "No pending findings" and stop.
+
+2. **For each finding**, read and verify:
+   a. Parse the JSON file
+   b. Verify HMAC signature (read authToken from .instar/config.json, derive signing key from HMAC-SHA256(authToken, "serendipity-v1:" + sessionId), verify the signed payload)
+   c. If HMAC fails, move to \\\`.instar/state/serendipity/invalid/\\\` and log the failure
+   d. If a .patch file is referenced, verify it exists and its SHA-256 matches \\\`artifacts.patchSha256\\\`
+
+3. **Assess each valid finding**:
+   - Is it actionable? Does it describe a real issue or improvement?
+   - Is it a duplicate of something already proposed?
+   - Check existing evolution proposals: \\\`curl -s -H "Authorization: Bearer $AUTH" http://localhost:${port}/evolution/proposals\\\`
+
+4. **Route the finding** (one of):
+
+   **a. Promote to Evolution proposal** (for actionable findings):
+   \\\`\\\`\\\`bash
+   curl -s -X POST http://localhost:${port}/evolution/proposals \\\\
+     -H "Authorization: Bearer $AUTH" \\\\
+     -H 'Content-Type: application/json' \\\\
+     -d '{"title":"FINDING_TITLE","source":"serendipity:FINDING_ID","description":"FINDING_DESCRIPTION","type":"TYPE","impact":"IMPACT","effort":"EFFORT","tags":["serendipity","from-subagent"]}'
+   \\\`\\\`\\\`
+
+   **b. Dismiss** (for low-value, duplicate, or stale findings):
+   Move to processed directory with a note.
+
+   **c. Flag for manual review** (for findings you're uncertain about):
+   Queue an attention item:
+   \\\`\\\`\\\`bash
+   curl -s -X POST http://localhost:${port}/attention \\\\
+     -H "Authorization: Bearer $AUTH" \\\\
+     -H 'Content-Type: application/json' \\\\
+     -d '{"title":"Serendipity finding needs review: TITLE","body":"DESCRIPTION","priority":"low","source":"serendipity"}'
+   \\\`\\\`\\\`
+
+5. **Move processed finding** to \\\`.instar/state/serendipity/processed/\\\`:
+   \\\`\\\`\\\`bash
+   mv .instar/state/serendipity/FINDING_ID.json .instar/state/serendipity/processed/
+   mv .instar/state/serendipity/FINDING_ID.patch .instar/state/serendipity/processed/ 2>/dev/null
+   \\\`\\\`\\\`
+
+6. **Report summary**: How many findings triaged, how many promoted, dismissed, flagged.
+
+## HMAC Verification (Python)
+
+\\\`\\\`\\\`python
+import json, hmac, hashlib
+
+finding = json.load(open('FINDING_FILE'))
+config = json.load(open('.instar/config.json'))
+auth_token = config.get('authToken', '')
+session_id = finding['source']['sessionId']
+
+# Derive signing key
+key_material = f"serendipity-v1:{session_id}"
+signing_key = hmac.new(auth_token.encode(), key_material.encode(), hashlib.sha256).hexdigest()
+
+# Build canonical signed payload
+signed_data = {"id": finding["id"], "createdAt": finding["createdAt"],
+               "discovery": finding["discovery"], "source": finding["source"]}
+if "artifacts" in finding:
+    signed_data["artifacts"] = finding["artifacts"]
+canonical = json.dumps(signed_data, sort_keys=True, separators=(',', ':'))
+
+expected = hmac.new(signing_key.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+valid = hmac.compare_digest(expected, finding.get('hmac', ''))
+\\\`\\\`\\\`
+
+## Category to Evolution Type Mapping
+
+| Serendipity Category | Evolution Type |
+|---------------------|---------------|
+| bug | capability |
+| improvement | capability |
+| feature | capability |
+| pattern | workflow |
+| refactor | infrastructure |
+| security | infrastructure |
+
+## When to Run
+
+- When session-start hook reports pending findings
+- Periodically (the evolution-review job can trigger this)
+- When the user asks about pending discoveries
+`,
+    },
   };
 
   for (const [slug, skill] of Object.entries(skills)) {
@@ -1596,7 +1728,7 @@ function getDefaultJobs(port: number): object[] {
       description: 'Monitor server health, session status, and system resources.',
       schedule: '*/5 * * * *',
       priority: 'critical',
-      expectedDurationMinutes: 1,
+      expectedDurationMinutes: 3,
       model: 'haiku',
       enabled: true,
       execute: {
@@ -2268,6 +2400,9 @@ function refreshScripts(projectDir: string, stateDir: string): void {
 
   // Always install git-sync-gate.sh (pre-screening for git-sync job)
   installGitSyncGate(projectDir);
+
+  // Always install serendipity-capture.sh
+  installSerendipityCapture(projectDir);
 }
 
 /**
@@ -2949,6 +3084,45 @@ def main():
 if __name__ == '__main__':
     main()
 `;
+
+  fs.writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
+}
+
+/**
+ * Install serendipity-capture.sh — Helper script for sub-agents to capture
+ * valuable out-of-scope findings during focused tasks.
+ *
+ * Reads the script from src/templates/scripts/serendipity-capture.sh rather
+ * than embedding it inline (345 lines). Handles JSON construction, HMAC signing,
+ * atomic writes, rate limiting, secret scanning, and patch file validation.
+ */
+function installSerendipityCapture(projectDir: string): void {
+  const scriptsDir = path.join(projectDir, '.instar', 'scripts');
+  fs.mkdirSync(scriptsDir, { recursive: true });
+
+  const scriptPath = path.join(scriptsDir, 'serendipity-capture.sh');
+
+  // Resolve template from package directory
+  // In dev: src/commands/ → ../../src/templates/scripts/serendipity-capture.sh
+  // In dist: dist/commands/ → ../templates/scripts/serendipity-capture.sh
+  const modDir = path.dirname(new URL(import.meta.url).pathname);
+  const candidates = [
+    path.resolve(modDir, '..', 'templates', 'scripts', 'serendipity-capture.sh'),
+    path.resolve(modDir, '..', '..', 'src', 'templates', 'scripts', 'serendipity-capture.sh'),
+  ];
+
+  let scriptContent = '';
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      scriptContent = fs.readFileSync(candidate, 'utf-8');
+      break;
+    }
+  }
+
+  if (!scriptContent) {
+    // Non-fatal: skip if template not found (e.g., during development)
+    return;
+  }
 
   fs.writeFileSync(scriptPath, scriptContent, { mode: 0o755 });
 }

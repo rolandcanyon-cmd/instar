@@ -23,8 +23,8 @@ Claude Code supports two hook types:
 | Deferral detector | PreToolUse (advisory) | Catches the agent deferring work it could do itself |
 | External communication guard | PreToolUse (advisory) | Identity grounding before posting to external platforms |
 | Post-action reflection | PreToolUse (advisory) | Nudges learning capture after commits, deploys, and significant actions |
-| Session start | SessionStart | Injects identity, topic context, and capabilities at session start |
-| Compaction recovery | SessionStart (compact) | Restores identity and conversation context when context compresses |
+| Session start | SessionStart | Injects identity, topic context, capabilities, and pending serendipity findings at session start |
+| Compaction recovery | SessionStart (compact) | Restores identity, conversation context, and serendipity finding count when context compresses |
 
 ## How They Work
 

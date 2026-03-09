@@ -190,6 +190,7 @@ describe('SessionManager behavioral tests', () => {
       expect(session.tmuxSession).not.toContain('!');
     });
 
+
     it('includes maxDurationMinutes when provided', async () => {
       const session = await manager.spawnSession({
         name: 'timed',

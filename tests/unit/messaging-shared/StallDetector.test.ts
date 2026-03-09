@@ -254,6 +254,64 @@ describe('StallDetector', () => {
     });
   });
 
+  // ── Deduplication ──────────────────────────────────────
+
+  describe('per-channel deduplication', () => {
+    it('only fires one alert per channel even with multiple pending messages', async () => {
+      const events: StallEvent[] = [];
+
+      const detector = new StallDetector({ stallTimeoutMinutes: 5 });
+      detector.setOnStall(async (event) => { events.push(event); });
+
+      // User sends 3 messages in quick succession (like the screenshot: "Hey!", "Who is this?", etc.)
+      detector.trackMessageInjection('100', 'session-a', 'Hey!');
+      vi.advanceTimersByTime(500);
+      detector.trackMessageInjection('100', 'session-a', 'Who is this?');
+      vi.advanceTimersByTime(500);
+      detector.trackMessageInjection('100', 'session-a', 'What can you do?');
+
+      // After timeout — should get ONE alert, not three
+      vi.advanceTimersByTime(6 * 60 * 1000);
+      await detector.check();
+      expect(events).toHaveLength(1);
+      expect(events[0].channelId).toBe('100');
+    });
+
+    it('fires separate alerts for different channels', async () => {
+      const events: StallEvent[] = [];
+
+      const detector = new StallDetector({ stallTimeoutMinutes: 5 });
+      detector.setOnStall(async (event) => { events.push(event); });
+
+      detector.trackMessageInjection('100', 'session-a', 'hello');
+      detector.trackMessageInjection('200', 'session-b', 'hi there');
+
+      vi.advanceTimersByTime(6 * 60 * 1000);
+      await detector.check();
+      expect(events).toHaveLength(2);
+      expect(events.map(e => e.channelId).sort()).toEqual(['100', '200']);
+    });
+
+    it('marks all same-channel entries as alerted after one fires', async () => {
+      const events: StallEvent[] = [];
+
+      const detector = new StallDetector({ stallTimeoutMinutes: 1 });
+      detector.setOnStall(async (event) => { events.push(event); });
+
+      detector.trackMessageInjection('100', 'session-a', 'msg1');
+      detector.trackMessageInjection('100', 'session-a', 'msg2');
+      detector.trackMessageInjection('100', 'session-a', 'msg3');
+
+      vi.advanceTimersByTime(2 * 60 * 1000);
+      await detector.check();
+      expect(events).toHaveLength(1);
+
+      // Second check should still not fire — all entries were marked alerted
+      await detector.check();
+      expect(events).toHaveLength(1);
+    });
+  });
+
   // ── Cleanup ──────────────────────────────────────────
 
   describe('cleanup', () => {

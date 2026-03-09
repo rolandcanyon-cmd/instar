@@ -68,6 +68,24 @@ WhatsApp state is managed internally via the Baileys library.
 
 The auth token is used for API authentication. Generated during setup.
 
+## Serendipity Protocol
+
+```json
+{
+  "serendipity": {
+    "enabled": true,
+    "maxPerSession": 5
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Enable/disable the serendipity capture protocol |
+| `maxPerSession` | `5` | Maximum findings a sub-agent can capture per session |
+
+The protocol is opt-out — enabled by default. Findings are stored in `.instar/state/serendipity/`.
+
 ## Identity Files
 
 These aren't in config.json but are critical configuration:

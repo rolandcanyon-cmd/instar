@@ -943,31 +943,51 @@ COMPATIBLE — Both commands are inherited session-level tools. `/simplify` coul
 
 ### 14. Configuration Options
 
-**Status:** PENDING
+**Status:** SYNERGY IDENTIFIED — TUNING OPPORTUNITIES
 
 **What Anthropic shipped:**
-- `includeGitInstructions` setting
-- `CLAUDE_CODE_MAX_OUTPUT_TOKENS` during compaction
-- Various new configuration knobs
+- `includeGitInstructions` setting — controls whether Claude includes git-specific instructions in context
+- `CLAUDE_CODE_MAX_OUTPUT_TOKENS` — controls output token budget during compaction
+- Various new configuration knobs for session behavior
 
-**Audit questions:**
-- Should we set any of these in spawned sessions?
-- Does `CLAUDE_CODE_MAX_OUTPUT_TOKENS` affect our compaction recovery?
-- What's the optimal configuration for Instar-managed sessions?
+**Current Instar behavior (code-traced):**
 
-**Current Instar behavior:**
-- Sessions spawned with default configurations
-- Custom env vars passed selectively
+Instar passes minimal configuration to spawned sessions:
+- `--dangerously-skip-permissions` (always)
+- `--model <tier>` (optional)
+- `-p "<prompt>"` (for job sessions)
+- `--resume <id>` (for interactive session resume)
+- No environment variable tuning for Claude Code behavior
+- No settings overrides beyond what's in `.claude/settings.json`
 
-**Integration opportunity:**
-- Optimal spawn configuration preset for Instar sessions
-- Compaction token budget tuning
+**Assessment — tuning opportunities:**
 
-**Investigation notes:**
-_(To be filled during audit)_
+1. **`includeGitInstructions`**: Could be set to `false` for non-code agents. Saves context tokens for agents focused on communication, research, or administration rather than code. Currently all agents get git instructions by default — wasted context for non-coding tasks.
+
+2. **`CLAUDE_CODE_MAX_OUTPUT_TOKENS`**: Controls how much the agent can output during compaction summaries. Relevant because Instar's `compaction-recovery.sh` hook fires after compaction and injects identity context. If compaction output is too limited, the agent might lose important context. Testing needed to find optimal values.
+
+3. **Session-level env vars**: Instar already clears sensitive env vars before spawning. Could also SET Claude Code config vars per session type:
+   - Job sessions: lower output tokens (focused work), disable git instructions for non-code jobs
+   - Interactive sessions: higher output tokens (conversational), keep git instructions
+
+**ACTION ITEMS:**
+
+1. **Test `CLAUDE_CODE_MAX_OUTPUT_TOKENS` impact on compaction** (MEDIUM PRIORITY):
+   Determine if the default token budget is sufficient for Instar's compaction recovery flow. If agents lose identity context after compaction, increasing this value could help.
+
+2. **Per-job-type `includeGitInstructions` setting** (LOW PRIORITY):
+   Non-code agents (communication, research) could disable git instructions to save context. Add to job definition schema: `gitInstructions: boolean`.
+
+3. **Document available configuration knobs** (LOW PRIORITY):
+   Create a reference of Claude Code env vars and settings that Instar could tune per session type. Helps users optimize their agents.
+
+**Testing requirements:**
+- Test compaction behavior with different `CLAUDE_CODE_MAX_OUTPUT_TOKENS` values
+- Verify `includeGitInstructions: false` saves meaningful context for non-code sessions
+- Confirm env vars set before tmux session launch propagate to Claude Code process
 
 **Resolution:**
-_(To be filled)_
+SYNERGY IDENTIFIED — Configuration options offer tuning opportunities for Instar-managed sessions. Most impactful: `CLAUDE_CODE_MAX_OUTPUT_TOKENS` for compaction quality and `includeGitInstructions` for non-code agents. Not urgent but worth exploring as optimization passes.
 
 ---
 
@@ -1002,45 +1022,50 @@ _(To be filled)_
 
 ### HIGH PRIORITY
 
-| # | Item | Source | Description |
-|---|------|--------|-------------|
-| H1 | Post-session worktree scan | Item 1 | Wire into `sessionComplete`: run `git worktree list`, check for uncommitted/unmerged changes on worktree branches, alert via Telegram |
-| H2 | Hook event receiver endpoint | Item 2 | Add `POST /hooks/events` to Instar server — receives hook event payloads, stores for session telemetry |
-| H3 | HTTP hook templates for observability | Item 2 | Ship templates for PostToolUse, TaskCompleted, SubagentStart/Stop, WorktreeCreate/Remove, Stop |
-| H4 | InstructionsLoaded hook | Item 3 | Command hook that verifies expected CLAUDE.md files loaded; alerts if identity context missing |
-| H5 | SubagentStart/Stop hooks | Item 3 | Track subagent lifecycle, capture `last_assistant_message` and `agent_transcript_path` from SubagentStop |
-| H6 | Stop + SessionEnd hooks | Item 3 | Capture `last_assistant_message` (final output) and exit reason; wire into sessionComplete handler |
+| # | Item | Source | Description | Status |
+|---|------|--------|-------------|--------|
+| H1 | Post-session worktree scan | Item 1 | Wire into `sessionComplete`: run `git worktree list`, check for uncommitted/unmerged changes on worktree branches, alert via Telegram | IMPLEMENTED (WorktreeMonitor.ts, 22 tests) |
+| H2 | Hook event receiver endpoint | Item 2 | Add `POST /hooks/events` to Instar server — receives hook event payloads, stores for session telemetry | IMPLEMENTED (HookEventReceiver.ts + routes, 19+15 tests) |
+| H3 | HTTP hook templates for observability | Item 2 | Ship templates for PostToolUse, TaskCompleted, SubagentStart/Stop, WorktreeCreate/Remove, Stop | IMPLEMENTED (http-hook-templates.ts, 9 tests) |
+| H4 | InstructionsLoaded hook | Item 3 | Command hook that verifies expected CLAUDE.md files loaded; alerts if identity context missing | IMPLEMENTED (InstructionsVerifier.ts + hook script, 22 tests) |
+| H5 | SubagentStart/Stop hooks | Item 3 | Track subagent lifecycle, capture `last_assistant_message` and `agent_transcript_path` from SubagentStop | IMPLEMENTED (SubagentTracker.ts + hook script, 23 tests) |
+| H6 | Stop + SessionEnd hooks | Item 3 | Capture `last_assistant_message` (final output) and exit reason; wire into sessionComplete handler | IMPLEMENTED (via HookEventReceiver + HTTP hooks) |
 
 ### MEDIUM PRIORITY
 
-| # | Item | Source | Description |
-|---|------|--------|-------------|
-| M1 | Periodic orphan worktree detection | Item 1 | Health check: `git worktree list` + `git branch --list 'worktree-*'` across managed projects, flag stale worktrees |
-| M2 | WorktreeCreate/WorktreeRemove hooks | Item 1 | POST to Instar server on worktree lifecycle events (also covered by H3) |
-| M3 | Update settings-template.json | Item 2 | Add HTTP hook entries alongside existing command hooks |
-| M4 | Parse agent_id/agent_type from existing hooks | Item 3 | Existing PreToolUse/UserPromptSubmit hooks now carry these fields — extract and log |
-| M5 | TaskCompleted as quality gate | Item 3 | Verify task completion before marking job done (complement to process-death inference) |
-| M6 | Document two-memory-system reality | Item 4 | Users should know: `.instar/MEMORY.md` vs `~/.claude/projects/.../memory/MEMORY.md` — add to setup wizard or CLAUDE.md template |
-| M7 | Document Remote Control incompatibility | Item 6 | Add to FAQ/setup wizard: Remote Control requires permission approval, incompatible with autonomous operation |
+| # | Item | Source | Description | Status |
+|---|------|--------|-------------|--------|
+| M1 | Periodic orphan worktree detection | Item 1 | Health check: `git worktree list` + `git branch --list 'worktree-*'` across managed projects, flag stale worktrees | IMPLEMENTED (via H1 WorktreeMonitor) |
+| M2 | WorktreeCreate/WorktreeRemove hooks | Item 1 | POST to Instar server on worktree lifecycle events (also covered by H3) | IMPLEMENTED (via H3 HTTP hook templates) |
+| M3 | Update settings-template.json | Item 2 | Add HTTP hook entries alongside existing command hooks | IMPLEMENTED (InstructionsLoaded + SubagentStart added) |
+| M4 | Parse agent_id/agent_type from existing hooks | Item 3 | Existing PreToolUse/UserPromptSubmit hooks now carry these fields — extract and log | IMPLEMENTED (scope-coherence-collector updated) |
+| M5 | TaskCompleted as quality gate | Item 3 | Verify task completion before marking job done (complement to process-death inference) | IMPLEMENTED (hasTaskCompleted + getLastAssistantMessage + getExitReason, 7 tests) |
+| M6 | Document two-memory-system reality | Item 4 | Users should know: `.instar/MEMORY.md` vs `~/.claude/projects/.../memory/MEMORY.md` — add to setup wizard or CLAUDE.md template | IMPLEMENTED (CLAUDE.md template updated) |
+| M7 | Document Remote Control incompatibility | Item 6 | Add to FAQ/setup wizard: Remote Control requires permission approval, incompatible with autonomous operation | IMPLEMENTED (CLAUDE.md template updated) |
+| M8 | Test `CLAUDE_CODE_MAX_OUTPUT_TOKENS` for compaction | Item 14 | Determine optimal token budget for compaction — affects identity recovery quality | DEFERRED (requires manual experimentation) |
 
 ### LOW PRIORITY
 
-| # | Item | Source | Description |
-|---|------|--------|-------------|
-| L1 | Session-branch linking | Item 1 | Record which branch a session was on and any worktree branches it created |
-| L2 | Merge-back prompt for orphan branches | Item 1 | Surface orphan worktree branches with commits to user for merge decision |
-| L3 | Cross-machine hook forwarding | Item 2 | HTTP hooks from remote machines POST to centralized Instar server via tunnel |
-| L4 | PreCompact hook | Item 3 | Know when compaction occurs; could trigger working memory injection or frequent-compaction alerts |
-| L5 | Wire ExecutionJournal to PostToolUse | Item 3 | ExecutionJournal infrastructure exists but is inactive — PostToolUse feeds it |
-| L6 | Read auto-memory as knowledge source | Item 4 | MemoryMigrator could optionally ingest Claude auto-memory as additional source |
-| L7 | Auto-memory hygiene job | Item 4 | Periodic sync from auto-memory into SemanticMemory + trim |
-| L8 | Effort level parameter for jobs | Item 5 | `effort: 'low' | 'medium' | 'high'` in job definitions for deeper thinking on complex tasks |
-| L9 | "ultrathink" keyword in planning prompts | Item 5 | Worth testing empirically for complex job prompts |
-| L10 | Pass `--name` flag to sessions | Item 6 | Add `--name {jobSlug}` to spawn args for session identifiability |
-| L11 | Extend `--allowedTools` fallback to all spawn paths | Item 7 | Mirror TelegramLifeline's `supportsAllowedTools()` in `spawnSession()` and `spawnInteractiveSession()` |
-| L12 | Evaluate Instar-as-plugin architecture | Item 8 | Could core components (hooks, skills, agents) be packaged as a Claude Code plugin? Major arch shift — needs design |
-| L13 | Community skill marketplace | Item 8 | GitHub-based marketplace for Instar users to share agent-authored skills. Depends on user base growth |
-| L14 | MCP server plugin integration | Item 8 | Register Instar server as MCP server via plugin manifest — exposes working memory, job scheduling as native tools |
+| # | Item | Source | Description | Status |
+|---|------|--------|-------------|--------|
+| L1 | Session-branch linking | Item 1 | Record which branch a session was on and any worktree branches it created | |
+| L2 | Merge-back prompt for orphan branches | Item 1 | Surface orphan worktree branches with commits to user for merge decision | |
+| L3 | Cross-machine hook forwarding | Item 2 | HTTP hooks from remote machines POST to centralized Instar server via tunnel | |
+| L4 | PreCompact hook | Item 3 | Know when compaction occurs; could trigger working memory injection or frequent-compaction alerts | IMPLEMENTED (HTTP hook template added) |
+| L5 | Wire ExecutionJournal to PostToolUse | Item 3 | ExecutionJournal infrastructure exists but is inactive — PostToolUse feeds it | |
+| L6 | Read auto-memory as knowledge source | Item 4 | MemoryMigrator could optionally ingest Claude auto-memory as additional source | |
+| L7 | Auto-memory hygiene job | Item 4 | Periodic sync from auto-memory into SemanticMemory + trim | |
+| L8 | Effort level parameter for jobs | Item 5 | `effort: 'low' | 'medium' | 'high'` in job definitions for deeper thinking on complex tasks | |
+| L9 | "ultrathink" keyword in planning prompts | Item 5 | Worth testing empirically for complex job prompts | |
+| L10 | Session telemetry enrichment | Item 6 | Enrich session listings (API + dashboard) with hook event telemetry: tools used, subagents, last activity, task completion, exit reason. Note: `--name` is only valid for `remote-control`, not `claude` CLI | IMPLEMENTED (routes.ts + WebSocketManager, 3 tests) |
+| L11 | Extend `--allowedTools` fallback to all spawn paths | Item 7 | Mirror TelegramLifeline's `supportsAllowedTools()` in `spawnSession()` and `spawnInteractiveSession()` | |
+| L12 | Evaluate Instar-as-plugin architecture | Item 8 | Could core components (hooks, skills, agents) be packaged as a Claude Code plugin? Major arch shift — needs design | |
+| L13 | Community skill marketplace | Item 8 | GitHub-based marketplace for Instar users to share agent-authored skills. Depends on user base growth | |
+| L14 | MCP server plugin integration | Item 8 | Register Instar server as MCP server via plugin manifest — exposes working memory, job scheduling as native tools | |
+| L15 | `/loop` for intra-session monitoring | Item 12 | Long-running interactive sessions could use `/loop` for periodic self-checks | |
+| L16 | `/simplify` in evolution workflow | Item 13 | The `evolve` skill could invoke `/simplify` after code changes as automated quality pass | |
+| L17 | Per-job-type `includeGitInstructions` | Item 14 | Non-code agents disable git instructions to save context | |
+| L18 | Document available Claude Code config knobs | Item 14 | Reference of tunable env vars and settings for per-session-type optimization | |
 
 ### WATCH
 
@@ -1058,4 +1083,6 @@ _(To be filled)_
 | 2026-03-07 | Initial research (topic 4509) | All 14 items identified | Research phase complete |
 | 2026-03-07 | Document creation (topic 11047) | Document seated | Ready for deep-dive work |
 | 2026-03-07 | Deep-dive session 1 (topic 11047) | Items 1-4 completed | Worktrees, HTTP Hooks, New Hook Events, Auto-Memory |
-| 2026-03-08 | Deep-dive session 2 (topic 11047) | Items 5-6 completed | Model References (clean), Remote Control (incompatible) |
+| 2026-03-08 | Deep-dive session 2 (topic 11047) | Items 5-14 completed | ALL ITEMS COMPLETE. Model refs clean, Remote Control incompatible, Security clear, Plugin synergy, VS Code parallel, Performance free wins, Loop/Simplify/Batch complementary, Config tuning opportunities |
+| 2026-03-08 | Implementation session 1 (topic 11047) | H1-H6, M1-M5 implemented | WorktreeMonitor, HookEventReceiver, HTTP hook templates, InstructionsVerifier, SubagentTracker, server wiring, quality gate methods. 117 new tests |
+| 2026-03-08 | Implementation session 2 (topic 11047) | M6-M7, L4, L10 implemented, M8 deferred | Two-memory docs, Remote Control docs, PreCompact hook, --name flag for sessions. 121+ new tests total. All HIGH and MEDIUM items resolved |

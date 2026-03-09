@@ -95,6 +95,16 @@ if [ -d "$INSTAR_DIR/relationships" ]; then
   fi
 fi
 
+# Serendipity findings status
+SERENDIPITY_DIR="$INSTAR_DIR/state/serendipity"
+if [ -d "$SERENDIPITY_DIR" ]; then
+  PENDING_COUNT=$(find "$SERENDIPITY_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$PENDING_COUNT" -gt "0" ]; then
+    echo "${PENDING_COUNT} pending serendipity finding(s) in .instar/state/serendipity/ — triage when current task completes."
+    echo ""
+  fi
+fi
+
 # Server health reminder + recent Telegram context
 CONFIG_FILE="$INSTAR_DIR/config.json"
 if [ -f "$CONFIG_FILE" ]; then

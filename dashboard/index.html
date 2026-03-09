@@ -190,6 +190,44 @@
     .model-badge.sonnet { background: #1b2e4e; color: #60a5fa; }
     .model-badge.haiku { background: #1b3e3e; color: #5eead4; }
 
+    .type-badge {
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+    }
+
+    .type-badge.job { background: #1b2e1b; color: #86efac; }
+    .type-badge.interactive { background: #2e2e1b; color: #fde047; }
+
+    .session-telemetry {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      color: var(--text-dim);
+      margin-top: 4px;
+      flex-wrap: wrap;
+    }
+
+    .telemetry-tag {
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      white-space: nowrap;
+    }
+
+    .telemetry-tag.stale {
+      border-color: #3a2a1a;
+      color: var(--orange);
+    }
+
+    .telemetry-tag.active-subagents {
+      border-color: #1a2a3a;
+      color: var(--blue);
+    }
+
     .empty-state {
       display: flex;
       flex-direction: column;
@@ -655,6 +693,7 @@
           <div class="session-info">
             <button class="back-btn" onclick="goBack()" title="Back to sessions">&larr;</button>
             <h3 id="termSessionName">—</h3>
+            <span class="type-badge" id="termTypeBadge" style="display:none"></span>
             <span class="model-badge" id="termModelBadge" style="display:none"></span>
           </div>
           <div class="terminal-actions">
@@ -911,15 +950,45 @@
         const elapsed = formatElapsed(session.startedAt);
         const model = session.model || 'opus';
         const isActive = session.tmuxSession === activeSession;
+        const sType = session.type || (session.jobSlug ? 'job' : 'interactive');
+        const tele = session.telemetry;
 
         el.className = `session-item${isActive ? ' active' : ''}`;
+
+        let telemetryHtml = '';
+        if (tele) {
+          const parts = [];
+          if (tele.toolsUsed && tele.toolsUsed.length > 0) {
+            const toolList = tele.toolsUsed.slice(0, 4).join(', ');
+            const extra = tele.toolsUsed.length > 4 ? ` +${tele.toolsUsed.length - 4}` : '';
+            parts.push(`<span class="telemetry-tag">${escapeHtml(toolList)}${extra}</span>`);
+          }
+          if (tele.subagentsSpawned && tele.subagentsSpawned.length > 0) {
+            parts.push(`<span class="telemetry-tag active-subagents">${tele.subagentsSpawned.length} subagent${tele.subagentsSpawned.length > 1 ? 's' : ''}</span>`);
+          }
+          if (tele.lastActivity) {
+            const lastMs = Date.now() - new Date(tele.lastActivity).getTime();
+            const lastMins = Math.floor(lastMs / 60000);
+            if (lastMins > 10) {
+              parts.push(`<span class="telemetry-tag stale">idle ${lastMins}m</span>`);
+            }
+          }
+          if (tele.eventCount) {
+            parts.push(`<span class="telemetry-tag">${tele.eventCount} events</span>`);
+          }
+          if (parts.length > 0) {
+            telemetryHtml = `<div class="session-telemetry">${parts.join('')}</div>`;
+          }
+        }
+
         el.innerHTML = `
           <div class="session-name">${escapeHtml(session.name)}</div>
           <div class="session-meta">
+            <span class="type-badge ${sType}">${sType}</span>
             <span class="model-badge ${model}">${model}</span>
             <span>${elapsed}</span>
-            ${session.jobSlug ? `<span>${escapeHtml(session.jobSlug)}</span>` : ''}
           </div>
+          ${telemetryHtml}
         `;
       }
     }
@@ -950,6 +1019,15 @@
         badge.style.display = 'inline-block';
       } else {
         badge.style.display = 'none';
+      }
+
+      // Show session type badge
+      const sType = session.type || (session.jobSlug ? 'job' : 'interactive');
+      const typeEl = document.getElementById('termTypeBadge');
+      if (typeEl) {
+        typeEl.textContent = sType;
+        typeEl.className = `type-badge ${sType}`;
+        typeEl.style.display = 'inline-block';
       }
 
       // Initialize terminal if needed

@@ -40,6 +40,25 @@ fi
 # leaking into this session and causing false-positive hook triggers.
 curl -s -X POST "http://localhost:${PORT}/scope-coherence/reset" -o /dev/null 2>/dev/null || true
 
+# Check for pending serendipity findings
+SERENDIPITY_DIR="$INSTAR_DIR/state/serendipity"
+if [ -d "$SERENDIPITY_DIR" ]; then
+  PENDING_COUNT=$(find "$SERENDIPITY_DIR" -maxdepth 1 -name "*.json" 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$PENDING_COUNT" -gt 0 ]; then
+    echo "=== SERENDIPITY: ${PENDING_COUNT} pending finding(s) ==="
+    echo "Sub-agents captured discoveries during prior tasks."
+    echo "Review with: ls $SERENDIPITY_DIR/*.json"
+    for f in "$SERENDIPITY_DIR"/*.json; do
+      [ -f "$f" ] || continue
+      TITLE=$(python3 -c "import json; print(json.load(open('$f')).get('discovery',{}).get('title','(untitled)'))" 2>/dev/null || echo "(parse error)")
+      CAT=$(python3 -c "import json; print(json.load(open('$f')).get('discovery',{}).get('category','?'))" 2>/dev/null || echo "?")
+      echo "  - [$CAT] $TITLE"
+    done
+    echo "=== END SERENDIPITY ==="
+    echo ""
+  fi
+fi
+
 # Build working memory query from prompt
 PROMPT_ENCODED=$(python3 -c "
 import sys, urllib.parse

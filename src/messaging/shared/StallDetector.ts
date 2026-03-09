@@ -188,9 +188,18 @@ export class StallDetector {
 
     // Check for stalled messages
     if (this.stallTimeoutMs > 0) {
+      // Track which channels we've already alerted this cycle to avoid duplicate notifications
+      const alertedChannels = new Set<string>();
+
       for (const [key, pending] of this.pendingMessages) {
         if (pending.alerted) continue;
         if (now - pending.injectedAt < this.stallTimeoutMs) continue;
+
+        // Skip if we already alerted for this channel in this check cycle
+        if (alertedChannels.has(pending.channelId)) {
+          pending.alerted = true;
+          continue;
+        }
 
         const alive = this.isSessionAlive
           ? this.isSessionAlive(pending.sessionName)
@@ -210,6 +219,7 @@ export class StallDetector {
         }
 
         pending.alerted = true;
+        alertedChannels.add(pending.channelId);
         const minutesElapsed = Math.round((now - pending.injectedAt) / 60000);
 
         if (this.onStall) {

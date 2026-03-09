@@ -27,6 +27,9 @@ Everything is file-based. No external database, no cloud dependencies.
     sessions/             # Active session tracking
     jobs/                 # Job execution history
     evolution/            # Evolution queue, learnings, gaps, actions (JSON)
+    serendipity/          # Pending serendipity findings (JSON + patches)
+      processed/          # Triaged findings (promoted or dismissed)
+      invalid/            # Failed HMAC verification
     journal/              # Decision journal entries (JSONL)
   context/                # Tiered context segments (auto-generated)
   relationships/          # Per-person relationship files (JSON)
@@ -36,6 +39,9 @@ Everything is file-based. No external database, no cloud dependencies.
 .claude/                  # Claude Code configuration
   settings.json           # Hook registrations
   scripts/                # Health watchdog, Telegram relay, smart-fetch
+
+.instar/scripts/          # Agent infrastructure scripts
+  serendipity-capture.sh  # Sub-agent finding capture (HMAC, validation, atomic write)
   skills/                 # Built-in + agent-created skills
 ```
 

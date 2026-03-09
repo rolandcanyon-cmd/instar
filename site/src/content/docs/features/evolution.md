@@ -50,6 +50,12 @@ curl localhost:4040/evolution/actions
 curl localhost:4040/evolution/actions/overdue
 ```
 
+## Serendipity Integration
+
+The [Serendipity Protocol](/features/serendipity/) feeds directly into evolution. When sub-agents capture findings during focused tasks, the `/triage-findings` skill reviews them and promotes actionable ones to evolution proposals. This means every task — even a narrow sub-agent task — can contribute to the agent's growth.
+
+Serendipity findings are triaged with the same approve/dismiss/defer model as evolution proposals, but carry additional metadata: the discovering session, agent type, and optionally a code patch.
+
 ## Built-in Skills
 
 | Skill | Purpose |
@@ -58,6 +64,7 @@ curl localhost:4040/evolution/actions/overdue
 | `/learn` | Record a learning |
 | `/gaps` | Report a capability gap |
 | `/commit-action` | Track a commitment |
+| `/triage-findings` | Review and route serendipity findings |
 
 ## Default Jobs
 

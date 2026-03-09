@@ -54,6 +54,7 @@ export default defineConfig({
             { label: 'Safety Gates', slug: 'features/safety-gates' },
             { label: 'Intent Alignment', slug: 'features/intent' },
             { label: 'Multi-Machine', slug: 'features/multi-machine' },
+            { label: 'Serendipity Protocol', slug: 'features/serendipity' },
             { label: 'Threadline Protocol', slug: 'features/threadline' },
             { label: 'Agent Skills', slug: 'features/skills' },
             { label: 'Self-Healing', slug: 'features/self-healing' },
