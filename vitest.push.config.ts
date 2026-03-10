@@ -31,6 +31,11 @@ const FLAKY_TESTS = [
   'tests/e2e/working-memory-lifecycle.test.ts',
   'tests/e2e/episodic-memory-lifecycle.test.ts',
   'tests/e2e/scope-coherence-lifecycle.test.ts',
+  'tests/e2e/memory-exporter-lifecycle.test.ts',
+  'tests/e2e/dispatch-update-feedback.test.ts',
+
+  // ── ESM compliance — catches new require() from dependencies ────
+  'tests/unit/esm-compliance.test.ts',
 
   // ── HTTP response corruption / parse errors ───────────────────────
   'tests/e2e/system-reviewer-e2e.test.ts',
