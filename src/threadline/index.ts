@@ -171,3 +171,32 @@ export type { SkillManifest } from './OpenClawSkillManifest.js';
 // Threadline Bootstrap (auto-wiring into server boot)
 export { bootstrapThreadline } from './ThreadlineBootstrap.js';
 export type { ThreadlineBootstrapConfig, ThreadlineBootstrapResult } from './ThreadlineBootstrap.js';
+
+// Phase 7: Relay Server
+export { RelayServer } from './relay/RelayServer.js';
+export { PresenceRegistry } from './relay/PresenceRegistry.js';
+export { RelayRateLimiter } from './relay/RelayRateLimiter.js';
+export { MessageRouter } from './relay/MessageRouter.js';
+export { ConnectionManager } from './relay/ConnectionManager.js';
+export { RELAY_ERROR_CODES } from './relay/types.js';
+
+// Phase 7: Relay Client
+export { ThreadlineClient } from './client/ThreadlineClient.js';
+export { RelayClient } from './client/RelayClient.js';
+export { MessageEncryptor, computeFingerprint, deriveX25519PublicKey } from './client/MessageEncryptor.js';
+export { IdentityManager } from './client/IdentityManager.js';
+export type {
+  ThreadlineClientConfig,
+  KnownAgent,
+  ReceivedMessage,
+} from './client/ThreadlineClient.js';
+export type { IdentityInfo } from './client/IdentityManager.js';
+export type { PlaintextMessage } from './client/MessageEncryptor.js';
+export type {
+  AgentFingerprint,
+  AgentVisibility,
+  AgentMetadata,
+  MessageEnvelope,
+  RelayServerConfig,
+  RelayClientConfig,
+} from './relay/types.js';

@@ -2973,16 +2973,24 @@ export class TelegramAdapter implements MessagingAdapter {
             if (this.onSentinelKillSession) {
               this.onSentinelKillSession(sessionName);
             }
+            // Sanitize reason — never dump raw LLM responses to the user
+            const stopReason = classification.reason && !classification.reason.includes('unparseable')
+              ? `Reason: ${classification.reason}`
+              : 'Emergency stop signal detected.';
             await this.sendToTopic(numericTopicId,
-              `Session terminated. ${classification.reason ? `Reason: ${classification.reason}` : 'Emergency stop signal detected.'}\n\nSend a new message to start a fresh session.`
+              `Session terminated. ${stopReason}\n\nSend a new message to start a fresh session.`
             ).catch(() => {});
           } else if (classification.category === 'pause' && sessionName) {
             console.log(`[sentinel] Pause for session "${sessionName}" in topic ${numericTopicId}`);
             if (this.onSentinelPauseSession) {
               this.onSentinelPauseSession(sessionName);
             }
+            // Sanitize reason — never dump raw LLM responses to the user
+            const pauseReason = classification.reason && !classification.reason.includes('unparseable')
+              ? classification.reason
+              : 'Pause signal detected.';
             await this.sendToTopic(numericTopicId,
-              `Session paused. ${classification.reason || 'Pause signal detected.'}\n\nSend a message to resume.`
+              `Session paused. ${pauseReason}\n\nSend a message to resume.`
             ).catch(() => {});
           } else if (!sessionName) {
             // No active session — just acknowledge the stop/pause signal

@@ -293,10 +293,13 @@ export function loadConfig(projectDir?: string): InstarConfig {
     scheduler,
     users: fileConfig.users || [],
     messaging: fileConfig.messaging || [],
-    monitoring: fileConfig.monitoring || {
+    monitoring: {
       quotaTracking: true,
       memoryMonitoring: true,
       healthCheckIntervalMs: 30000,
+      ...fileConfig.monitoring,
+      // Telemetry defaults: strictly opt-in
+      telemetry: fileConfig.monitoring?.telemetry ?? { enabled: false },
     },
     authToken: fileConfig.authToken,
     dashboardPin: fileConfig.dashboardPin,

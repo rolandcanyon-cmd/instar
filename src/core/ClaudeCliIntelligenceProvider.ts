@@ -36,6 +36,9 @@ export class ClaudeCliIntelligenceProvider implements IntelligenceProvider {
         '--model', model,
         '--max-turns', '1',
         '--output-format', 'text',
+        // Exclude project/local CLAUDE.md to prevent identity context
+        // from contaminating classification and evaluation prompts.
+        '--setting-sources', 'user',
       ];
 
       const child = execFile(this.claudePath, args, {

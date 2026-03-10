@@ -1512,6 +1512,28 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     const sessionManager = new SessionManager(config.sessions, state);
 
+    // Input Guard — cross-topic injection defense (Layer 1 + 1.5 + 2)
+    if (config.inputGuard?.enabled !== false) {
+      const guardConfig = config.inputGuard ?? { enabled: true };
+      const anthropicKey = process.env['ANTHROPIC_API_KEY']?.trim();
+      const { InputGuard } = await import('../core/InputGuard.js');
+      const inputGuard = new InputGuard({
+        config: {
+          enabled: true,
+          provenanceCheck: guardConfig.provenanceCheck ?? true,
+          injectionPatterns: guardConfig.injectionPatterns ?? true,
+          topicCoherenceReview: guardConfig.topicCoherenceReview ?? true,
+          action: guardConfig.action ?? 'warn',
+          reviewTimeout: guardConfig.reviewTimeout ?? 3000,
+        },
+        stateDir: config.stateDir,
+        apiKey: anthropicKey,
+      });
+      const registryPath = path.join(config.stateDir, 'topic-session-registry.json');
+      sessionManager.setInputGuard(inputGuard, registryPath);
+      console.log(pc.green(`  Input Guard: enabled (action: ${guardConfig.action ?? 'warn'})`));
+    }
+
     // TopicResumeMap: persist Claude session UUIDs across session restarts.
     // When a session is killed/restarted, we save its UUID so the next spawn
     // can use --resume to reattach to the existing conversation context.
@@ -1584,6 +1606,20 @@ export async function startServer(options: StartOptions): Promise<void> {
         thresholds: config.scheduler?.quotaThresholds ?? { normal: 50, elevated: 60, critical: 80, shutdown: 95 },
       });
       console.log(pc.green(`  Quota tracking enabled (${quotaFile})`));
+    }
+
+    // Set up opt-in telemetry heartbeat
+    let telemetryHeartbeat: import('../monitoring/TelemetryHeartbeat.js').TelemetryHeartbeat | undefined;
+    if (config.monitoring?.telemetry?.enabled) {
+      const { TelemetryHeartbeat } = await import('../monitoring/TelemetryHeartbeat.js');
+      telemetryHeartbeat = new TelemetryHeartbeat(
+        config.monitoring.telemetry,
+        config.stateDir,
+        config.projectDir,
+        config.version || 'unknown',
+      );
+      telemetryHeartbeat.start();
+      console.log(pc.green(`  Telemetry: enabled (${config.monitoring.telemetry.level || 'basic'} level, every ${Math.round((config.monitoring.telemetry.intervalMs || 21600000) / 3600000)}h)`));
     }
 
     let scheduler: JobScheduler | undefined;
@@ -2074,6 +2110,17 @@ export async function startServer(options: StartOptions): Promise<void> {
       sessionManager.on('sessionComplete', (session) => {
         scheduler!.processQueue();
         scheduler!.notifyJobComplete(session.id, session.tmuxSession);
+        // Record telemetry events
+        if (telemetryHeartbeat && session.jobSlug) {
+          telemetryHeartbeat.recordJobRun();
+        }
+      });
+    }
+
+    // Wire telemetry counters
+    if (telemetryHeartbeat) {
+      sessionManager.on('sessionStart', () => {
+        telemetryHeartbeat!.recordSessionSpawned();
       });
     }
 

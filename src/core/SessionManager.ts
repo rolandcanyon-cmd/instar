@@ -40,6 +40,7 @@ export interface SessionDiagnostics {
   suggestions: string[];
 }
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { InputGuard, type TopicBinding } from './InputGuard.js';
 
 const execFileAsync = promisify(execFile);
 import type { Session, SessionManagerConfig, SessionStatus, ModelTier } from './types.js';
@@ -65,11 +66,53 @@ export class SessionManager extends EventEmitter {
   private state: StateManager;
   private monitorInterval: ReturnType<typeof setInterval> | null = null;
   private monitoringInProgress = false;
+  private inputGuard: InputGuard | null = null;
+  private registryPath: string | null = null;
 
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
     this.config = config;
     this.state = state;
+  }
+
+  /**
+   * Set the InputGuard for cross-topic injection defense.
+   * Must be called after construction with state dir info.
+   */
+  setInputGuard(guard: InputGuard, registryPath: string): void {
+    this.inputGuard = guard;
+    this.registryPath = registryPath;
+  }
+
+  /**
+   * Look up the topic binding for a tmux session from the topic-session registry.
+   * Returns null if the session is not bound to any topic.
+   */
+  private getTopicBinding(tmuxSession: string): TopicBinding | null {
+    if (!this.registryPath) return null;
+    try {
+      if (!fs.existsSync(this.registryPath)) return null;
+      const registry = JSON.parse(fs.readFileSync(this.registryPath, 'utf-8'));
+      const topicToSession = registry.topicToSession || {};
+      const topicToName = registry.topicToName || {};
+
+      // Reverse lookup: find which topic maps to this session
+      for (const [topicIdStr, sessionName] of Object.entries(topicToSession)) {
+        if (sessionName === tmuxSession) {
+          const topicId = parseInt(topicIdStr, 10);
+          return {
+            topicId,
+            topicName: (topicToName[topicIdStr] as string) || `Topic ${topicId}`,
+            channel: 'telegram', // Currently only Telegram uses the registry
+            sessionName: tmuxSession,
+          };
+        }
+      }
+      return null;
+    } catch {
+      // Registry read failure — fail open (no binding = no check)
+      return null;
+    }
   }
 
   /**
@@ -727,13 +770,113 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Send text to a tmux session via send-keys.
+   * Send text to a tmux session via send-keys, with Input Guard protection.
+   *
+   * When an InputGuard is configured, messages are checked for provenance
+   * before injection. Suspicious messages still reach the session but with
+   * a system-reminder warning injected afterward (async, non-blocking).
+   *
    * For multi-line text, uses bracketed paste mode escape sequences so the
    * terminal treats newlines as literal text rather than Enter keypresses.
    * This avoids tmux load-buffer/paste-buffer which trigger macOS TCC
    * "access data from other apps" permission prompts.
    */
   private injectMessage(tmuxSession: string, text: string): void {
+    // ── Input Guard: Layer 1 + 1.5 (deterministic, synchronous) ──
+    if (this.inputGuard) {
+      const binding = this.getTopicBinding(tmuxSession);
+      if (binding) {
+        const provenance = this.inputGuard.checkProvenance(text, binding);
+
+        if (provenance === 'mismatched-tag') {
+          // Wrong topic — log, alert, and drop
+          console.error(
+            `[InputGuard] BLOCKED cross-topic injection: message bound for different topic, ` +
+            `session "${tmuxSession}" is bound to topic ${binding.topicId}`
+          );
+          this.inputGuard.logSecurityEvent({
+            event: 'input-provenance-block',
+            session: tmuxSession,
+            boundTopic: binding.topicId,
+            messagePreview: text.slice(0, 100),
+            reason: 'mismatched tag',
+          });
+          return;
+        }
+
+        if (provenance === 'untagged') {
+          // Layer 1.5: Check injection patterns
+          const pattern = this.inputGuard.checkInjectionPatterns(text);
+          if (pattern) {
+            const action = this.inputGuard['config'].action ?? 'warn';
+            this.inputGuard.logSecurityEvent({
+              event: 'input-injection-pattern',
+              session: tmuxSession,
+              boundTopic: binding.topicId,
+              pattern,
+              action,
+              messagePreview: text.slice(0, 100),
+            });
+
+            if (action === 'block') {
+              console.error(`[InputGuard] BLOCKED injection pattern "${pattern}" in session "${tmuxSession}"`);
+              return;
+            }
+            if (action === 'warn') {
+              // Inject the message, then inject warning afterward
+              this.rawInject(tmuxSession, text);
+              // Small delay so warning arrives after message
+              setTimeout(() => {
+                const warning = this.inputGuard!.buildWarning(binding, `Matched injection pattern: ${pattern}`);
+                this.rawInject(tmuxSession, warning);
+              }, 500);
+              return;
+            }
+            // action === 'log': fall through to normal injection
+          }
+
+          // Layer 2: Async LLM topic coherence review (non-blocking)
+          // Inject immediately, review in background
+          this.rawInject(tmuxSession, text);
+          this.inputGuard.reviewTopicCoherence(text, binding).then(result => {
+            if (result.verdict === 'suspicious') {
+              const action = this.inputGuard!['config'].action ?? 'warn';
+              this.inputGuard!.logSecurityEvent({
+                event: 'input-coherence-suspicious',
+                session: tmuxSession,
+                boundTopic: binding.topicId,
+                reason: result.reason,
+                confidence: result.confidence,
+                action,
+                messagePreview: text.slice(0, 100),
+              });
+
+              if (action === 'warn') {
+                const warning = this.inputGuard!.buildWarning(binding, result.reason);
+                this.rawInject(tmuxSession, warning);
+              }
+              // block mode doesn't apply after async review — message already injected
+              // log mode: already logged above
+            }
+          }).catch(err => {
+            // Fail open — message already injected, just log the error
+            console.error(`[InputGuard] Coherence review error: ${err instanceof Error ? err.message : err}`);
+          });
+          return;
+        }
+        // provenance === 'verified' or 'unbound' — fall through to normal injection
+      }
+    }
+
+    // ── Normal injection (verified provenance or no InputGuard) ──
+    this.rawInject(tmuxSession, text);
+  }
+
+  /**
+   * Raw tmux send-keys injection. No validation — just sends text to the session.
+   * Used by injectMessage after provenance checks pass.
+   */
+  private rawInject(tmuxSession: string, text: string): void {
     const exactTarget = `=${tmuxSession}:`;
     try {
       if (text.includes('\n')) {

@@ -1294,6 +1294,25 @@ export interface InstarConfig {
   notifications?: NotificationPreferences;
   /** Response Review Pipeline (Coherence Gate) configuration */
   responseReview?: ResponseReviewConfig;
+  /** Input Guard — cross-topic injection defense */
+  inputGuard?: InputGuardConfig;
+}
+
+// ── Input Guard ─────────────────────────────────────────────────────
+
+export interface InputGuardConfig {
+  /** Whether the Input Guard is enabled */
+  enabled: boolean;
+  /** Enable Layer 1 provenance checking (default: true) */
+  provenanceCheck?: boolean;
+  /** Enable Layer 1.5 injection pattern detection (default: true) */
+  injectionPatterns?: boolean;
+  /** Enable Layer 2 LLM topic coherence review (default: true) */
+  topicCoherenceReview?: boolean;
+  /** Action on suspicious messages: 'warn' (default), 'block', 'log' */
+  action?: 'warn' | 'block' | 'log';
+  /** Timeout for LLM review in ms (default: 3000) */
+  reviewTimeout?: number;
 }
 
 // ── Response Review Pipeline (Coherence Gate) ───────────────────────
@@ -1529,6 +1548,21 @@ export interface MonitoringConfig {
     /** Probe IDs to skip (default: []) */
     disabledProbes?: string[];
   };
+  /** Opt-in anonymous telemetry — sends usage heartbeats to help improve Instar */
+  telemetry?: TelemetryConfig;
+}
+
+export type TelemetryLevel = 'basic' | 'usage';
+
+export interface TelemetryConfig {
+  /** Whether telemetry is enabled (default: false — strictly opt-in) */
+  enabled: boolean;
+  /** What level of data to send (default: 'basic') */
+  level?: TelemetryLevel;
+  /** Heartbeat interval in milliseconds (default: 21600000 = 6 hours) */
+  intervalMs?: number;
+  /** Telemetry endpoint URL */
+  endpoint?: string;
 }
 
 /** @deprecated Use InstarConfig instead */
