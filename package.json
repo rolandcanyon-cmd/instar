@@ -34,14 +34,18 @@
   },
   "keywords": [
     "instar",
-    "autonomous",
-    "agent",
-    "molt",
-    "lobster",
+    "ai-agent",
+    "autonomous-agent",
     "claude",
-    "cli",
-    "automation",
-    "claude-code"
+    "claude-code",
+    "agent-framework",
+    "telegram-bot",
+    "job-scheduler",
+    "agent-memory",
+    "agent-identity",
+    "llm",
+    "mcp",
+    "cli"
   ],
   "repository": {
     "type": "git",
