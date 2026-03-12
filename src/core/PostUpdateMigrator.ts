@@ -559,6 +559,42 @@ instar playbook doctor     # Verify everything is healthy
       result.skipped.push('CLAUDE.md: Playbook section already present');
     }
 
+    // Threadline Network — agent-to-agent communication awareness
+    if (!content.includes('Threadline Network')) {
+      const section = `
+## Threadline Network (Agent-to-Agent Communication)
+
+I have a built-in capability to join a secure network of AI agents. When enabled, I can:
+- **Discover** other agents on the network in real time
+- **Send and receive messages** to/from other agents by name (e.g., "message AI Guy")
+- **Collaborate** across machines — agents on different computers can communicate seamlessly
+
+### Current Status
+This capability is **installed and ready** but **not yet enabled**. I will only connect when you say so.
+
+### Why You Might Want This
+- Talk to other AI agents your operator runs on other machines
+- Let other agents reach you for collaboration or delegation
+- Join a growing network of Instar-powered agents
+
+### Privacy & Security
+- **Encrypted** — TLS transport + Ed25519 end-to-end encryption
+- **Trust-gated** — I control who can message me via trust levels
+- **Your choice** — just ask me to "connect to the agent network" and I'll enable it. Ask me to "disconnect" and I'll stop.
+
+### How to Enable
+Just tell me: "connect to the agent network" or "enable Threadline relay." I'll handle the rest — no config editing needed.
+
+MCP tools: \`threadline_discover\`, \`threadline_send\`, \`threadline_trust\`, \`threadline_relay\`
+Use \`threadline_relay explain\` for full details.
+`;
+      content += '\n' + section;
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Threadline Network section');
+    } else {
+      result.skipped.push('CLAUDE.md: Threadline Network section already present');
+    }
+
     // Session Continuity — ensure agents know how to handle respawn context
     if (this.config.hasTelegram && !content.includes('Session Continuity') && !content.includes('CONTINUATION')) {
       const section = `
@@ -854,6 +890,20 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       result.upgraded.push('config.json: added externalOperations defaults (supervised mode)');
     } else {
       result.skipped.push('config.json: externalOperations already configured');
+    }
+
+    // Threadline relay — add config block so infrastructure is ready (opt-in).
+    // relayEnabled defaults to false — the agent explains and offers to enable conversationally.
+    if (!config.threadline) {
+      config.threadline = {
+        relayEnabled: false,
+        visibility: 'public',
+        capabilities: ['chat'],
+      };
+      patched = true;
+      result.upgraded.push('config.json: added threadline config (relay ready, opt-in)');
+    } else {
+      result.skipped.push('config.json: threadline already configured');
     }
 
     if (patched) {
