@@ -850,7 +850,12 @@ function wireTelegramRouting(
       : null;
 
     // Most commands are handled inside TelegramAdapter.handleCommand().
-    // /new is handled here because it needs sessionManager access.
+    // /new — create a new topic thread. Does NOT spawn a session immediately.
+    // Sessions are spawned on-demand when the user sends their first real message
+    // in the new topic (via the auto-spawn path below). This avoids premature
+    // session exit: spawning with a meta-message ("new session started") gives
+    // Claude nothing real to do, so it responds and exits. The user's actual
+    // message then arrives to a dead session.
     const newMatch = text.match(/^\/new(?:\s+(.+))?$/);
     if (newMatch) {
       const sessionName = newMatch[1]?.trim() || null;
@@ -861,18 +866,14 @@ function wireTelegramRouting(
       (async () => {
         try {
           const topic = await telegram.findOrCreateForumTopic(topicDisplayName, TOPIC_STYLE.SESSION.color);
-          const newSession = await sessionManager.spawnInteractiveSession(
-            `[telegram:${topic.topicId}] New session started. (IMPORTANT: Relay all responses back via: cat <<'EOF' | .claude/scripts/telegram-reply.sh ${topic.topicId}\nYour response\nEOF)`,
-            topicName,
-          );
-          telegram.registerTopicSession(topic.topicId, newSession, topicName);
-          await telegram.sendToTopic(topic.topicId, `Session created. I'm here.`);
-          await telegram.sendToTopic(topicId, `New session created: "${topicName}" — check the new topic above.`);
-          console.log(`[telegram] Spawned session "${newSession}" for new topic ${topic.topicId}`);
+          // Don't create a session — findOrCreateForumTopic already stored the topic name.
+          // The first message in this topic will trigger auto-spawn with real content.
+          await telegram.sendToTopic(topic.topicId, `Ready — send your first message to start.`);
+          await telegram.sendToTopic(topicId, `Created topic "${topicName}" — head over there.`);
+          console.log(`[telegram] Created topic "${topicName}" (${topic.topicId}) — session will spawn on first message`);
         } catch (err) {
           console.error(`[telegram] /new failed:`, err);
-          console.error(`[telegram] Session spawn failed:`, err);
-          await telegram.sendToTopic(topicId, 'Couldn\'t create the new session. Try again in a moment.').catch(() => {});
+          await telegram.sendToTopic(topicId, 'Couldn\'t create the topic. Try again in a moment.').catch(() => {});
         }
       })();
       return;
