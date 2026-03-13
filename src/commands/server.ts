@@ -72,6 +72,7 @@ import { LiveConfig } from '../config/LiveConfig.js';
 import { CoherenceMonitor } from '../monitoring/CoherenceMonitor.js';
 import { ProcessIntegrity } from '../core/ProcessIntegrity.js';
 import { StaleProcessGuard } from '../core/StaleProcessGuard.js';
+import { cleanupGlobalInstalls } from '../core/GlobalInstallCleanup.js';
 import { ForegroundRestartWatcher } from '../core/ForegroundRestartWatcher.js';
 import { NotificationBatcher } from '../messaging/NotificationBatcher.js';
 import type { NotificationTier } from '../messaging/NotificationBatcher.js';
@@ -1375,6 +1376,29 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.warn(pc.red('  Auto-updates will NOT take effect. Remove with:'));
       console.warn(pc.red(`  rm -rf ${path.join(process.cwd(), 'node_modules')} ${path.join(process.cwd(), 'package.json')} ${path.join(process.cwd(), 'package-lock.json')}`));
       console.warn();
+    }
+
+    // ── Global install cleanup ─────────────────────────────────────────
+    // Shadow installs are the sole source of truth. Global installs cause
+    // version confusion — agents report stale versions when CLI commands
+    // resolve to a global binary instead of the shadow install.
+    // Clean up any lingering globals at startup (idempotent, safe to run every time).
+    try {
+      const cleanup = cleanupGlobalInstalls();
+      if (cleanup.removed.length > 0) {
+        console.log(pc.green(`  ✓ Cleaned up ${cleanup.removed.length} stale global instar install(s):`));
+        for (const r of cleanup.removed) {
+          console.log(pc.green(`    - ${r}`));
+        }
+      }
+      if (cleanup.failed.length > 0) {
+        for (const f of cleanup.failed) {
+          console.warn(pc.yellow(`  ⚠ Failed to remove global install at ${f.path}: ${f.error}`));
+        }
+      }
+    } catch (err) {
+      // Non-fatal — log and continue
+      console.warn(`[server] Global install cleanup error: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // ── ProcessIntegrity: freeze the running version at startup ────────

@@ -3,7 +3,7 @@
   "name": "io.github.JKHeadley/threadline-mcp",
   "description": "Agent-to-agent messaging with persistent contacts, conversation history, and trust levels.",
   "repository": {
-    "url": "https://github.com/SageMindAI/instar",
+    "url": "https://github.com/JKHeadley/instar",
     "source": "github",
     "subfolder": "packages/threadline-mcp"
   },

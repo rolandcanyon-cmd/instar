@@ -19,4 +19,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 For version history from v0.13.0 through v0.19.1, see the per-version upgrade guides in [`upgrades/`](upgrades/).
 
-See [GitHub Releases](https://github.com/SageMindAI/instar/releases) for version history prior to this changelog.
+See [GitHub Releases](https://github.com/JKHeadley/instar/releases) for version history prior to this changelog.

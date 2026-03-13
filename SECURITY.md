@@ -17,7 +17,7 @@ This is power-user infrastructure for developers who want genuine AI autonomy. I
 
 If you discover a security vulnerability, please report it responsibly:
 
-Please use [GitHub's private vulnerability reporting](https://github.com/SageMindAI/instar/security/advisories/new) to submit security issues.
+Please use [GitHub's private vulnerability reporting](https://github.com/JKHeadley/instar/security/advisories/new) to submit security issues.
 
 Include:
 - Description of the vulnerability

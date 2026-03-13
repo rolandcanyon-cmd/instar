@@ -1,7 +1,7 @@
 {
   "$schema": "./builtin-manifest.schema.json",
   "schemaVersion": 1,
-  "generatedAt": "2026-03-13T17:59:31.195Z",
+  "generatedAt": "2026-03-13T18:12:30.712Z",
   "instarVersion": "0.19.4",
   "entryCount": 168,
   "entries": {
@@ -1271,7 +1271,7 @@
       "type": "subsystem",
       "domain": "updates",
       "sourcePath": "src/core/AutoUpdater.ts",
-      "contentHash": "3ef8486700ee0bb3e2e209081c0bf5fba52d93b7a8bcf9aefdf93d7b1537c718",
+      "contentHash": "911a9cd17918e541fdb0bad32cfe526d3b1e5e62b3444e954a8718b35662dce0",
       "since": "2025-01-01"
     },
     "subsystem:auto-dispatcher": {

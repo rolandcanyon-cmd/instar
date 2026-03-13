@@ -25,6 +25,7 @@ import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
 import type { StateManager } from './StateManager.js';
 import type { LiveConfig } from '../config/LiveConfig.js';
 import { UpdateGate } from './UpdateGate.js';
+import { cleanupGlobalInstalls } from './GlobalInstallCleanup.js';
 import type { SessionManagerLike, SessionMonitorLike } from './UpdateGate.js';
 
 export interface AutoUpdaterConfig {
@@ -432,6 +433,17 @@ export class AutoUpdater {
       this.saveState();
 
       console.log(`[AutoUpdater] Updated: v${result.previousVersion} → v${result.newVersion} (target: v${targetVersion})`);
+
+      // Clean up stale global installs after successful shadow install update.
+      // Prevents version confusion where CLI commands resolve to an old global.
+      try {
+        const cleanup = cleanupGlobalInstalls();
+        if (cleanup.removed.length > 0) {
+          console.log(`[AutoUpdater] Cleaned up ${cleanup.removed.length} stale global install(s)`);
+        }
+      } catch (err) {
+        console.warn(`[AutoUpdater] Global cleanup error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      }
 
       // Always restart after a successful apply. The running process has OLD
       // code in memory regardless of what getInstalledVersion() reads from disk.

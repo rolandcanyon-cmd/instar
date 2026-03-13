@@ -19,7 +19,7 @@ import { PostUpdateMigrator } from './PostUpdateMigrator.js';
 import type { MigratorConfig } from './PostUpdateMigrator.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
-const GITHUB_RELEASES_URL = 'https://api.github.com/repos/SageMindAI/instar/releases';
+const GITHUB_RELEASES_URL = 'https://api.github.com/repos/JKHeadley/instar/releases';
 
 export interface RollbackResult {
   success: boolean;
@@ -100,7 +100,7 @@ export class UpdateChecker {
       latestVersion,
       updateAvailable,
       checkedAt: new Date().toISOString(),
-      changelogUrl: `https://github.com/SageMindAI/instar/releases`,
+      changelogUrl: `https://github.com/JKHeadley/instar/releases`,
     };
 
     // Fetch changelog if update is available
@@ -462,7 +462,7 @@ export class UpdateChecker {
     // Fallback: fetch recent commits from GitHub
     try {
       const response = await fetch(
-        'https://api.github.com/repos/SageMindAI/instar/commits?per_page=5',
+        'https://api.github.com/repos/JKHeadley/instar/commits?per_page=5',
         {
           headers: {
             'Accept': 'application/vnd.github.v3+json',

@@ -170,12 +170,12 @@ function mergeDiscoveryResults(
 
 ### Agent Name Collision Resolution
 
-When multiple GitHub agents share the same name (e.g., `personal/instar-ai-guy` and `SageMindAI/instar-ai-guy`):
+When multiple GitHub agents share the same name (e.g., `personal/instar-ai-guy` and `JKHeadley/instar-ai-guy`):
 
 1. **During display**: Always show the full `owner/repo` path to disambiguate.
 2. **During restore**: If the user selects an agent with a name collision, prompt: "This agent name 'ai-guy' already exists locally. Use a different local name?" Suggest `{name}-{owner}` (e.g., `ai-guy-SageMindAI`).
 3. **Local directory**: Use the disambiguated name for the directory: `~/.instar/agents/ai-guy-SageMindAI/`.
-4. **Stable identity**: The agent's identity is its `nameWithOwner` (e.g., `SageMindAI/instar-ai-guy`), not the local directory name. The local name is a convenience alias.
+4. **Stable identity**: The agent's identity is its `nameWithOwner` (e.g., `JKHeadley/instar-ai-guy`), not the local directory name. The local name is a convenience alias.
 
 ### Discovery Output Format
 
@@ -230,7 +230,7 @@ The `UNTRUSTED` label ensures the LLM wizard treats all field values as data, no
 4. **Paginate all GitHub queries**: Use `gh api --paginate` instead of `--limit 100`. If using `gh repo list`, detect exactly-100 results and warn about potential truncation
 5. **Use correct clone URL field**: Use `clone_url` (not `url`) from the GitHub API. The `url` field returns the web URL (e.g., `https://github.com/org/repo`), NOT the clone URL (e.g., `https://github.com/org/repo.git`)
 6. **Detect SSH preference**: Check `gh config get git_protocol` -- if `ssh`, populate `cloneUrl` with the SSH URL instead
-7. **Include `nameWithOwner`**: So the wizard can show "SageMindAI/instar-ai-guy" vs "justinheadley/instar-personal-bot"
+7. **Include `nameWithOwner`**: So the wizard can show "JKHeadley/instar-ai-guy" vs "justinheadley/instar-personal-bot"
 8. **Validate registry entries**: Check each `registry.json` entry against the filesystem, flag zombies
 9. **Structured JSON output**: Pass discovery as `SetupDiscoveryContext` JSON, delimited and labeled as untrusted
 10. **Sanitize all string fields**: Validate agent names match `/^[a-zA-Z0-9_-]+$/`, org names match `/^[a-zA-Z0-9_.-]+$/`. Reject or escape anything else.
@@ -475,7 +475,7 @@ The wizard's Phase 0 handles several entry points. Here's how each routes into t
 2. **Validate backup state**: Schema-validate all state files (`users.json`, `machines/registry.json`, `config.json`) against expected structure. Reject malformed files.
 3. **Display restoration summary** before proceeding:
    ```
-   Restoring from: SageMindAI/instar-ai-guy
+   Restoring from: JKHeadley/instar-ai-guy
    Agent name: ai-guy
    Users: 2 (Justin, Sarah)
    Machines: 1
@@ -522,7 +522,7 @@ githubAgents = repos
 ```typescript
 interface DiscoveredGitHubAgent {
   name: string;           // agent name (e.g., "ai-guy")
-  repo: string;           // full repo (e.g., "SageMindAI/instar-ai-guy")
+  repo: string;           // full repo (e.g., "JKHeadley/instar-ai-guy")
   owner: string;          // owner login (e.g., "SageMindAI")
   ownerType: 'user' | 'org';
   cloneUrl: string;       // Clone URL (HTTPS or SSH based on user preference)
@@ -712,8 +712,8 @@ Your repos:
   1. personal-bot (justinheadley/instar-personal-bot)
 
 SageMindAI:
-  2. ai-guy (SageMindAI/instar-ai-guy)
-  3. dawn-agent (SageMindAI/instar-dawn-agent)
+  2. ai-guy (JKHeadley/instar-ai-guy)
+  3. dawn-agent (JKHeadley/instar-dawn-agent)
 
 On this machine:
   4. my-agent (~/.instar/agents/my-agent) -- currently running
@@ -725,7 +725,7 @@ If an agent appears both locally and on GitHub, show it once (local takes priori
 
 ```
 On this machine:
-  1. ai-guy (/Users/justin/Projects/ai-guy/.instar) -- running, backed up to SageMindAI/instar-ai-guy
+  1. ai-guy (/Users/justin/Projects/ai-guy/.instar) -- running, backed up to JKHeadley/instar-ai-guy
 ```
 
 ---

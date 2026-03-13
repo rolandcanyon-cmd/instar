@@ -11,14 +11,14 @@
 <p align="center">
   <a href="https://www.npmjs.com/package/instar"><img src="https://img.shields.io/npm/v/instar?style=flat-square" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/instar"><img src="https://img.shields.io/npm/dw/instar?style=flat-square" alt="npm downloads"></a>
-  <a href="https://github.com/SageMindAI/instar/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/SageMindAI/instar/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
-  <a href="https://github.com/SageMindAI/instar/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"></a>
+  <a href="https://github.com/JKHeadley/instar/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/JKHeadley/instar/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <a href="https://github.com/JKHeadley/instar/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=flat-square" alt="License"></a>
   <img src="https://img.shields.io/badge/TypeScript-100%25-blue?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript">
   <a href="https://instar.sh/introduction/"><img src="https://img.shields.io/badge/Docs-instar.sh-teal?style=flat-square" alt="Docs"></a>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/instar">npm</a> · <a href="https://github.com/SageMindAI/instar">GitHub</a> · <a href="https://instar.sh">instar.sh</a> · <a href="https://instar.sh/introduction/">Docs</a>
+  <a href="https://www.npmjs.com/package/instar">npm</a> · <a href="https://github.com/JKHeadley/instar">GitHub</a> · <a href="https://instar.sh">instar.sh</a> · <a href="https://instar.sh/introduction/">Docs</a>
 </p>
 
 ---

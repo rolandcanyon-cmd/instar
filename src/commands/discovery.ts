@@ -23,7 +23,7 @@ import pc from 'picocolors';
 
 export interface DiscoveredGitHubAgent {
   name: string;           // agent name (e.g., "ai-guy")
-  repo: string;           // full repo path (e.g., "SageMindAI/instar-ai-guy")
+  repo: string;           // full repo path (e.g., "JKHeadley/instar-ai-guy")
   owner: string;          // owner login (e.g., "SageMindAI")
   ownerType: 'user' | 'org';
   cloneUrl: string;       // Clone URL (HTTPS or SSH based on user preference)

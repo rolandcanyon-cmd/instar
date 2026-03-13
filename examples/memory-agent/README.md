@@ -80,4 +80,4 @@ The simplest starting point is `MEMORY.md` — Claude Code loads it automaticall
 - The reflection job is optional — the agent also updates memory during conversations
 - Use the `agent-memory` skill for more structured memory patterns
 
-> **Full docs:** [Memory](https://instar.sh/features/memory/) · [Evolution](https://instar.sh/features/evolution/) · [agent-memory skill](https://github.com/SageMindAI/instar/tree/main/skills/agent-memory)
+> **Full docs:** [Memory](https://instar.sh/features/memory/) · [Evolution](https://instar.sh/features/evolution/) · [agent-memory skill](https://github.com/JKHeadley/instar/tree/main/skills/agent-memory)

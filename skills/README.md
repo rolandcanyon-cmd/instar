@@ -103,4 +103,4 @@ No walls. No friction. Value at every step.
 
 MIT — same as [Instar](https://instar.sh).
 
-[instar.sh](https://instar.sh) · [npm](https://www.npmjs.com/package/instar) · [GitHub](https://github.com/SageMindAI/instar)
+[instar.sh](https://instar.sh) · [npm](https://www.npmjs.com/package/instar) · [GitHub](https://github.com/JKHeadley/instar)

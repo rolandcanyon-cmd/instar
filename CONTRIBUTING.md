@@ -44,7 +44,7 @@ curl -X POST http://localhost:YOUR_PORT/feedback \
 
 ### 3. Discussions (Ideas & Questions)
 
-[GitHub Discussions](https://github.com/SageMindAI/instar/discussions) for:
+[GitHub Discussions](https://github.com/JKHeadley/instar/discussions) for:
 - **Q&A** — setup help, architecture questions
 - **Ideas** — feature proposals, workflow suggestions
 - **Show and Tell** — share what your agent is doing
@@ -54,7 +54,7 @@ curl -X POST http://localhost:YOUR_PORT/feedback \
 Traditional PRs are welcome too — this is still open source. The code is here, you can fork it, improve it, and send it back.
 
 ```bash
-git clone https://github.com/SageMindAI/instar.git
+git clone https://github.com/JKHeadley/instar.git
 cd instar
 pnpm install       # or npm install
 pnpm build         # or npm run build
@@ -69,7 +69,7 @@ Good areas for human PRs:
 
 ### 5. Bug Reports
 
-Open an [issue](https://github.com/SageMindAI/instar/issues) with:
+Open an [issue](https://github.com/JKHeadley/instar/issues) with:
 - Steps to reproduce
 - Expected vs actual behavior
 - Instar version (`instar --version`)
@@ -89,4 +89,4 @@ This doesn't diminish human contributions — it means the contribution model ma
 
 ## Questions?
 
-Open a [Discussion](https://github.com/SageMindAI/instar/discussions) or check [instar.sh](https://instar.sh) for docs.
+Open a [Discussion](https://github.com/JKHeadley/instar/discussions) or check [instar.sh](https://instar.sh) for docs.

@@ -151,14 +151,14 @@ describe('mergeDiscoveryResults', () => {
 
   it('merges local + GitHub same agent into source=both', () => {
     const local = [makeLocalAgent({ name: 'ai-guy' })];
-    const github = [makeGitHubAgent({ name: 'ai-guy', repo: 'SageMindAI/instar-ai-guy', owner: 'SageMindAI' })];
+    const github = [makeGitHubAgent({ name: 'ai-guy', repo: 'JKHeadley/instar-ai-guy', owner: 'SageMindAI' })];
     const result = mergeDiscoveryResults(local, github);
 
     expect(result).toHaveLength(1);
     expect(result[0].source).toBe('both');
     expect(result[0].name).toBe('ai-guy');
     expect(result[0].path).toBe(local[0].path);
-    expect(result[0].repo).toBe('SageMindAI/instar-ai-guy');
+    expect(result[0].repo).toBe('JKHeadley/instar-ai-guy');
   });
 
   it('keeps local-only agents as source=local', () => {

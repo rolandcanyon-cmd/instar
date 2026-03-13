@@ -52,10 +52,10 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/SageMindAI/instar.git"
+    "url": "https://github.com/JKHeadley/instar.git"
   },
   "bugs": {
-    "url": "https://github.com/SageMindAI/instar/issues"
+    "url": "https://github.com/JKHeadley/instar/issues"
   },
   "homepage": "https://instar.sh",
   "files": [
