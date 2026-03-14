@@ -40,9 +40,19 @@ describe('TelegramAdapter — offset persistence', () => {
       expect(pollSection).toContain('this.saveOffset()');
     });
 
-    it('only saves when updates were received', () => {
-      // Should check updates.length > 0 before saving
-      expect(source).toContain('if (updates.length > 0)');
+    it('saves offset after each individual update (not batch-end)', () => {
+      // saveOffset must be called inside the for-loop, after each processUpdate,
+      // so a mid-batch crash doesn't re-deliver already-processed messages.
+      // Pattern mirrors TelegramLifeline.poll — see commit 96006ff.
+      const pollSection = source.slice(source.indexOf('private async poll'));
+      const forLoopSection = pollSection.slice(
+        pollSection.indexOf('for (const update of updates)'),
+        pollSection.indexOf('} catch (err)')
+      );
+      // saveOffset should appear inside the loop body, before the closing brace
+      expect(forLoopSection).toContain('this.saveOffset()');
+      // The old batch-end pattern ('if (updates.length > 0)') should NOT exist
+      expect(pollSection.slice(0, pollSection.indexOf('} catch (err)'))).not.toContain('if (updates.length > 0)');
     });
   });
 

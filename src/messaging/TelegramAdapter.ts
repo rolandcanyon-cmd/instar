@@ -2882,10 +2882,8 @@ export class TelegramAdapter implements MessagingAdapter {
       for (const update of updates) {
         await this.processUpdate(update);
         this.lastUpdateId = Math.max(this.lastUpdateId, update.update_id);
-      }
-
-      // Persist offset so restarts don't re-process old messages
-      if (updates.length > 0) {
+        // Save offset after each update so a crash mid-batch doesn't re-deliver
+        // messages that were already processed (mirrors TelegramLifeline fix).
         this.saveOffset();
       }
     } catch (err) {
