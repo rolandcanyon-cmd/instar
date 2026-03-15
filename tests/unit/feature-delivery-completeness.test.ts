@@ -158,6 +158,8 @@ describe('Feature Delivery Completeness', () => {
       '/coherence/check',         // alternate check for Coherence Gate
       '/operations/evaluate',     // alternate check for External Operation Safety
       'instar playbook',          // alternate check for Playbook
+      '## Self-Observations',     // AGENT.md section, not CLAUDE.md — no template parity needed
+      '## Identity History',      // AGENT.md section, not CLAUDE.md — no template parity needed
       'Session Continuity',       // conditional (Telegram-only), not a universal feature
       'CONTINUATION',             // alternate check for Session Continuity
     ];
