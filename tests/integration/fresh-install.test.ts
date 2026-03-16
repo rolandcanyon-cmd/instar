@@ -111,7 +111,7 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(fs.existsSync(jobsPath)).toBe(true);
 
     const jobs = JSON.parse(fs.readFileSync(jobsPath, 'utf-8'));
-    expect(jobs.length).toBe(20);
+    expect(jobs.length).toBe(21);
 
     const slugs = jobs.map((j: any) => j.slug);
     // Original 12 coherence jobs
@@ -139,6 +139,8 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(slugs).toContain('git-sync');
     // Capability audit
     expect(slugs).toContain('capability-audit');
+    // Identity review
+    expect(slugs).toContain('identity-review');
   });
 
   it('installs behavioral hooks', () => {
