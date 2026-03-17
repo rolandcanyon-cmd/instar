@@ -11,7 +11,8 @@
  * GitHub releases API for changelogs.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { UpdateInfo, UpdateResult } from './types.js';
@@ -202,6 +203,34 @@ export class UpdateChecker {
         } catch (rebuildErr) {
           // Non-fatal: fallback SQLite behavior (legacy JSONL) handles the case
           console.warn(`[UpdateChecker] better-sqlite3 rebuild failed (legacy fallback active): ${rebuildErr instanceof Error ? rebuildErr.message : String(rebuildErr)}`);
+        }
+
+        // Strip extended attributes on macOS that may block launchd's restricted sandbox.
+        // com.apple.quarantine can cause EPERM; com.apple.provenance is kernel-protected
+        // on macOS 15+ (Sequoia) and can't actually be removed, but the attempt is harmless.
+        if (os.platform() === 'darwin') {
+          for (const attr of ['com.apple.quarantine', 'com.apple.provenance']) {
+            try {
+              execFileSync('xattr', ['-rd', attr, shadowDir], { stdio: 'ignore' });
+            } catch {
+              // Non-fatal: attribute may not exist or may be kernel-protected
+            }
+          }
+          console.log(`[UpdateChecker] Attempted xattr cleanup on shadow install`);
+        }
+
+        // Pre-restart validation: verify node can actually load the new CLI.
+        // If this fails, the update installed but the binary is inaccessible
+        // (e.g., launchd sandbox restrictions). Better to detect now than crash-loop.
+        const newCliPath = path.join(shadowDir, 'node_modules', 'instar', 'dist', 'cli.js');
+        try {
+          execFileSync(process.execPath, ['-e', `require("fs").readFileSync(${JSON.stringify(newCliPath)})`], {
+            stdio: 'ignore',
+            timeout: 10000,
+          });
+        } catch (accessErr) {
+          console.error(`[UpdateChecker] WARNING: New CLI at ${newCliPath} is not accessible by node: ${accessErr instanceof Error ? accessErr.message : String(accessErr)}`);
+          console.error(`[UpdateChecker] The update was installed but may fail on restart. Check file permissions and macOS security settings.`);
         }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
