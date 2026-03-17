@@ -270,6 +270,32 @@ export class GitSyncManager {
           });
           return result;
         }
+      } else if (errMsg.includes('rebase-merge') || errMsg.includes('rebase in progress') || errMsg.includes('rebase-apply')) {
+        // Stuck rebase state from a previously interrupted pull — abort and retry
+        console.log('[GitSync] Stuck rebase detected — aborting and retrying pull');
+        try {
+          this.gitExec(['rebase', '--abort']);
+          const beforeHead = this.gitHead();
+          this.gitExec(['pull', '--rebase', '--autostash']);
+          const afterHead = this.gitHead();
+          result.pulled = beforeHead !== afterHead;
+          if (result.pulled) {
+            const log = this.gitExec(['log', '--oneline', `${beforeHead}..${afterHead}`]);
+            result.commitsPulled = log.trim().split('\n').filter(l => l.trim()).length;
+          }
+          console.log('[GitSync] Auto-resolved stuck rebase — pull succeeded');
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          console.error(`[GitSync] Stuck rebase auto-resolve failed: ${retryMsg}`);
+          DegradationReporter.getInstance().report({
+            feature: 'GitSync.pull',
+            primary: 'Clean git pull',
+            fallback: 'Stuck rebase abort + retry failed',
+            reason: `Why: Aborted stuck rebase but pull still failed. ${retryMsg.slice(0, 200)}`,
+            impact: 'Git pull blocked. Manual intervention may be needed: cd to project and run git rebase --abort, then git pull.',
+          });
+          return result;
+        }
       }
       DegradationReporter.getInstance().report({
         feature: 'GitSync.pull',
