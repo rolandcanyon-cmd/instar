@@ -301,6 +301,146 @@ rm -f "$CRASH_FILE" 2>/dev/null
     });
   });
 
+  describe('Node.js boot wrapper (TCC-safe launchd entry point)', () => {
+    let jsWrapperPath: string;
+
+    beforeAll(() => {
+      jsWrapperPath = path.join(stateDir, 'instar-boot.js');
+      const crashFile = path.join(stateDir, 'state', 'boot-crashes.txt');
+
+      // Generate JS wrapper matching what setup.ts produces
+      const jsWrapper = `#!/usr/bin/env node
+const { execFileSync, spawn } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const SHADOW = ${JSON.stringify(shadowCli)};
+const SHADOW_DIR = ${JSON.stringify(shadowDir)};
+const CRASH_FILE = ${JSON.stringify(crashFile)};
+
+if (!fs.existsSync(SHADOW)) {
+  process.stderr.write('ERROR: Shadow install not found at ' + SHADOW + '\\n');
+  process.exit(1);
+}
+
+if (os.platform() === 'darwin') {
+  try { execFileSync('xattr', ['-rd', 'com.apple.quarantine', SHADOW_DIR], { stdio: 'ignore' }); } catch {}
+  try { execFileSync('xattr', ['-rd', 'com.apple.provenance', SHADOW_DIR], { stdio: 'ignore' }); } catch {}
+}
+
+const crashDir = path.dirname(CRASH_FILE);
+fs.mkdirSync(crashDir, { recursive: true });
+
+const args = process.argv.slice(2);
+const child = spawn(process.execPath, [SHADOW, ...args], { stdio: 'inherit', env: process.env });
+
+child.on('exit', (code, signal) => {
+  const exitCode = code ?? (signal ? 1 : 0);
+  if (exitCode !== 0) {
+    const now = Math.floor(Date.now() / 1000);
+    fs.appendFileSync(CRASH_FILE, now + '\\n');
+    try {
+      const lines = fs.readFileSync(CRASH_FILE, 'utf-8').trim().split('\\n');
+      if (lines.length > 20) fs.writeFileSync(CRASH_FILE, lines.slice(-20).join('\\n') + '\\n');
+    } catch {}
+    process.exit(exitCode);
+  }
+  try { fs.unlinkSync(CRASH_FILE); } catch {}
+  process.exit(0);
+});
+
+child.on('error', (err) => {
+  process.stderr.write('[instar-boot] Failed to spawn CLI: ' + err.message + '\\n');
+  process.exit(1);
+});
+`;
+      fs.writeFileSync(jsWrapperPath, jsWrapper, { mode: 0o755 });
+    });
+
+    it('generates an executable JS boot wrapper', () => {
+      expect(fs.existsSync(jsWrapperPath)).toBe(true);
+      const stat = fs.statSync(jsWrapperPath);
+      expect(stat.mode & 0o111).toBeGreaterThan(0);
+    });
+
+    it('JS boot wrapper runs successfully with valid shadow install', () => {
+      const result = execFileSync(process.execPath, [jsWrapperPath], {
+        timeout: 5000,
+        encoding: 'utf-8',
+      });
+      expect(result.trim()).toBe('instar-test-cli');
+    });
+
+    it('JS boot wrapper fails with clear error when shadow install is missing', () => {
+      const backupPath = shadowCli + '.bak';
+      fs.renameSync(shadowCli, backupPath);
+
+      try {
+        execFileSync(process.execPath, [jsWrapperPath], {
+          timeout: 5000,
+          encoding: 'utf-8',
+        });
+        expect.unreachable('Should have thrown');
+      } catch (err: any) {
+        expect(err.stderr || '').toContain('Shadow install not found');
+      } finally {
+        fs.renameSync(backupPath, shadowCli);
+      }
+    });
+
+    it('JS boot wrapper clears crash history on clean exit', () => {
+      const crashFile = path.join(stateDir, 'state', 'boot-crashes.txt');
+      fs.writeFileSync(crashFile, '1000000000\n1000000001\n');
+
+      execFileSync(process.execPath, [jsWrapperPath], { timeout: 5000 });
+
+      expect(fs.existsSync(crashFile)).toBe(false);
+    });
+
+    it('JS boot wrapper records crash timestamp on failure', () => {
+      const crashFile = path.join(stateDir, 'state', 'boot-crashes.txt');
+      try { fs.unlinkSync(crashFile); } catch { /* ok */ }
+
+      fs.writeFileSync(shadowCli, '#!/usr/bin/env node\nprocess.exit(1);');
+
+      try {
+        execFileSync(process.execPath, [jsWrapperPath], { timeout: 5000, encoding: 'utf-8' });
+      } catch { /* expected */ }
+
+      expect(fs.existsSync(crashFile)).toBe(true);
+      const content = fs.readFileSync(crashFile, 'utf-8').trim();
+      const timestamps = content.split('\n');
+      expect(timestamps.length).toBeGreaterThanOrEqual(1);
+      const ts = parseInt(timestamps[timestamps.length - 1], 10);
+      expect(ts).toBeGreaterThan(1700000000);
+
+      // Restore
+      fs.writeFileSync(shadowCli, '#!/usr/bin/env node\nconsole.log("instar-test-cli");');
+      fs.chmodSync(shadowCli, 0o755);
+    });
+
+    it('JS boot wrapper trims crash file to 20 entries max', () => {
+      const crashFile = path.join(stateDir, 'state', 'boot-crashes.txt');
+      const lines = Array.from({ length: 25 }, (_, i) => `${1000000000 + i}`).join('\n') + '\n';
+      fs.writeFileSync(crashFile, lines);
+
+      fs.writeFileSync(shadowCli, '#!/usr/bin/env node\nprocess.exit(1);');
+
+      try {
+        execFileSync(process.execPath, [jsWrapperPath], { timeout: 5000, encoding: 'utf-8' });
+      } catch { /* expected */ }
+
+      const content = fs.readFileSync(crashFile, 'utf-8').trim();
+      const entryCount = content.split('\n').length;
+      expect(entryCount).toBeLessThanOrEqual(20);
+
+      // Restore
+      fs.writeFileSync(shadowCli, '#!/usr/bin/env node\nconsole.log("instar-test-cli");');
+      fs.chmodSync(shadowCli, 0o755);
+    });
+  });
+
   describe('Full update → restart → boot cycle', () => {
     it('simulates the complete auto-update flow end to end', () => {
       // Step 1: Simulate npm install creating a new shadow install
