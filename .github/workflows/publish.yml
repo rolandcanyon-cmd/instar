@@ -38,6 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Always fetch latest HEAD, not the triggering SHA — avoids version
+          # collisions when a prior queued run already bumped the version.
+          ref: main
           # RELEASE_TOKEN is a PAT that can bypass branch protection for version bump commits.
           # Falls back to GITHUB_TOKEN but that will fail if branch protection is enabled.
           token: ${{ secrets.RELEASE_TOKEN }}
@@ -59,6 +62,14 @@ jobs:
           NEW=$(node -p "require('./package.json').version")
           echo "version=$NEW" >> "$GITHUB_OUTPUT"
           echo "Bumped $CURRENT → $NEW"
+
+      - name: Check for version collision
+        run: |
+          VERSION=${{ steps.bump.outputs.version }}
+          if npm view "instar@$VERSION" version 2>/dev/null; then
+            echo "::error::Version $VERSION already exists on npm — skipping publish"
+            exit 1
+          fi
 
       - name: Rename NEXT.md to version-specific guide
         run: |
