@@ -9,12 +9,14 @@
  * Client → Server:
  *   { type: 'subscribe', session: 'session-name' }
  *   { type: 'unsubscribe', session: 'session-name' }
+ *   { type: 'history', session: 'session-name', lines: 5000 }
  *   { type: 'input', session: 'session-name', text: 'some input' }
  *   { type: 'key', session: 'session-name', key: 'C-c' }
  *   { type: 'ping' }
  *
  * Server → Client:
  *   { type: 'output', session: 'session-name', data: '...terminal output...' }
+ *   { type: 'history', session: 'session-name', data: '...', lines: N }
  *   { type: 'sessions', sessions: [...] }
  *   { type: 'session_ended', session: 'session-name' }
  *   { type: 'subscribed', session: 'session-name' }
@@ -183,8 +185,8 @@ export class WebSocketManager {
           return;
         }
         client.subscriptions.add(session);
-        // Send current output immediately
-        const output = this.sessionManager.captureOutput(session, 200);
+        // Send current output immediately — use large capture for initial load
+        const output = this.sessionManager.captureOutput(session, 2000);
         if (output) {
           this.sessionOutputCache.set(`${this.clientId(client)}:${session}`, output);
           this.send(client.ws, { type: 'output', session, data: output });
@@ -225,6 +227,25 @@ export class WebSocketManager {
         break;
       }
 
+      case 'history': {
+        const session = String(msg.session || '');
+        const rawLines = parseInt(String(msg.lines || '5000'), 10);
+        const lines = Math.min(Math.max(rawLines, 1), 50_000);
+        if (!session) {
+          this.send(client.ws, { type: 'error', message: 'Missing session name' });
+          return;
+        }
+        const historyOutput = this.sessionManager.captureOutput(session, lines);
+        if (historyOutput) {
+          // Update the cache so streaming doesn't immediately overwrite with fewer lines
+          this.sessionOutputCache.set(`${this.clientId(client)}:${session}`, historyOutput);
+          this.send(client.ws, { type: 'history', session, data: historyOutput, lines });
+        } else {
+          this.send(client.ws, { type: 'error', message: `No output for session "${session}"` });
+        }
+        break;
+      }
+
       case 'ping':
         this.send(client.ws, { type: 'pong' });
         break;
@@ -250,7 +271,7 @@ export class WebSocketManager {
 
       // Capture output for each subscribed session
       for (const session of subscribedSessions) {
-        const output = this.sessionManager.captureOutput(session, 200);
+        const output = this.sessionManager.captureOutput(session, 2000);
 
         // Broadcast to each subscribed client
         for (const [, client] of this.clients) {

@@ -351,6 +351,15 @@ export class SessionManager extends EventEmitter {
         '-e', 'DATABASE_URL_TEST=',
         this.config.claudePath, ...claudeArgs,
       ], { encoding: 'utf-8' });
+
+      // Increase tmux scrollback buffer for dashboard history support
+      try {
+        execFileSync(this.config.tmuxPath, [
+          'set-option', '-t', `=${tmuxSession}:`, 'history-limit', '50000',
+        ], { encoding: 'utf-8', timeout: 5000 });
+      } catch {
+        // @silent-fallback-ok — history-limit is a nice-to-have
+      }
     } catch (err) {
       throw new Error(`Failed to create tmux session: ${err}`);
     }
@@ -757,6 +766,15 @@ export class SessionManager extends EventEmitter {
       }
 
       execFileSync(this.config.tmuxPath, tmuxArgs, { encoding: 'utf-8' });
+
+      // Increase tmux scrollback buffer for dashboard history support
+      try {
+        execFileSync(this.config.tmuxPath, [
+          'set-option', '-t', `=${tmuxSession}:`, 'history-limit', '50000',
+        ], { encoding: 'utf-8', timeout: 5000 });
+      } catch {
+        // @silent-fallback-ok — history-limit is a nice-to-have
+      }
     } catch (err) {
       throw new Error(`Failed to create interactive tmux session: ${err}`);
     }
@@ -865,6 +883,15 @@ export class SessionManager extends EventEmitter {
       }
 
       execFileSync(this.config.tmuxPath, tmuxArgs, { encoding: 'utf-8' });
+
+      // Increase tmux scrollback buffer for dashboard history support
+      try {
+        execFileSync(this.config.tmuxPath, [
+          'set-option', '-t', `=${tmuxSession}:`, 'history-limit', '50000',
+        ], { encoding: 'utf-8', timeout: 5000 });
+      } catch {
+        // @silent-fallback-ok — history-limit is a nice-to-have
+      }
     } catch (err) {
       throw new Error(`Failed to create triage tmux session: ${err}`);
     }
