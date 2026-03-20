@@ -1881,6 +1881,9 @@
     let activeSession = null;
     let term = null;
     let fitAddon = null;
+    let historyLinesLoaded = 2000; // matches initial subscribe capture
+    let historyLoading = false;
+    let historyExhausted = false; // true when we've loaded all available history
 
     // ── Auth ─────────────────────────────────────────────────
     function authenticate() {
@@ -2001,6 +2004,26 @@
         case 'output':
           if (msg.session === activeSession) {
             renderTerminalOutput(msg.data);
+          }
+          break;
+
+        case 'history':
+          if (msg.session === activeSession && term) {
+            const prevLineCount = historyLinesLoaded;
+            historyLinesLoaded = msg.lines;
+            // Check if we got more content than before
+            const newLineCount = (msg.data || '').split('\n').length;
+            const oldLineCount = prevLineCount;
+            if (newLineCount <= oldLineCount + 10) {
+              // No meaningful new content — we've hit the buffer limit
+              historyExhausted = true;
+            }
+            // Rewrite terminal with expanded history
+            term.clear();
+            term.write(msg.data);
+            // Don't auto-scroll — user is reading history
+            historyLoading = false;
+            hideHistorySpinner();
           }
           break;
 
