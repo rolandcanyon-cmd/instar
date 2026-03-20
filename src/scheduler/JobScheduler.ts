@@ -1083,6 +1083,11 @@ export class JobScheduler {
   private checkMissedJobs(enabledJobs: JobDefinition[]): void {
     const now = Date.now();
 
+    // Collect all missed jobs first, then sort by priority before triggering.
+    // This ensures high-priority jobs get the available slots when multiple
+    // jobs are overdue after a restart or sleep/wake cycle.
+    const missedJobs: { job: JobDefinition; overdueRatio: number }[] = [];
+
     for (const job of enabledJobs) {
       const jobState = this.state.getJobState(job.slug);
       if (!jobState?.lastRun) continue;
@@ -1099,10 +1104,21 @@ export class JobScheduler {
       const intervalMs = nextNextRun.getTime() - nextRun.getTime();
       const timeSinceLastRun = now - lastRun;
 
-      // If overdue by more than 1.5x the interval, trigger immediately
+      // If overdue by more than 1.5x the interval, mark as missed
       if (timeSinceLastRun > intervalMs * 1.5) {
-        this.triggerJob(job.slug, 'missed');
+        missedJobs.push({ job, overdueRatio: timeSinceLastRun / intervalMs });
       }
+    }
+
+    // Sort by priority (critical first), then by how overdue (most overdue first)
+    missedJobs.sort((a, b) => {
+      const priorityDiff = (PRIORITY_ORDER[a.job.priority ?? 'low']) - (PRIORITY_ORDER[b.job.priority ?? 'low']);
+      if (priorityDiff !== 0) return priorityDiff;
+      return b.overdueRatio - a.overdueRatio;
+    });
+
+    for (const { job } of missedJobs) {
+      this.triggerJob(job.slug, 'missed');
     }
   }
 
