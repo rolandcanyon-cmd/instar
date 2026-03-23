@@ -123,6 +123,7 @@ describe('Identity / Soul API Routes', () => {
       pasteManager: null,
       wsManager: null,
       soulManager,
+      discoveryEvaluator: null,
       startTime: new Date(),
     });
 

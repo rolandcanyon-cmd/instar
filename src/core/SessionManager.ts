@@ -106,6 +106,10 @@ export class SessionManager extends EventEmitter {
   /** Sessions with active relay leases (prompt relayed, waiting for response) — extends idle timeout */
   private relayLeases = new Map<string, number>(); // session ID → lease expiry timestamp
 
+  /** Track pending Telegram injections awaiting agent response.
+   *  Key = tmuxSession name. Cleared when agent replies via /telegram/reply/:topicId. */
+  private pendingInjections = new Map<string, { topicId: number; injectedAt: number; text: string }>();
+
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
     this.config = config;
@@ -237,6 +241,18 @@ export class SessionManager extends EventEmitter {
       for (const session of running) {
         const alive = await this.isSessionAliveAsync(session.tmuxSession);
         if (!alive) {
+          // Check if this session had a pending Telegram injection that never got a response
+          const pendingInjection = this.pendingInjections.get(session.tmuxSession);
+          if (pendingInjection) {
+            console.warn(`[SessionManager] Session "${session.name}" died with unanswered Telegram injection for topic ${pendingInjection.topicId} (injected ${Math.round((Date.now() - pendingInjection.injectedAt) / 1000)}s ago)`);
+            this.pendingInjections.delete(session.tmuxSession);
+            this.emit('injectionDropped', {
+              topicId: pendingInjection.topicId,
+              sessionName: session.tmuxSession,
+              text: pendingInjection.text,
+              injectedAt: pendingInjection.injectedAt,
+            });
+          }
           session.status = 'completed';
           session.endedAt = new Date().toISOString();
           this.state.saveSession(session);
@@ -268,6 +284,18 @@ export class SessionManager extends EventEmitter {
           const buffer = Math.min(maxMinutes * 0.2, 60); // 20% buffer, max 60 min
           const limit = maxMinutes + buffer;
           if (elapsed > limit && !this.config.protectedSessions.includes(session.tmuxSession)) {
+            // Check for unanswered injection before timeout kill
+            const pendingInjection = this.pendingInjections.get(session.tmuxSession);
+            if (pendingInjection) {
+              console.warn(`[SessionManager] Timed-out session "${session.name}" had unanswered injection for topic ${pendingInjection.topicId}`);
+              this.pendingInjections.delete(session.tmuxSession);
+              this.emit('injectionDropped', {
+                topicId: pendingInjection.topicId,
+                sessionName: session.tmuxSession,
+                text: pendingInjection.text,
+                injectedAt: pendingInjection.injectedAt,
+              });
+            }
             console.warn(`[SessionManager] Session "${session.name}" exceeded timeout (${Math.round(elapsed)}m > ${maxMinutes}m). Killing.`);
             // Emit beforeSessionKill BEFORE destroying the tmux session so
             // listeners (e.g. TopicResumeMap) can discover the Claude UUID.
@@ -312,6 +340,18 @@ export class SessionManager extends EventEmitter {
             } else {
               const idleMs = now - this.idlePromptSince.get(session.id)!;
               if (idleMs > IDLE_PROMPT_KILL_MINUTES * 60_000) {
+                // Check for unanswered injection before killing
+                const pendingInjection = this.pendingInjections.get(session.tmuxSession);
+                if (pendingInjection) {
+                  console.warn(`[SessionManager] Zombie session "${session.name}" had unanswered injection for topic ${pendingInjection.topicId}`);
+                  this.pendingInjections.delete(session.tmuxSession);
+                  this.emit('injectionDropped', {
+                    topicId: pendingInjection.topicId,
+                    sessionName: session.tmuxSession,
+                    text: pendingInjection.text,
+                    injectedAt: pendingInjection.injectedAt,
+                  });
+                }
                 console.warn(`[SessionManager] Session "${session.name}" idle at prompt for ${Math.round(idleMs / 60_000)}m with no active processes. Killing zombie.`);
                 this.emit('beforeSessionKill', session);
                 try {
@@ -1074,6 +1114,10 @@ export class SessionManager extends EventEmitter {
   }
 
   injectTelegramMessage(tmuxSession: string, topicId: number, text: string, topicName?: string, senderName?: string, telegramUserId?: number): void {
+    // Track this injection for response verification.
+    // If the session dies before the agent replies, the monitor loop will detect it.
+    this.pendingInjections.set(tmuxSession, { topicId, injectedAt: Date.now(), text: text.slice(0, 200) });
+
     const FILE_THRESHOLD = 500;
 
     // Transform [image:path] tags into explicit read instructions.
@@ -1124,6 +1168,25 @@ export class SessionManager extends EventEmitter {
 
     const ref = `[telegram:${topicId}] [Long message saved to ${filepath} — read it to see the full message]`;
     this.injectMessage(tmuxSession, ref);
+  }
+
+  /**
+   * Clear the injection tracker for a topic when the agent sends a reply.
+   * Called from the /telegram/reply/:topicId route.
+   */
+  clearInjectionTracker(topicId: number): void {
+    for (const [session, info] of this.pendingInjections) {
+      if (info.topicId === topicId) {
+        this.pendingInjections.delete(session);
+      }
+    }
+  }
+
+  /**
+   * Get all pending injections (for diagnostics / event emission on session death).
+   */
+  getPendingInjection(tmuxSession: string): { topicId: number; injectedAt: number; text: string } | undefined {
+    return this.pendingInjections.get(tmuxSession);
   }
 
   /**

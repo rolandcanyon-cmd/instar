@@ -512,16 +512,19 @@ async function spawnSessionForTopic(
     _topicResumeMap?.remove(topicId);
   }
 
-  // Proactive UUID save — schedule an immediate discovery attempt after spawn.
-  // The JSONL file appears ~3-5 seconds after Claude Code starts.
-  // This is belt-and-suspenders alongside the 60s heartbeat and beforeSessionKill.
+  // Proactive UUID save — schedule discovery after spawn.
+  // Prefer authoritative claudeSessionId from hook events (populated within seconds).
+  // Falls back to mtime-based JSONL scan only when there's no ambiguity.
   if (_topicResumeMap && !resumeSessionId) {
     setTimeout(() => {
       try {
-        const uuid = _topicResumeMap!.findClaudeSessionUuid();
+        // Check if hook events have already populated the authoritative UUID
+        const sessions = sessionManager.listRunningSessions();
+        const session = sessions.find(s => s.tmuxSession === newSessionName);
+        const uuid = session?.claudeSessionId ?? _topicResumeMap!.findClaudeSessionUuid();
         if (uuid) {
           _topicResumeMap!.save(topicId, uuid, newSessionName);
-          console.log(`[spawnSessionForTopic] Proactive UUID save: ${uuid} for topic ${topicId}`);
+          console.log(`[spawnSessionForTopic] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
         }
       } catch (err) {
         console.error(`[spawnSessionForTopic] Proactive UUID save failed:`, err);
@@ -2410,7 +2413,17 @@ export async function startServer(options: StartOptions): Promise<void> {
       const resumeHeartbeatInterval = setInterval(() => {
         try {
           const topicSessions = telegram!.getAllTopicSessions();
-          _topicResumeMap?.refreshResumeMappings(topicSessions);
+          // Enrich with authoritative Claude session IDs from SessionManager
+          const enriched = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+          for (const [topicId, sessionName] of topicSessions) {
+            const sessions = sessionManager.listRunningSessions();
+            const session = sessions.find(s => s.tmuxSession === sessionName);
+            enriched.set(topicId, {
+              sessionName,
+              claudeSessionId: session?.claudeSessionId ?? undefined,
+            });
+          }
+          _topicResumeMap?.refreshResumeMappings(enriched);
         } catch (err) {
           console.error('[server] Resume heartbeat error:', err);
         }
@@ -2428,10 +2441,11 @@ export async function startServer(options: StartOptions): Promise<void> {
         try {
           const topicId = telegram!.getTopicForSession(session.tmuxSession);
           if (!topicId) return;
-          const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession);
+          // Use authoritative claudeSessionId from hook events, fall back to mtime heuristic
+          const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
           if (uuid) {
             _topicResumeMap!.save(topicId, uuid, session.tmuxSession);
-            console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name})`);
+            console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${session.claudeSessionId ? 'hook' : 'mtime'})`);
           }
         } catch (err) {
           console.error(`[beforeSessionKill] Failed to save resume UUID:`, err);
@@ -3307,9 +3321,10 @@ export async function startServer(options: StartOptions): Promise<void> {
         // Save resume UUID before killing so respawn can --resume
         if (_topicResumeMap) {
           try {
-            const uuid = _topicResumeMap.findUuidForSession(sessionName);
+            const sessions = sessionManager.listRunningSessions();
+            const session = sessions.find(s => s.tmuxSession === sessionName);
+            const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
             if (uuid) {
-              // Find the topic ID for this session
               const topicSessions = telegram.getAllTopicSessions();
               for (const [topicId, sessName] of topicSessions) {
                 if (sessName === sessionName) {
@@ -3327,7 +3342,9 @@ export async function startServer(options: StartOptions): Promise<void> {
         // Save resume UUID so if the session dies during pause, respawn can --resume
         if (_topicResumeMap) {
           try {
-            const uuid = _topicResumeMap.findUuidForSession(sessionName);
+            const sessions = sessionManager.listRunningSessions();
+            const session = sessions.find(s => s.tmuxSession === sessionName);
+            const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
             if (uuid) {
               const topicSessions = telegram.getAllTopicSessions();
               for (const [topicId, sessName] of topicSessions) {

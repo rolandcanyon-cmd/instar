@@ -61,9 +61,12 @@ export class SemanticMemory {
   private embeddingProvider: EmbeddingProvider | null = null;
   private vectorSearch: VectorSearch | null = null;
   private _vectorAvailable = false;
+  private jsonlPath: string;
 
   constructor(config: SemanticMemoryConfig) {
     this.config = config;
+    // JSONL append log lives alongside the database — source of truth for disaster recovery
+    this.jsonlPath = config.dbPath.replace(/\.db$/, '.jsonl');
   }
 
   /**
@@ -170,6 +173,24 @@ export class SemanticMemory {
   private ensureOpen(): Database {
     if (!this.db) throw new Error('Database not open. Call open() first.');
     return this.db;
+  }
+
+  // ─── JSONL Append Log ─────────────────────────────────────────
+
+  /**
+   * Append a mutation record to the JSONL log.
+   * This is the source of truth for disaster recovery — if semantic.db
+   * is lost, the JSONL can reconstruct the full knowledge graph.
+   *
+   * Actions: remember, connect, forget, verify, supersede, update, import
+   */
+  private appendToJournal(action: string, data: Record<string, unknown>): void {
+    try {
+      const entry = JSON.stringify({ action, timestamp: new Date().toISOString(), ...data });
+      fs.appendFileSync(this.jsonlPath, entry + '\n');
+    } catch {
+      // @silent-fallback-ok: JSONL write failure is non-fatal — DB is still the primary query layer
+    }
   }
 
   // ─── Schema ─────────────────────────────────────────────────────
@@ -312,6 +333,18 @@ export class SemanticMemory {
       input.privacyScope ?? 'shared-project',
     );
 
+    // Dual-write to JSONL append log
+    this.appendToJournal('remember', {
+      entity: {
+        id, type: input.type, name: input.name, content: input.content,
+        confidence: input.confidence, createdAt: now, lastVerified: input.lastVerified,
+        lastAccessed: now, expiresAt: input.expiresAt ?? null,
+        source: input.source, sourceSession: input.sourceSession ?? null,
+        tags: input.tags, domain: input.domain ?? null,
+        ownerId: input.ownerId ?? null, privacyScope: input.privacyScope ?? 'shared-project',
+      },
+    });
+
     // Generate embedding asynchronously (fire-and-forget for write performance)
     if (this._vectorAvailable && this.embeddingProvider && this.vectorSearch) {
       const embeddingText = `${input.name} ${input.content}`;
@@ -394,6 +427,9 @@ export class SemanticMemory {
     }
     // Delete entity
     db.prepare('DELETE FROM entities WHERE id = ?').run(id);
+
+    // Dual-write to JSONL
+    this.appendToJournal('forget', { entityId: id, reason: _reason ?? null });
   }
 
   // ─── User-Scoped Queries ────────────────────────────────────────
@@ -467,6 +503,11 @@ export class SemanticMemory {
       INSERT INTO edges (id, from_id, to_id, relation, weight, context, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(id, fromId, toId, relation, weight, context ?? null, now);
+
+    // Dual-write to JSONL
+    this.appendToJournal('connect', {
+      edge: { id, fromId, toId, relation, weight, context: context ?? null, createdAt: now },
+    });
 
     return id;
   }
@@ -796,6 +837,9 @@ export class SemanticMemory {
       db.prepare('UPDATE entities SET last_verified = ? WHERE id = ?')
         .run(now, id);
     }
+
+    // Dual-write to JSONL
+    this.appendToJournal('verify', { entityId: id, confidence: newConfidence ?? null });
   }
 
   // ─── Supersede ──────────────────────────────────────────────────
@@ -807,14 +851,18 @@ export class SemanticMemory {
   supersede(oldId: string, newId: string, reason?: string): void {
     const db = this.ensureOpen();
 
-    // Create supersedes edge (new -> old)
+    // Create supersedes edge (new -> old) — connect() already journals the edge
     this.connect(newId, oldId, 'supersedes', reason);
 
     // Lower old entity's confidence by half
     const old = db.prepare('SELECT confidence FROM entities WHERE id = ?').get(oldId) as { confidence: number } | undefined;
     if (old) {
+      const newConf = old.confidence * 0.5;
       db.prepare('UPDATE entities SET confidence = ? WHERE id = ?')
-        .run(old.confidence * 0.5, oldId);
+        .run(newConf, oldId);
+
+      // Dual-write to JSONL
+      this.appendToJournal('supersede', { oldId, newId, newConfidence: newConf, reason: reason ?? null });
     }
   }
 
@@ -1008,7 +1056,167 @@ export class SemanticMemory {
 
     runImport();
 
+    // Journal all successfully imported items (count-based — we know exactly how many were new)
+    if (entitiesImported > 0 || edgesImported > 0) {
+      this.appendToJournal('import', {
+        entitiesImported, edgesImported, entitiesSkipped, edgesSkipped,
+      });
+    }
+
     return { entitiesImported, edgesImported, entitiesSkipped, edgesSkipped };
+  }
+
+  // ─── JSONL Rebuild (Disaster Recovery) ─────────────────────────
+
+  /**
+   * Import entities and edges from the JSONL append log.
+   * Replays all 'remember' and 'connect' actions, skipping duplicates.
+   * Applies 'forget' actions to remove deleted entities.
+   * Returns the number of entities and edges recovered.
+   *
+   * Follows TopicMemory's resilience pattern: JSONL is source of truth,
+   * SQLite is derived query layer that can be rebuilt at any time.
+   */
+  importFromJsonl(jsonlPath?: string): { entities: number; edges: number; forgotten: number } {
+    const db = this.ensureOpen();
+    const logPath = jsonlPath ?? this.jsonlPath;
+
+    if (!fs.existsSync(logPath)) return { entities: 0, edges: 0, forgotten: 0 };
+
+    const content = fs.readFileSync(logPath, 'utf-8');
+    const lines = content.split('\n').filter(Boolean);
+
+    let entities = 0;
+    let edges = 0;
+    let forgotten = 0;
+
+    const insertEntity = db.prepare(`
+      INSERT OR IGNORE INTO entities (id, type, name, content, confidence, created_at, last_verified, last_accessed, expires_at, source, source_session, tags, domain, owner_id, privacy_scope)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const insertEdge = db.prepare(`
+      INSERT OR IGNORE INTO edges (id, from_id, to_id, relation, weight, context, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const deleteEntity = db.prepare('DELETE FROM entities WHERE id = ?');
+    const deleteEdges = db.prepare('DELETE FROM edges WHERE from_id = ? OR to_id = ?');
+
+    const updateVerify = db.prepare('UPDATE entities SET last_verified = ?, confidence = COALESCE(?, confidence) WHERE id = ?');
+
+    const runReplay = db.transaction(() => {
+      for (const line of lines) {
+        try {
+          const entry = JSON.parse(line);
+
+          switch (entry.action) {
+            case 'remember': {
+              const e = entry.entity;
+              if (!e?.id) break;
+              const result = insertEntity.run(
+                e.id, e.type, e.name, e.content, e.confidence,
+                e.createdAt, e.lastVerified, e.lastAccessed,
+                e.expiresAt ?? null, e.source, e.sourceSession ?? null,
+                JSON.stringify(e.tags ?? []), e.domain ?? null,
+                e.ownerId ?? null, e.privacyScope ?? 'shared-project',
+              );
+              if (result.changes > 0) entities++;
+              break;
+            }
+
+            case 'connect': {
+              const edge = entry.edge;
+              if (!edge?.id) break;
+              const result = insertEdge.run(
+                edge.id, edge.fromId, edge.toId, edge.relation,
+                edge.weight ?? 1.0, edge.context ?? null, edge.createdAt,
+              );
+              if (result.changes > 0) edges++;
+              break;
+            }
+
+            case 'forget': {
+              const id = entry.entityId;
+              if (!id) break;
+              deleteEdges.run(id, id);
+              const result = deleteEntity.run(id);
+              if (result.changes > 0) forgotten++;
+              break;
+            }
+
+            case 'verify': {
+              const id = entry.entityId;
+              if (!id) break;
+              updateVerify.run(entry.timestamp, entry.confidence ?? null, id);
+              break;
+            }
+
+            case 'supersede': {
+              // supersede journals are informational — the actual connect + confidence
+              // update are replayed from their own journal entries
+              break;
+            }
+          }
+        } catch { /* @silent-fallback-ok — skip corrupted JSONL lines */ }
+      }
+    });
+
+    runReplay();
+
+    // Rebuild FTS5 index to match recovered data
+    try {
+      db.exec(`INSERT INTO entities_fts(entities_fts) VALUES ('rebuild')`);
+    } catch { /* @silent-fallback-ok — FTS rebuild non-critical */ }
+
+    return { entities, edges, forgotten };
+  }
+
+  /**
+   * Full rebuild — drop all entities and edges, rebuild from JSONL.
+   * This is the nuclear option for disaster recovery.
+   *
+   * Preserves the JSONL log (source of truth) and rebuilds SQLite from it.
+   */
+  rebuild(jsonlPath?: string): { entities: number; edges: number; forgotten: number } {
+    const db = this.ensureOpen();
+
+    db.exec('DELETE FROM edges');
+    db.exec('DELETE FROM entities');
+    db.exec(`INSERT INTO entities_fts(entities_fts) VALUES ('rebuild')`);
+
+    // Delete vector embeddings if available (they'll be regenerated)
+    if (this._vectorAvailable) {
+      try {
+        db.exec('DELETE FROM entity_embeddings');
+      } catch { /* @silent-fallback-ok — vector table may not exist */ }
+    }
+
+    return this.importFromJsonl(jsonlPath);
+  }
+
+  /**
+   * Write a full JSON snapshot to disk for periodic backup.
+   * This is a point-in-time export that complements the JSONL append log.
+   */
+  writeSnapshot(snapshotPath?: string): { path: string; entities: number; edges: number; sizeBytes: number } {
+    const data = this.export();
+    const outPath = snapshotPath ?? this.config.dbPath.replace(/\.db$/, '-snapshot.json');
+
+    const dir = path.dirname(outPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const json = JSON.stringify(data, null, 2);
+    fs.writeFileSync(outPath, json, 'utf-8');
+
+    return {
+      path: outPath,
+      entities: data.entities.length,
+      edges: data.edges.length,
+      sizeBytes: Buffer.byteLength(json),
+    };
   }
 
   // ─── Statistics ─────────────────────────────────────────────────

@@ -166,8 +166,8 @@ describe('Session Resume E2E', () => {
 
       const heartbeatMap = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
 
-      const topicSessions = new Map<number, string>();
-      topicSessions.set(42, 'echo-my-topic');
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(42, { sessionName: 'echo-my-topic' });
 
       heartbeatMap.refreshResumeMappings(topicSessions);
 
@@ -187,8 +187,8 @@ describe('Session Resume E2E', () => {
 
       const heartbeatMap = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
 
-      const topicSessions = new Map<number, string>();
-      topicSessions.set(42, 'echo-dead-session');
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(42, { sessionName: 'echo-dead-session' });
 
       heartbeatMap.refreshResumeMappings(topicSessions);
 
@@ -222,8 +222,8 @@ describe('Session Resume E2E', () => {
 
       const heartbeatMap = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
 
-      const topicSessions = new Map<number, string>();
-      topicSessions.set(42, 'echo-my-topic');
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(42, { sessionName: 'echo-my-topic' });
 
       heartbeatMap.refreshResumeMappings(topicSessions);
 
@@ -240,8 +240,8 @@ describe('Session Resume E2E', () => {
     it('handles missing JSONL directory gracefully', () => {
       // projectDir hash doesn't exist in ~/.claude/projects/
       const heartbeatMap = new TopicResumeMap(stateDir, projectDir);
-      const topicSessions = new Map<number, string>();
-      topicSessions.set(42, 'some-session');
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(42, { sessionName: 'some-session' });
 
       // Should not throw
       heartbeatMap.refreshResumeMappings(topicSessions);
@@ -375,8 +375,8 @@ describe('Session Resume E2E', () => {
       fs.chmodSync(mockTmuxScript, '755');
 
       const map = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
-      const topicSessions = new Map<number, string>();
-      topicSessions.set(topicId, 'echo-dashboard-features');
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(topicId, { sessionName: 'echo-dashboard-features' });
 
       map.refreshResumeMappings(topicSessions);
       expect(map.get(topicId)).toBe(sessionUuid);
@@ -557,8 +557,8 @@ describe('Session Resume E2E', () => {
       map.save(10, manualUuid, 'echo-manual');
 
       // Heartbeat for topic 20
-      const topicSessions = new Map<number, string>();
-      topicSessions.set(20, 'echo-heartbeat');
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(20, { sessionName: 'echo-heartbeat' });
 
       // Make heartbeat uuid more recent
       const futureTime = new Date(Date.now() + 60_000);
@@ -569,6 +569,68 @@ describe('Session Resume E2E', () => {
       // Both should be present
       expect(map.get(10)).toBe(manualUuid);
       expect(map.get(20)).toBe(heartbeatUuid);
+    });
+
+    it('REGRESSION: multiple concurrent sessions without claudeSessionId do not cross-contaminate', () => {
+      // This is the exact bug that caused topic 1767 ("jobs-not-running") to resume
+      // with the conversation from topic 2169 ("session-robustness").
+      // The old code sorted JSONL files by mtime and assigned them round-robin to topics,
+      // with no validation that the UUID belonged to the right session.
+      const uuid1 = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+      const uuid2 = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
+      const uuid3 = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
+      const myDir = createFakeJsonl(projectDir, uuid1);
+      createFakeJsonl(projectDir, uuid2);
+      createFakeJsonl(projectDir, uuid3);
+      cleanupDirs.push(myDir);
+
+      // Make them have different mtimes
+      fs.utimesSync(path.join(myDir, `${uuid1}.jsonl`), new Date(Date.now() + 30000), new Date(Date.now() + 30000));
+      fs.utimesSync(path.join(myDir, `${uuid2}.jsonl`), new Date(Date.now() + 20000), new Date(Date.now() + 20000));
+      fs.utimesSync(path.join(myDir, `${uuid3}.jsonl`), new Date(Date.now() + 10000), new Date(Date.now() + 10000));
+
+      const mockTmuxScript = path.join(tmpDir, 'mock-tmux.sh');
+      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
+      fs.chmodSync(mockTmuxScript, '755');
+
+      const map = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+
+      // Two topics with no claudeSessionId — the heartbeat should NOT guess
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(1767, { sessionName: 'echo-jobs-not-running' });
+      topicSessions.set(2169, { sessionName: 'echo-session-robustness' });
+
+      map.refreshResumeMappings(topicSessions);
+
+      // Neither topic should have a UUID — with multiple sessions and no authoritative IDs,
+      // the heartbeat should refuse to guess rather than risk cross-contamination
+      expect(map.get(1767)).toBeNull();
+      expect(map.get(2169)).toBeNull();
+    });
+
+    it('multiple concurrent sessions WITH claudeSessionId get correct UUIDs', () => {
+      const uuid1 = 'dddddddd-dddd-dddd-dddd-dddddddddddd';
+      const uuid2 = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee';
+      const myDir = createFakeJsonl(projectDir, uuid1);
+      createFakeJsonl(projectDir, uuid2);
+      cleanupDirs.push(myDir);
+
+      const mockTmuxScript = path.join(tmpDir, 'mock-tmux.sh');
+      fs.writeFileSync(mockTmuxScript, '#!/bin/bash\nexit 0\n');
+      fs.chmodSync(mockTmuxScript, '755');
+
+      const map = new TopicResumeMap(stateDir, projectDir, mockTmuxScript);
+
+      // Two topics WITH authoritative claudeSessionId from hooks
+      const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+      topicSessions.set(1767, { sessionName: 'echo-jobs-not-running', claudeSessionId: uuid2 });
+      topicSessions.set(2169, { sessionName: 'echo-session-robustness', claudeSessionId: uuid1 });
+
+      map.refreshResumeMappings(topicSessions);
+
+      // Each topic should get its correct UUID, regardless of mtime ordering
+      expect(map.get(1767)).toBe(uuid2);
+      expect(map.get(2169)).toBe(uuid1);
     });
   });
 });

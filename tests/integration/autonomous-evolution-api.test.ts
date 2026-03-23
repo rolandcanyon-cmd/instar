@@ -87,6 +87,7 @@ describe('Autonomous Evolution API Routes (integration)', () => {
       autonomyManager,
       trustElevationTracker: new TrustElevationTracker({ stateDir: project.stateDir }),
       autonomousEvolution,
+      discoveryEvaluator: null,
       startTime: new Date(),
     });
 

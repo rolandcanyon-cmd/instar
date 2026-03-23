@@ -99,16 +99,21 @@ export class TopicResumeMap {
   }
 
   /**
-   * Find the Claude session UUID for a specific tmux session by checking
-   * which JSONL file was most recently modified while that session was active.
+   * Find the Claude session UUID for a specific tmux session.
    *
-   * Uses a heuristic: the most recently modified JSONL in the project's
-   * Claude directory is likely the one belonging to the active session.
-   * For more accuracy, we could parse JSONL content, but mtime is sufficient.
+   * When claudeSessionId is provided (from hook events), use it directly —
+   * this is the authoritative source. Falls back to mtime-based heuristic
+   * only when there's a single active session (no ambiguity risk).
    */
-  findUuidForSession(tmuxSession: string): string | null {
-    // The session's project dir is this.projectDir.
-    // Claude Code creates project dirs by hashing the absolute path.
+  findUuidForSession(tmuxSession: string, claudeSessionId?: string): string | null {
+    // Prefer the authoritative Claude session ID from hook events
+    if (claudeSessionId && this.jsonlExists(claudeSessionId)) {
+      return claudeSessionId;
+    }
+
+    // Fallback: mtime-based heuristic, but ONLY safe with a single active session.
+    // With multiple concurrent sessions, mtime ordering is ambiguous and causes
+    // cross-topic contamination. Return null to avoid wrong assignment.
     return this.findClaudeSessionUuid();
   }
 
@@ -176,58 +181,55 @@ export class TopicResumeMap {
   }
 
   /**
-   * Proactive resume heartbeat: scan all active topic-linked tmux sessions and
-   * update the topic→UUID mapping. Should be called periodically (e.g., every 60s).
+   * Proactive resume heartbeat: update the topic→UUID mapping for all active
+   * topic-linked sessions. Called periodically (e.g., every 60s).
    *
-   * This ensures that even if a session crashes unexpectedly, we already have
-   * its UUID on file for --resume. Previously, UUIDs were only persisted at kill
-   * time — if a session died naturally, the UUID was lost.
+   * Uses authoritative Claude session IDs from hook events when available.
+   * Only falls back to mtime-based JSONL scanning when there's exactly one
+   * active session (no cross-topic contamination risk).
+   *
+   * @param topicSessions - Map of topicId → { sessionName, claudeSessionId? }
    */
-  refreshResumeMappings(topicSessions: Map<number, string>): void {
+  refreshResumeMappings(topicSessions: Map<number, { sessionName: string; claudeSessionId?: string }>): void {
     try {
       if (!topicSessions || topicSessions.size === 0) return;
 
-      const projectJsonlDir = this.claudeProjectJsonlDir();
-
-      if (!fs.existsSync(projectJsonlDir)) return;
-
-      // Get all JSONL files with their stats
-      const jsonlFiles = fs.readdirSync(projectJsonlDir)
-        .filter(f => f.endsWith('.jsonl'))
-        .map(f => {
-          try {
-            const stat = fs.statSync(path.join(projectJsonlDir, f));
-            return { name: f, mtimeMs: stat.mtimeMs, uuid: f.replace('.jsonl', '') };
-          } catch { return null; }
-        })
-        .filter((f): f is { name: string; mtimeMs: number; uuid: string } => f !== null && f.uuid.length >= 30)
-        .sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-      if (jsonlFiles.length === 0) return;
-
       const map = this.load();
       let updated = 0;
-      const claimedUuids = new Set<string>();
 
-      for (const [topicId, sessionName] of topicSessions) {
+      // Count how many sessions have known UUIDs vs unknown
+      const activeSessions: Array<{ topicId: number; sessionName: string; claudeSessionId?: string }> = [];
+      for (const [topicId, info] of topicSessions) {
         // Verify the tmux session is actually alive
-        const hasSession = spawnSync(this.tmuxPath, ['has-session', '-t', `=${sessionName}`]);
+        const hasSession = spawnSync(this.tmuxPath, ['has-session', '-t', `=${info.sessionName}`]);
         if (hasSession.status !== 0) continue;
+        activeSessions.push({ topicId, sessionName: info.sessionName, claudeSessionId: info.claudeSessionId });
+      }
 
-        // Find the JSONL for this session (most recently modified, not already claimed)
-        const availableJsonl = jsonlFiles.find(f => !claimedUuids.has(f.uuid));
-        if (!availableJsonl) continue;
+      if (activeSessions.length === 0) return;
 
-        claimedUuids.add(availableJsonl.uuid);
+      for (const { topicId, sessionName, claudeSessionId } of activeSessions) {
+        let uuid: string | null = null;
+
+        if (claudeSessionId && this.jsonlExists(claudeSessionId)) {
+          // Authoritative: Claude Code reported its own session ID via hooks
+          uuid = claudeSessionId;
+        } else if (activeSessions.length === 1) {
+          // Single session fallback: mtime-based is safe when there's no ambiguity
+          uuid = this.findClaudeSessionUuid();
+        }
+        // With multiple sessions and no authoritative UUID, skip — don't guess
+
+        if (!uuid) continue;
 
         const topicKey = String(topicId);
         const existingEntry = map[topicKey];
 
         // Update if UUID changed, entry doesn't exist, or entry is stale (>2 hours)
         const entryAge = existingEntry ? Date.now() - new Date(existingEntry.savedAt).getTime() : Infinity;
-        if (!existingEntry || existingEntry.uuid !== availableJsonl.uuid || entryAge > 2 * 60 * 60 * 1000) {
+        if (!existingEntry || existingEntry.uuid !== uuid || entryAge > 2 * 60 * 60 * 1000) {
           map[topicKey] = {
-            uuid: availableJsonl.uuid,
+            uuid,
             savedAt: new Date().toISOString(),
             sessionName,
           };
@@ -237,8 +239,7 @@ export class TopicResumeMap {
 
       if (updated > 0) {
         // Prune entries older than 24 hours that aren't active
-        const cutoff = Date.now() - MAX_AGE_MS;
-        const activeTopicKeys = new Set([...topicSessions.keys()].map(String));
+        const activeTopicKeys = new Set(activeSessions.map(s => String(s.topicId)));
         for (const key of Object.keys(map)) {
           if (!activeTopicKeys.has(key) && Date.now() - new Date(map[key].savedAt).getTime() > MAX_AGE_MS) {
             delete map[key];

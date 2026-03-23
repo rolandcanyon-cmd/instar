@@ -1601,6 +1601,8 @@ export interface ResolvedAutonomyState {
   autoRestart: boolean;
   /** Trust auto-elevation enabled */
   trustAutoElevate: boolean;
+  /** How aggressively to surface undiscovered features */
+  discoveryAggressiveness: 'passive' | 'contextual' | 'proactive';
 }
 
 export interface NotificationPreferences {
@@ -1809,6 +1811,109 @@ export interface TelemetryConfig {
   intervalMs?: number;
   /** Telemetry endpoint URL */
   endpoint?: string;
+}
+
+// ── Baseline Telemetry (Cross-Agent) ────────────────────────────────
+
+/**
+ * Skip reason taxonomy for Baseline telemetry.
+ * Maps to the telemetry-specific reasons that distinguish design problems
+ * from correct behavior across the agent population.
+ */
+export type BaselineSkipReason =
+  | 'quota'         // Agent wanted to run but couldn't afford it (constraint)
+  | 'priority'      // A higher-priority job won the slot (constraint)
+  | 'cooldown'      // Job ran recently, skipped to avoid redundancy (healthy)
+  | 'disabled'      // User or agent explicitly turned it off (choice)
+  | 'error'         // Job attempted but failed (broken)
+  | 'stale-handoff'; // Skipped because prior run's output wasn't consumed (healthy)
+
+/** Per-job skip metrics for a submission window */
+export interface BaselineSkipMetric {
+  slug: string;
+  reason: BaselineSkipReason;
+  count: number;
+}
+
+/** Per-job execution result metrics for a submission window */
+export interface BaselineResultMetric {
+  slug: string;
+  success: number;
+  error: number;
+  timeout: number;
+}
+
+/** Per-job duration metrics for a submission window */
+export interface BaselineDurationMetric {
+  slug: string;
+  meanMs: number;
+  count: number;
+}
+
+/** Per-job model usage for a submission window */
+export interface BaselineModelMetric {
+  slug: string;
+  model: string;
+  runCount: number;
+}
+
+/** Per-job schedule adherence for a submission window */
+export interface BaselineAdherenceMetric {
+  slug: string;
+  expectedRuns: number;
+  actualRuns: number;
+}
+
+/** Watchdog intervention metrics for a Baseline submission window */
+export interface BaselineWatchdogMetrics {
+  /** Total interventions in the submission window */
+  interventions: number;
+  /** Breakdown by escalation level (e.g., "ctrl-c": 3, "sigterm": 1) */
+  byLevel: Record<string, number>;
+  /** Sessions that recovered after intervention */
+  recoveries: number;
+  /** Sessions that died after intervention */
+  deaths: number;
+  /** Times the LLM gate classified a command as "legitimate" (no escalation) */
+  llmGateOverrides: number;
+}
+
+/** Agent-level metrics for a Baseline submission */
+export interface BaselineAgentMetrics {
+  version: string;
+  nodeVersion: string;
+  os: string;
+  arch: string;
+  uptimeHours: number;
+  totalJobs: number;
+  enabledJobs: number;
+  disabledJobs: number;
+  /** Curated feature flag whitelist — usage/adoption flags only */
+  features: Record<string, boolean>;
+  /** Coarse session activity bucket */
+  sessionsBucket: '0' | '1-5' | '6-20' | '20+';
+  /** Quota pressure signals */
+  gateTriggersLast24h: number;
+  blocksLast24h: number;
+  /** Watchdog intervention metrics — optional for backward compatibility */
+  watchdog?: BaselineWatchdogMetrics;
+}
+
+/** Full Baseline telemetry submission payload */
+export interface BaselineSubmission {
+  v: 1;
+  installationId: string;
+  version: string;
+  windowStart: string;
+  windowEnd: string;
+  agent: BaselineAgentMetrics;
+  jobs: {
+    skips: BaselineSkipMetric[];
+    results: BaselineResultMetric[];
+    durations: BaselineDurationMetric[];
+    models: BaselineModelMetric[];
+    adherence: BaselineAdherenceMetric[];
+  };
 }
 
 /** @deprecated Use InstarConfig instead */

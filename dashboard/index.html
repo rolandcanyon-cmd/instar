@@ -1915,6 +1915,274 @@
     .spark.s-pending { background: var(--blue); }
     .spark.s-skipped { background: #333; }
 
+    /* ── Discovery Tab ──────────────────────────────────────── */
+    .discovery-container {
+      grid-column: 1 / -1;
+      overflow-y: auto;
+      background: var(--bg);
+      padding: 20px;
+    }
+
+    .discovery-main {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .discovery-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .discovery-header h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .discovery-refresh {
+      font-size: 11px;
+      padding: 4px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+
+    .discovery-refresh:hover {
+      border-color: var(--text-dim);
+      color: var(--text);
+    }
+
+    .discovery-section {
+      margin-bottom: 24px;
+    }
+
+    .discovery-section h3 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-bright);
+      margin-bottom: 12px;
+    }
+
+    .funnel-chart {
+      display: flex;
+      gap: 4px;
+      align-items: flex-end;
+      height: 120px;
+      padding: 12px 16px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .funnel-bar {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .funnel-bar-fill {
+      width: 100%;
+      border-radius: 3px 3px 0 0;
+      min-height: 2px;
+      transition: height 0.3s;
+    }
+
+    .funnel-bar-label {
+      font-size: 10px;
+      color: var(--text-dim);
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .funnel-bar-count {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .discovery-filter-bar {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .discovery-filter {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .discovery-filter:hover {
+      border-color: var(--text-dim);
+      color: var(--text);
+    }
+
+    .discovery-filter.active {
+      background: var(--accent-dim);
+      border-color: var(--accent-dim);
+      color: #000;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 10px;
+    }
+
+    .feature-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 12px;
+    }
+
+    .feature-card-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .feature-card-name {
+      font-weight: 500;
+      color: var(--text-bright);
+      flex: 1;
+    }
+
+    .feature-state-badge {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+
+    .feature-state-badge.enabled { background: #0f2f0f; color: var(--accent); }
+    .feature-state-badge.undiscovered { background: #1a1a1a; color: #666; }
+    .feature-state-badge.aware { background: #0f1f2f; color: var(--blue); }
+    .feature-state-badge.interested { background: #1f1f0f; color: #eab308; }
+    .feature-state-badge.deferred { background: #1a1a1a; color: #888; }
+    .feature-state-badge.declined { background: #2f0f0f; color: var(--red); }
+    .feature-state-badge.disabled { background: #1a1a1a; color: #555; }
+
+    .feature-card-desc {
+      color: var(--text-dim);
+      font-size: 11px;
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+
+    .feature-card-meta {
+      display: flex;
+      gap: 8px;
+      color: var(--text-dim);
+      font-size: 10px;
+    }
+
+    .feature-card-meta .tier { text-transform: uppercase; letter-spacing: 0.5px; }
+    .feature-card-meta .cooldown { color: var(--orange); }
+
+    .event-log {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .event-row {
+      display: flex;
+      gap: 10px;
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      align-items: center;
+    }
+
+    .event-row:last-child { border-bottom: none; }
+
+    .event-time {
+      color: var(--text-dim);
+      flex-shrink: 0;
+      width: 70px;
+    }
+
+    .event-feature {
+      color: var(--text-bright);
+      font-weight: 500;
+      flex-shrink: 0;
+      width: 140px;
+    }
+
+    .event-transition {
+      color: var(--text);
+      flex: 1;
+    }
+
+    .event-arrow { color: var(--text-dim); }
+
+    .digest-item {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+
+    .digest-item-title {
+      color: var(--text-bright);
+      font-weight: 500;
+      margin-bottom: 2px;
+    }
+
+    .digest-item-desc {
+      color: var(--text-dim);
+      font-size: 11px;
+    }
+
+    /* Discovery metrics summary */
+    .discovery-metrics {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .metric-card {
+      flex: 1;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      text-align: center;
+    }
+
+    .metric-value {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .metric-label {
+      font-size: 10px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-top: 2px;
+    }
+
     /* ── Mobile responsive ─────────────────────────────────── */
     @media (max-width: 768px) {
       .app {
@@ -2164,6 +2432,7 @@
           <button class="tab" data-tab="files" onclick="switchTab('files')">Files</button>
           <button class="tab" data-tab="dropzone" onclick="switchTab('dropzone')">Drop Zone</button>
           <button class="tab" data-tab="jobs" onclick="switchTab('jobs')">Jobs <span class="tab-count" id="tabJobCount">0</span></button>
+          <button class="tab" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
         </nav>
       </div>
       <div class="vital-signs" id="vitalSigns">
@@ -2383,6 +2652,52 @@
         <div class="jobs-detail-content" id="jobsDetailContent" style="display:none"></div>
       </div>
     </div>
+
+    <!-- Discovery Tab -->
+    <div class="discovery-container" id="discoveryTab" style="display:none">
+      <div class="discovery-main">
+        <div class="discovery-header">
+          <h2>Feature Discovery</h2>
+          <button class="discovery-refresh" onclick="loadDiscovery()">Refresh</button>
+        </div>
+
+        <!-- Funnel Visualization -->
+        <div class="discovery-section">
+          <h3>Discovery Funnel</h3>
+          <div class="funnel-chart" id="funnelChart">
+            <div style="padding:20px;color:var(--text-dim);text-align:center">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Feature States Grid -->
+        <div class="discovery-section">
+          <h3>Feature States</h3>
+          <div class="discovery-filter-bar">
+            <button class="discovery-filter active" data-filter="all" onclick="setDiscoveryFilter('all')">All</button>
+            <button class="discovery-filter" data-filter="enabled" onclick="setDiscoveryFilter('enabled')">Enabled</button>
+            <button class="discovery-filter" data-filter="undiscovered" onclick="setDiscoveryFilter('undiscovered')">Undiscovered</button>
+            <button class="discovery-filter" data-filter="aware" onclick="setDiscoveryFilter('aware')">Aware</button>
+            <button class="discovery-filter" data-filter="cooldown" onclick="setDiscoveryFilter('cooldown')">In Cooldown</button>
+          </div>
+          <div class="feature-grid" id="featureGrid"></div>
+        </div>
+
+        <!-- Digest Section -->
+        <div class="discovery-section" id="digestSection" style="display:none">
+          <h3>Digest</h3>
+          <div id="digestContent"></div>
+        </div>
+
+        <!-- Event Log -->
+        <div class="discovery-section">
+          <h3>Recent Events</h3>
+          <div class="event-log" id="eventLog">
+            <div style="padding:12px;color:var(--text-dim);text-align:center">No events yet</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <!-- WhatsApp QR panel (hidden by default) -->
@@ -3292,6 +3607,12 @@
           connectJobsSSE();
         },
         onDeactivate: () => { disconnectJobsSSE(); },
+      },
+      {
+        id: 'discovery',
+        panels: ['discoveryTab'],
+        display: ['flex'],
+        onActivate: () => { if (!discoveryLoaded) loadDiscovery(); },
       },
     ];
 
@@ -4718,6 +5039,200 @@
         jobsSSE.close();
         jobsSSE = null;
       }
+    }
+
+    // ── Discovery Tab ──────────────────────────────────────
+    let discoveryLoaded = false;
+    let discoveryData = null;
+    let discoveryFilter = 'all';
+
+    const FUNNEL_COLORS = {
+      undiscovered: '#444',
+      aware: 'var(--blue)',
+      interested: '#eab308',
+      deferred: '#888',
+      declined: 'var(--red)',
+      enabled: 'var(--accent)',
+      disabled: '#555',
+    };
+
+    const FUNNEL_ORDER = ['undiscovered', 'aware', 'interested', 'deferred', 'declined', 'enabled', 'disabled'];
+
+    async function loadDiscovery() {
+      discoveryLoaded = true;
+      try {
+        discoveryData = await apiFetch('/features/analytics');
+        renderDiscoveryMetrics();
+        renderFunnel();
+        renderFeatureGrid();
+        renderDigest();
+        renderEventLog();
+      } catch (e) {
+        document.getElementById('funnelChart').innerHTML =
+          '<div style="padding:20px;color:var(--red);text-align:center">Failed to load discovery data</div>';
+      }
+    }
+
+    function renderDiscoveryMetrics() {
+      if (!discoveryData) return;
+      const d = discoveryData;
+      const metricsHtml = `
+        <div class="discovery-metrics">
+          <div class="metric-card">
+            <div class="metric-value">${d.totalFeatures}</div>
+            <div class="metric-label">Total Features</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${d.enabledCount}</div>
+            <div class="metric-label">Enabled</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${Math.round(d.discoveryRate * 100)}%</div>
+            <div class="metric-label">Discovery Rate</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${d.cooldowns.filter(c => c.cooldownExpiresAt).length}</div>
+            <div class="metric-label">In Cooldown</div>
+          </div>
+        </div>`;
+      // Insert before funnel
+      const section = document.querySelector('.discovery-section');
+      if (section && !document.getElementById('discoveryMetrics')) {
+        const div = document.createElement('div');
+        div.id = 'discoveryMetrics';
+        div.innerHTML = metricsHtml;
+        section.parentNode.insertBefore(div, section);
+      }
+    }
+
+    function renderFunnel() {
+      if (!discoveryData) return;
+      const funnel = discoveryData.funnel;
+      const maxVal = Math.max(1, ...Object.values(funnel));
+      const chart = document.getElementById('funnelChart');
+
+      chart.innerHTML = FUNNEL_ORDER.map(state => {
+        const count = funnel[state] || 0;
+        const height = Math.max(2, (count / maxVal) * 80);
+        const color = FUNNEL_COLORS[state] || '#444';
+        return `<div class="funnel-bar">
+          <div class="funnel-bar-count">${count}</div>
+          <div class="funnel-bar-fill" style="height:${height}px;background:${color}"></div>
+          <div class="funnel-bar-label">${state}</div>
+        </div>`;
+      }).join('');
+    }
+
+    function setDiscoveryFilter(filter) {
+      discoveryFilter = filter;
+      document.querySelectorAll('.discovery-filter').forEach(c => {
+        c.classList.toggle('active', c.dataset.filter === filter);
+      });
+      renderFeatureGrid();
+    }
+
+    function renderFeatureGrid() {
+      if (!discoveryData) return;
+      const grid = document.getElementById('featureGrid');
+      const cooldowns = discoveryData.cooldowns || [];
+
+      let filtered = cooldowns;
+      if (discoveryFilter === 'enabled') {
+        filtered = cooldowns.filter(c => c.discoveryState === 'enabled');
+      } else if (discoveryFilter === 'undiscovered') {
+        filtered = cooldowns.filter(c => c.discoveryState === 'undiscovered');
+      } else if (discoveryFilter === 'aware') {
+        filtered = cooldowns.filter(c => ['aware', 'interested', 'deferred'].includes(c.discoveryState));
+      } else if (discoveryFilter === 'cooldown') {
+        filtered = cooldowns.filter(c => c.cooldownExpiresAt || c.quieted);
+      }
+
+      if (filtered.length === 0) {
+        grid.innerHTML = '<div style="padding:16px;color:var(--text-dim);text-align:center">No features match filter</div>';
+        return;
+      }
+
+      grid.innerHTML = filtered.map(c => {
+        const cooldownNote = c.cooldownExpiresAt
+          ? '<span class="cooldown">cooldown until ' + new Date(c.cooldownExpiresAt).toLocaleTimeString() + '</span>'
+          : c.quieted ? '<span class="cooldown">quieted (' + c.surfaceCount + '/' + c.maxSurfaces + ')</span>' : '';
+
+        return `<div class="feature-card">
+          <div class="feature-card-top">
+            <span class="feature-card-name">${esc(c.featureName)}</span>
+            <span class="feature-state-badge ${esc(c.discoveryState)}">${esc(c.discoveryState)}</span>
+          </div>
+          <div class="feature-card-meta">
+            <span>surfaced ${c.surfaceCount}/${c.maxSurfaces}</span>
+            ${cooldownNote}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    function renderDigest() {
+      if (!discoveryData) return;
+      const section = document.getElementById('digestSection');
+      const content = document.getElementById('digestContent');
+      const changed = discoveryData.changedDisabled || [];
+      const unused = discoveryData.unusedEnabled || [];
+
+      if (changed.length === 0 && unused.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+
+      section.style.display = '';
+      let html = '';
+
+      if (changed.length > 0) {
+        html += '<h4 style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Disabled features with updates</h4>';
+        html += changed.map(f =>
+          `<div class="digest-item">
+            <div class="digest-item-title">${esc(f.featureName)}</div>
+            <div class="digest-item-desc">Version ${esc(f.currentVersion)} available</div>
+          </div>`
+        ).join('');
+      }
+
+      if (unused.length > 0) {
+        html += '<h4 style="font-size:12px;color:var(--text-dim);margin:12px 0 8px">Enabled but unused (&gt;15 days)</h4>';
+        html += unused.map(f =>
+          `<div class="digest-item">
+            <div class="digest-item-title">${esc(f.featureName)}</div>
+            <div class="digest-item-desc">${f.daysSinceActivity} days since last activity</div>
+          </div>`
+        ).join('');
+      }
+
+      content.innerHTML = html;
+    }
+
+    function renderEventLog() {
+      if (!discoveryData) return;
+      const log = document.getElementById('eventLog');
+      const events = discoveryData.recentEvents || [];
+
+      if (events.length === 0) {
+        log.innerHTML = '<div style="padding:12px;color:var(--text-dim);text-align:center">No events yet</div>';
+        return;
+      }
+
+      log.innerHTML = events.slice(0, 30).map(e => {
+        const time = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const date = new Date(e.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
+        const surfaceLabel = e.surfacedAs ? ` (${e.surfacedAs})` : '';
+        return `<div class="event-row">
+          <span class="event-time">${esc(date)} ${esc(time)}</span>
+          <span class="event-feature">${esc(e.featureId)}</span>
+          <span class="event-transition">
+            <span class="feature-state-badge ${esc(e.previousState)}">${esc(e.previousState)}</span>
+            <span class="event-arrow">&rarr;</span>
+            <span class="feature-state-badge ${esc(e.newState)}">${esc(e.newState)}</span>
+            ${surfaceLabel}
+          </span>
+        </div>`;
+      }).join('');
     }
 
     // Handle tab visibility — close SSE when tab is backgrounded

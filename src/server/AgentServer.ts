@@ -118,6 +118,8 @@ export class AgentServer {
     telemetryHeartbeat?: import('../monitoring/TelemetryHeartbeat.js').TelemetryHeartbeat;
     pasteManager?: import('../paste/PasteManager.js').PasteManager;
     soulManager?: import('../core/SoulManager.js').SoulManager;
+    featureRegistry?: import('../core/FeatureRegistry.js').FeatureRegistry;
+    discoveryEvaluator?: import('../core/DiscoveryEvaluator.js').DiscoveryEvaluator;
     liveConfig?: { set(path: string, value: unknown): void };
   }) {
     this.config = options.config;
@@ -301,6 +303,8 @@ export class AgentServer {
       pasteManager: options.pasteManager ?? null,
       wsManager: null, // Set after WebSocket manager is initialized
       soulManager: options.soulManager ?? null,
+      featureRegistry: options.featureRegistry ?? null,
+      discoveryEvaluator: options.discoveryEvaluator ?? null,
       startTime: this.startTime,
     };
     this.routeContext = routeCtx;

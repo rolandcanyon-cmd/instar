@@ -15,6 +15,8 @@
 
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
 
 /** Drop-in replacement for execSync that avoids its security concerns. */
 function shellExec(cmd: string, timeout = 5000): string {
@@ -53,6 +55,20 @@ export interface InterventionEvent {
   stuckCommand: string;
   stuckPid: number;
   timestamp: number;
+  /** Outcome tracking — filled in after a delay */
+  outcome?: 'recovered' | 'died' | 'unknown';
+  /** Time in ms between intervention and outcome determination */
+  outcomeDelayMs?: number;
+}
+
+/** Aggregated watchdog stats for telemetry */
+export interface WatchdogStats {
+  interventionsTotal: number;
+  interventionsByLevel: Record<string, number>; // level name → count
+  recoveries: number;
+  sessionDeaths: number;
+  outcomeUnknown: number;
+  llmGateOverrides: number; // times LLM said "legitimate"
 }
 
 // Processes that are long-running by design
@@ -102,12 +118,19 @@ export class SessionWatchdog extends EventEmitter {
 
   private stuckThresholdMs: number;
   private pollIntervalMs: number;
+  private logPath: string;
 
   /** Intelligence provider — gates escalation entry with LLM command analysis */
   intelligence: IntelligenceProvider | null = null;
 
   /** Temporarily exempted commands (LLM confirmed as legitimate long-running) */
   private temporaryExclusions = new Set<number>(); // PIDs
+
+  /** Counter for LLM gate overrides (said "legitimate") — for telemetry */
+  private llmGateOverrides = 0;
+
+  /** Pending outcome checks — maps sessionName to intervention event */
+  private pendingOutcomeChecks = new Map<string, InterventionEvent>();
 
   constructor(config: InstarConfig, sessionManager: SessionManager, state: StateManager) {
     super();
@@ -118,6 +141,9 @@ export class SessionWatchdog extends EventEmitter {
     const wdConfig = config.monitoring.watchdog;
     this.stuckThresholdMs = (wdConfig?.stuckCommandSec ?? 180) * 1000;
     this.pollIntervalMs = wdConfig?.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+
+    // Persistent log path
+    this.logPath = path.join(config.stateDir, 'watchdog-interventions.jsonl');
   }
 
   start(): void {
@@ -346,6 +372,7 @@ export class SessionWatchdog extends EventEmitter {
       const answer = response.trim().toLowerCase();
       if (answer === 'legitimate') {
         console.log(`[Watchdog] LLM says "${command.slice(0, 60)}" is legitimate — skipping escalation`);
+        this.llmGateOverrides++;
         return false;
       }
       return true;
@@ -483,5 +510,133 @@ export class SessionWatchdog extends EventEmitter {
       this.interventionHistory = this.interventionHistory.slice(-50);
     }
     this.emit('intervention', event);
+
+    // Schedule outcome check — 60s later, was the session still alive?
+    if (level === EscalationLevel.CtrlC) {
+      // Only track outcome from the first intervention (Ctrl+C)
+      this.pendingOutcomeChecks.set(sessionName, event);
+      setTimeout(() => this.checkOutcome(sessionName, event), 60_000);
+    }
+
+    // Persist to JSONL
+    this.persistEvent(event);
+  }
+
+  /**
+   * Check session health 60s after an intervention.
+   * Did the session recover (still producing output) or die?
+   */
+  private checkOutcome(sessionName: string, event: InterventionEvent): void {
+    const pending = this.pendingOutcomeChecks.get(sessionName);
+    if (!pending || pending.timestamp !== event.timestamp) return;
+    this.pendingOutcomeChecks.delete(sessionName);
+
+    const sessions = this.sessionManager.listRunningSessions();
+    const stillRunning = sessions.some(s => s.tmuxSession === sessionName);
+
+    event.outcome = stillRunning ? 'recovered' : 'died';
+    event.outcomeDelayMs = Date.now() - event.timestamp;
+
+    // Persist the outcome update
+    this.persistEvent({ ...event, _outcomeUpdate: true } as any);
+
+    this.emit('outcome', { sessionName, outcome: event.outcome, level: event.level });
+  }
+
+  /**
+   * Append an event to the persistent JSONL log.
+   * 30-day retention, auto-rotated.
+   */
+  private persistEvent(event: InterventionEvent): void {
+    try {
+      const dir = path.dirname(this.logPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.appendFileSync(this.logPath, JSON.stringify(event) + '\n');
+    } catch {
+      // @silent-fallback-ok — persistence failure is non-critical
+    }
+  }
+
+  /**
+   * Read persistent intervention log entries since a given time.
+   */
+  readLog(sinceMs?: number): InterventionEvent[] {
+    try {
+      if (!fs.existsSync(this.logPath)) return [];
+      const content = fs.readFileSync(this.logPath, 'utf-8').trim();
+      if (!content) return [];
+
+      const since = sinceMs ?? 0;
+      return content.split('\n')
+        .map(line => { try { return JSON.parse(line); } catch { return null; } })
+        .filter((e): e is InterventionEvent => e !== null && e.timestamp >= since);
+    } catch {
+      // @silent-fallback-ok — log read failure returns empty
+      return [];
+    }
+  }
+
+  /**
+   * Get aggregated watchdog stats for a time window.
+   * Used by TelemetryCollector for Baseline submissions.
+   */
+  getStats(sinceMs?: number): WatchdogStats {
+    const events = this.readLog(sinceMs);
+    const levelNames = ['monitoring', 'ctrl-c', 'sigterm', 'sigkill', 'kill-session'];
+
+    const stats: WatchdogStats = {
+      interventionsTotal: 0,
+      interventionsByLevel: {},
+      recoveries: 0,
+      sessionDeaths: 0,
+      outcomeUnknown: 0,
+      llmGateOverrides: this.llmGateOverrides,
+    };
+
+    for (const event of events) {
+      // Skip outcome update entries
+      if ((event as any)._outcomeUpdate) {
+        if (event.outcome === 'recovered') stats.recoveries++;
+        else if (event.outcome === 'died') stats.sessionDeaths++;
+        else stats.outcomeUnknown++;
+        continue;
+      }
+
+      stats.interventionsTotal++;
+      const levelName = levelNames[event.level] ?? `level-${event.level}`;
+      stats.interventionsByLevel[levelName] = (stats.interventionsByLevel[levelName] || 0) + 1;
+    }
+
+    return stats;
+  }
+
+  /**
+   * Rotate the persistent log — remove entries older than 30 days.
+   */
+  rotateLog(): void {
+    try {
+      if (!fs.existsSync(this.logPath)) return;
+      const content = fs.readFileSync(this.logPath, 'utf-8').trim();
+      if (!content) return;
+
+      const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const lines = content.split('\n');
+      const fresh = lines.filter(line => {
+        try {
+          const e = JSON.parse(line);
+          return e.timestamp >= cutoff;
+        } catch {
+          return false;
+        }
+      });
+
+      if (fresh.length < lines.length) {
+        fs.writeFileSync(this.logPath, fresh.join('\n') + (fresh.length > 0 ? '\n' : ''));
+      }
+    } catch {
+      // @silent-fallback-ok — rotation failure is non-critical
+    }
   }
 }

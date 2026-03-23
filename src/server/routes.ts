@@ -4489,14 +4489,16 @@ export function createRoutes(ctx: RouteContext): Router {
             reg.topicToSession[String(topicId)] = newSessionName;
             fs.writeFileSync(sdRegistryPath, JSON.stringify(reg, null, 2));
           } catch { /* @silent-fallback-ok — registry write non-critical */ }
-          // Proactive UUID save
+          // Proactive UUID save — prefer authoritative hook-based UUID
           if (ctx.topicResumeMap && !resumeSessionId) {
             setTimeout(() => {
               try {
-                const uuid = ctx.topicResumeMap!.findClaudeSessionUuid();
+                const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
+                const session = sessions.find(s => s.tmuxSession === newSessionName);
+                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
                 if (uuid) {
                   ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[secret-drop] Proactive UUID save: ${uuid} for topic ${topicId}`);
+                  console.log(`[secret-drop] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
                 }
               } catch (err) {
                 console.error(`[secret-drop] Proactive UUID save failed:`, err);
@@ -4781,14 +4783,16 @@ export function createRoutes(ctx: RouteContext): Router {
             reg.topicToSession[String(topicId)] = newSessionName;
             fs.writeFileSync(registryPath, JSON.stringify(reg, null, 2));
           } catch { /* @silent-fallback-ok — registry write non-critical */ }
-          // Proactive UUID save — discover and persist the Claude UUID shortly after spawn
+          // Proactive UUID save — prefer authoritative hook-based UUID
           if (ctx.topicResumeMap && !resumeSessionId) {
             setTimeout(() => {
               try {
-                const uuid = ctx.topicResumeMap!.findClaudeSessionUuid();
+                const sessions = ctx.sessionManager?.listRunningSessions() ?? [];
+                const session = sessions.find(s => s.tmuxSession === newSessionName);
+                const uuid = session?.claudeSessionId ?? ctx.topicResumeMap!.findClaudeSessionUuid();
                 if (uuid) {
                   ctx.topicResumeMap!.save(topicId, uuid, newSessionName);
-                  console.log(`[telegram-forward] Proactive UUID save: ${uuid} for topic ${topicId}`);
+                  console.log(`[telegram-forward] Proactive UUID save: ${uuid} for topic ${topicId} (source: ${session?.claudeSessionId ? 'hook' : 'mtime'})`);
                 }
               } catch (err) {
                 console.error(`[telegram-forward] Proactive UUID save failed:`, err);

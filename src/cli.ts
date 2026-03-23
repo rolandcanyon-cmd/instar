@@ -810,6 +810,325 @@ program
     }
   });
 
+// ── Telemetry (Baseline) ──────────────────────────────────────────
+
+const telemetryCmd = program
+  .command('telemetry')
+  .description('Manage Baseline telemetry — anonymous cross-agent metrics');
+
+telemetryCmd
+  .command('status')
+  .description('Show current Baseline telemetry status')
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
+  .action(async (opts) => {
+    const port = opts.port || 4040;
+    let authToken: string | undefined;
+    try {
+      const { loadConfig } = await import('./core/Config.js');
+      const config = loadConfig(opts.dir);
+      authToken = config.authToken;
+    } catch { /* project may not be initialized */ }
+
+    try {
+      const headers: Record<string, string> = {};
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const response = await fetch(`http://localhost:${port}/telemetry/status`, {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (response.ok) {
+        const status = await response.json() as Record<string, unknown>;
+        const baseline = status.baseline as Record<string, unknown> | undefined;
+        const pc = (await import('picocolors')).default;
+
+        console.log(pc.bold('Baseline Telemetry'));
+        console.log(`  Enabled:       ${status.enabled ? pc.green('yes') : pc.dim('no')}`);
+        console.log(`  Provisioned:   ${baseline?.provisioned ? pc.green('yes') : pc.dim('no')}`);
+        if (baseline?.installationIdPrefix) {
+          console.log(`  Installation:  ${baseline.installationIdPrefix}...`);
+        }
+        if (baseline?.lastSubmission) {
+          console.log(`  Last sent:     ${baseline.lastSubmission}`);
+        }
+        if (baseline?.nextWindow) {
+          console.log(`  Next window:   ${baseline.nextWindow}`);
+        }
+        if (baseline?.lastErrorCode) {
+          console.log(`  Last error:    ${pc.red(String(baseline.lastErrorCode))}`);
+        }
+      } else {
+        console.error(`Failed to get status: ${response.statusText}`);
+        process.exit(1);
+      }
+    } catch {
+      console.error('Could not connect to instar server. Is it running?');
+      process.exit(1);
+    }
+  });
+
+telemetryCmd
+  .command('enable')
+  .description('Enable Baseline — see how your agent compares to the population')
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
+  .action(async (opts) => {
+    const port = opts.port || 4040;
+    const pc = (await import('picocolors')).default;
+    const readline = await import('node:readline');
+
+    // Show consent disclosure
+    console.log(pc.bold('\n┌─ Enable Baseline ─────────────────────────────────────────┐'));
+    console.log('│                                                            │');
+    console.log('│  Baseline helps your agent know if it\'s healthy by         │');
+    console.log('│  comparing its behavior to the population — anonymously.   │');
+    console.log('│                                                            │');
+    console.log(pc.bold('│  What\'s collected:'));
+    console.log('│  • Job skip rates (with reasons), durations, results       │');
+    console.log('│  • Model usage per job, schedule adherence                 │');
+    console.log('│  • Version, uptime, feature flags (curated list only)      │');
+    console.log('│  • Session activity (coarse bucket, not exact count)       │');
+    console.log('│                                                            │');
+    console.log(pc.bold('│  What\'s NEVER collected:'));
+    console.log('│  • Names, prompts, memory, conversations, file paths       │');
+    console.log('│  • Error messages, IP addresses, Telegram data             │');
+    console.log('│  • Security configuration flags                            │');
+    console.log('│                                                            │');
+    console.log(pc.bold('│  How it works:'));
+    console.log('│  • Anonymous ID: random UUID (not derived from your machine)│');
+    console.log('│  • Submitted to: instar-telemetry.sagemind-ai.workers.dev  │');
+    console.log('│  • Frequency: every 6 hours                                │');
+    console.log('│  • Retention: 30 days (local and remote)                   │');
+    console.log('│  • Every submission is logged locally for your review:      │');
+    console.log('│    run `instar telemetry submissions` to inspect            │');
+    console.log('│                                                            │');
+    console.log('│  You can disable at any time with `instar telemetry disable`│');
+    console.log('│  which deletes your local ID and requests remote deletion. │');
+    console.log(pc.bold('└──────────────────────────────────────────────────────────┘\n'));
+
+    // Ask for confirmation
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>(resolve => {
+      rl.question('  Enable Baseline? [y/N] ', resolve);
+    });
+    rl.close();
+
+    if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+      console.log(pc.dim('  Declined. No data will be sent.'));
+      return;
+    }
+
+    let authToken: string | undefined;
+    try {
+      const { loadConfig } = await import('./core/Config.js');
+      const config = loadConfig(opts.dir);
+      authToken = config.authToken;
+    } catch { /* project may not be initialized */ }
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const response = await fetch(`http://localhost:${port}/telemetry/enable`, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (response.ok) {
+        const result = await response.json() as { installationId: string; message: string };
+        console.log(pc.green(`\n  ✓ ${result.message}`));
+        console.log(pc.dim(`    Installation ID: ${result.installationId}`));
+        console.log(pc.dim('    Restart the server for submissions to begin.'));
+      } else {
+        const err = await response.json() as { error: string };
+        console.error(pc.red(`  Failed: ${err.error}`));
+        process.exit(1);
+      }
+    } catch {
+      console.error('Could not connect to instar server. Is it running?');
+      process.exit(1);
+    }
+  });
+
+telemetryCmd
+  .command('disable')
+  .description('Disable Baseline telemetry and delete local identity')
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
+  .action(async (opts) => {
+    const port = opts.port || 4040;
+    const pc = (await import('picocolors')).default;
+
+    console.log(pc.yellow('\n  Warning: Re-enabling telemetry will create a new identity.'));
+    console.log(pc.yellow('  Prior submission history is not recoverable.\n'));
+
+    const readline = await import('node:readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>(resolve => {
+      rl.question('  Disable Baseline and delete identity? [y/N] ', resolve);
+    });
+    rl.close();
+
+    if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+      console.log(pc.dim('  Cancelled.'));
+      return;
+    }
+
+    let authToken: string | undefined;
+    try {
+      const { loadConfig } = await import('./core/Config.js');
+      const config = loadConfig(opts.dir);
+      authToken = config.authToken;
+    } catch { /* project may not be initialized */ }
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const response = await fetch(`http://localhost:${port}/telemetry/disable`, {
+        method: 'POST',
+        headers,
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (response.ok) {
+        const result = await response.json() as { remoteDeletion: string; message: string };
+        console.log(pc.green(`  ✓ ${result.message}`));
+        if (result.remoteDeletion !== 'success') {
+          console.log(pc.dim(`    Remote deletion: ${result.remoteDeletion}`));
+        }
+      } else {
+        const err = await response.json() as { error: string };
+        console.error(pc.red(`  Failed: ${err.error}`));
+        process.exit(1);
+      }
+    } catch {
+      console.error('Could not connect to instar server. Is it running?');
+      process.exit(1);
+    }
+  });
+
+telemetryCmd
+  .command('submissions')
+  .description('View the local transparency log of Baseline submissions')
+  .option('-n, --limit <limit>', 'Number of entries to show', (v: string) => parseInt(v, 10), 10)
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
+  .action(async (opts) => {
+    const port = opts.port || 4040;
+    let authToken: string | undefined;
+    try {
+      const { loadConfig } = await import('./core/Config.js');
+      const config = loadConfig(opts.dir);
+      authToken = config.authToken;
+    } catch { /* project may not be initialized */ }
+
+    try {
+      const headers: Record<string, string> = {};
+      if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+
+      const response = await fetch(`http://localhost:${port}/telemetry/submissions?limit=${opts.limit}`, {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (response.ok) {
+        const { submissions } = await response.json() as { submissions: Array<{ timestamp: string; responseStatus: number; payload: { jobs: { skips: unknown[] } } }> };
+        const pc = (await import('picocolors')).default;
+
+        if (submissions.length === 0) {
+          console.log(pc.dim('No Baseline submissions yet.'));
+          return;
+        }
+
+        for (const sub of submissions) {
+          const status = sub.responseStatus === 200 ? pc.green('✓') : pc.red(`✗ ${sub.responseStatus}`);
+          const jobCount = sub.payload?.jobs?.skips?.length ?? 0;
+          console.log(`${status} ${sub.timestamp}  (${jobCount} skip metrics)`);
+        }
+        console.log(pc.dim(`\nShowing ${submissions.length} most recent. Use --limit for more.`));
+      } else {
+        console.error(`Failed: ${response.statusText}`);
+        process.exit(1);
+      }
+    } catch {
+      console.error('Could not connect to instar server. Is it running?');
+      process.exit(1);
+    }
+  });
+
+telemetryCmd
+  .command('purge')
+  .description('Request remote data deletion (secret-loss fallback)')
+  .option('--force', 'Use unsigned deletion with 72h grace period')
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--port <port>', 'Server port (default: 4040)', (v: string) => parseInt(v, 10))
+  .action(async (opts) => {
+    if (!opts.force) {
+      console.error('This command requires --force. It sends an unsigned DELETE with a 72-hour grace period.');
+      console.error('Use `instar telemetry disable` for normal deactivation.');
+      process.exit(1);
+    }
+
+    const pc = (await import('picocolors')).default;
+    console.log(pc.yellow('\n  This sends an unsigned DELETE request with a 72-hour grace period.'));
+    console.log(pc.yellow('  During those 72 hours, anyone with the original secret can cancel it.\n'));
+
+    const readline = await import('node:readline');
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>(resolve => {
+      rl.question('  Proceed with unsigned purge? [y/N] ', resolve);
+    });
+    rl.close();
+
+    if (answer.toLowerCase() !== 'y' && answer.toLowerCase() !== 'yes') {
+      console.log(pc.dim('  Cancelled.'));
+      return;
+    }
+
+    // Read install-id from state dir (even if secret is lost)
+    let installationId: string | undefined;
+    try {
+      const { loadConfig } = await import('./core/Config.js');
+      const config = loadConfig(opts.dir);
+      const { TelemetryAuth } = await import('./monitoring/TelemetryAuth.js');
+      const auth = new TelemetryAuth(config.stateDir);
+      installationId = auth.getInstallationId() ?? undefined;
+    } catch { /* best-effort */ }
+
+    if (!installationId) {
+      console.error(pc.red('  Cannot find installation ID. No telemetry identity to purge.'));
+      process.exit(1);
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+
+      const resp = await fetch(`https://instar-telemetry.sagemind-ai.workers.dev/v1/telemetry/${installationId}`, {
+        method: 'DELETE',
+        headers: { 'X-Instar-Purge-Reason': 'secret-lost' },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      if (resp.ok) {
+        console.log(pc.green('  ✓ Unsigned purge request accepted. Data will be deleted in 72 hours.'));
+        console.log(pc.dim('    The original secret holder can cancel this within that window.'));
+      } else {
+        console.error(pc.red(`  Purge request failed: ${resp.status} ${resp.statusText}`));
+        process.exit(1);
+      }
+    } catch {
+      console.error(pc.red('  Network error — could not reach telemetry endpoint.'));
+      process.exit(1);
+    }
+  });
+
 // ── Server ────────────────────────────────────────────────────────
 
 const serverCmd = program

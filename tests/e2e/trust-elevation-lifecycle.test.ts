@@ -105,6 +105,7 @@ describe('E2E: Trust Elevation Lifecycle', () => {
       topicResumeMap: null,
       autonomyManager,
       trustElevationTracker,
+      discoveryEvaluator: null,
       startTime: new Date(),
     });
 
