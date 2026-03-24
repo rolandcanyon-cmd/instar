@@ -486,7 +486,7 @@ describe('StallTriageNurse', () => {
       await nurse.triage(5, 'sess', 'hello', Date.now());
 
       expect(deps.sendToTopic).toHaveBeenCalledWith(5, expect.stringContaining('Restarting'));
-      expect(deps.respawnSession).toHaveBeenCalledWith('sess', 5);
+      expect(deps.respawnSession).toHaveBeenCalledWith('sess', 5, { silent: true });
     });
 
     it('restart notifies before respawning', async () => {
@@ -717,7 +717,7 @@ describe('StallTriageNurse', () => {
       expect(result.actionsTaken).toEqual(['restart']);
       expect(result.diagnosis?.summary).toContain('missing');
       expect(mockIntelligence.evaluate).not.toHaveBeenCalled();
-      expect(deps.respawnSession).toHaveBeenCalledWith('dead-sess', 1);
+      expect(deps.respawnSession).toHaveBeenCalledWith('dead-sess', 1, { silent: true });
       expect(deps.clearStallForTopic).toHaveBeenCalledWith(1);
     });
 

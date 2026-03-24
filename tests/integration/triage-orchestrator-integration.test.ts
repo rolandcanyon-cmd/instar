@@ -68,7 +68,7 @@ describe('TriageOrchestrator Integration', () => {
 
       // Verify actions taken
       expect(deps.sendToTopic).toHaveBeenCalledWith(100, expect.stringContaining('🔍'));
-      expect(deps.respawnSession).toHaveBeenCalledWith('my-session', 100);
+      expect(deps.respawnSession).toHaveBeenCalledWith('my-session', 100, { silent: true });
 
       // Verify events
       expect(events).toEqual(['activated', 'heuristic', 'resolved']);
