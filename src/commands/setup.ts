@@ -1189,16 +1189,46 @@ export async function runNonInteractiveSetup(opts: NonInteractiveOptions): Promi
 
   // Add Telegram if provided
   if (opts.telegramToken && opts.telegramGroup) {
-    (config.messaging as Record<string, unknown>[]).push({
-      type: 'telegram',
-      enabled: true,
-      config: {
-        token: opts.telegramToken,
-        chatId: opts.telegramGroup,
-        pollIntervalMs: 2000,
-        stallTimeoutMinutes: 5,
-      },
-    });
+    // Validate chatId is numeric (Telegram chat IDs are integers, typically negative for groups)
+    // Users sometimes paste invite links (t.me/+ABC123) or link hashes instead of the numeric ID
+    let chatId = opts.telegramGroup.trim();
+    let chatIdValid = /^-?\d+$/.test(chatId);
+    if (!chatIdValid) {
+      console.warn(`[setup] ⚠️ Telegram chatId "${chatId}" does not look like a numeric chat ID.`);
+      console.warn('[setup] Telegram chat IDs are integers (e.g., -1001234567890 for supergroups).');
+      console.warn('[setup] Attempting to resolve via Telegram API...');
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${opts.telegramToken}/getChat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId }),
+        });
+        const data = await res.json() as { ok: boolean; result?: { id: number }; description?: string };
+        if (data.ok && data.result?.id) {
+          chatId = String(data.result.id);
+          chatIdValid = true;
+          console.log(`[setup] ✓ Resolved to numeric chat ID: ${chatId}`);
+        } else {
+          console.error(`[setup] ✗ Could not resolve "${opts.telegramGroup}" to a chat ID: ${data.description ?? 'unknown error'}`);
+          console.error('[setup] Skipping Telegram setup. Run setup again with a valid numeric chat ID.');
+        }
+      } catch (err) {
+        console.error(`[setup] ✗ Failed to validate chat ID: ${err}`);
+        console.error('[setup] Skipping Telegram setup. Run setup again with a valid numeric chat ID.');
+      }
+    }
+    if (chatIdValid) {
+      (config.messaging as Record<string, unknown>[]).push({
+        type: 'telegram',
+        enabled: true,
+        config: {
+          token: opts.telegramToken,
+          chatId,
+          pollIntervalMs: 2000,
+          stallTimeoutMinutes: 5,
+        },
+      });
+    }
   }
 
   // Add WhatsApp if provided

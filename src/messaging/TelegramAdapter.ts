@@ -391,6 +391,12 @@ export class TelegramAdapter implements MessagingAdapter {
   }
 
   constructor(config: TelegramConfig, stateDir: string) {
+    if (config.chatId && !/^-?\d+$/.test(String(config.chatId))) {
+      throw new Error(
+        `Invalid Telegram chatId "${config.chatId}". Chat IDs must be numeric (e.g., -1001234567890). ` +
+        `Update messaging.config.chatId in your instar.config.json with a valid numeric ID.`,
+      );
+    }
     this.config = config;
     this.stateDir = stateDir;
     this.registryPath = path.join(stateDir, 'topic-session-registry.json');
