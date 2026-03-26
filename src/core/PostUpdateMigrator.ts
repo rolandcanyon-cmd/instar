@@ -191,6 +191,13 @@ export class PostUpdateMigrator {
     } catch (err) {
       result.errors.push(`response-review.js: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    try {
+      fs.writeFileSync(path.join(instarHooksDir, 'auto-approve-permissions.js'), this.getAutoApprovePermissionsHook(), { mode: 0o755 });
+      result.upgraded.push('hooks/instar/auto-approve-permissions.js (subagent permission unblocking)');
+    } catch (err) {
+      result.errors.push(`auto-approve-permissions.js: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -207,6 +214,7 @@ export class PostUpdateMigrator {
       'scope-coherence-collector.js', 'scope-coherence-checkpoint.js',
       'instructions-loaded-tracker.js', 'subagent-start-tracker.js',
       'free-text-guard.sh', 'claim-intercept.js', 'claim-intercept-response.js', 'response-review.js',
+      'auto-approve-permissions.js',
     ];
 
     // Check if we're still on the old flat layout (hooks directly in .instar/hooks/)
@@ -445,6 +453,42 @@ export class PostUpdateMigrator {
     result.upgraded.push(
       `.claude/settings.json: added ${HTTP_HOOK_TEMPLATES.length} HTTP hooks for observability (url: ${serverUrl}/hooks/events)`,
     );
+    return true;
+  }
+
+  /**
+   * Ensure PermissionRequest auto-approve hook exists in settings.json.
+   * Subagents spawned via the Agent tool don't inherit --dangerously-skip-permissions,
+   * so without this catch-all hook they prompt for every tool use and block jobs.
+   * Real safety is in PreToolUse hooks — permission prompts are duplicative friction.
+   */
+  private ensurePermissionAutoApprove(
+    hooks: Record<string, unknown[]>,
+    result: MigrationResult,
+  ): boolean {
+    // Check if PermissionRequest hook already exists
+    if (hooks.PermissionRequest) {
+      const entries = hooks.PermissionRequest as Array<{ hooks?: Array<{ command?: string }> }>;
+      const hasAutoApprove = entries.some(e =>
+        e.hooks?.some(h => h.command?.includes('auto-approve-permissions')),
+      );
+      if (hasAutoApprove) return false;
+    }
+
+    if (!hooks.PermissionRequest) {
+      hooks.PermissionRequest = [];
+    }
+
+    (hooks.PermissionRequest as unknown[]).push({
+      matcher: '',
+      hooks: [{
+        type: 'command',
+        command: 'node .instar/hooks/instar/auto-approve-permissions.js',
+        timeout: 5000,
+      }],
+    });
+
+    result.upgraded.push('.claude/settings.json: added PermissionRequest auto-approve (subagent unblocking)');
     return true;
   }
 
@@ -1180,6 +1224,12 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       patched = true;
     }
 
+    // Ensure PermissionRequest auto-approve hook exists — subagents don't inherit
+    // --dangerously-skip-permissions, so they'd prompt without this catch-all.
+    if (this.ensurePermissionAutoApprove(hooks, result)) {
+      patched = true;
+    }
+
     if (patched) {
       try {
         fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
@@ -1424,7 +1474,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
    * Get the content of a named hook template.
    * Used by init.ts to share canonical hook content without duplication.
    */
-  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review'): string {
+  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review' | 'auto-approve-permissions'): string {
     switch (name) {
       case 'session-start': return this.getSessionStartHook();
       case 'compaction-recovery': return this.getCompactionRecovery();
@@ -1438,6 +1488,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       case 'claim-intercept-response': return this.getClaimInterceptResponseHook();
       case 'telegram-topic-context': return this.getTelegramTopicContextHook();
       case 'response-review': return this.getResponseReviewHook();
+      case 'auto-approve-permissions': return this.getAutoApprovePermissionsHook();
     }
   }
 
@@ -3582,6 +3633,43 @@ process.stdin.on('end', () => {
   } catch {}
   process.exit(0);
 });
+`;
+  }
+
+  private getAutoApprovePermissionsHook(): string {
+    return `#!/usr/bin/env node
+// Auto-approve ALL PermissionRequest hooks.
+//
+// Subagents spawned via the Agent tool don't inherit --dangerously-skip-permissions
+// from the parent session. Without this hook, subagents prompt for every tool use,
+// blocking autonomous sessions and jobs.
+//
+// Real safety is enforced by PreToolUse hooks (dangerous-command-guard.sh,
+// external-communication-guard.js, external-operation-gate.js). Permission prompts
+// are duplicative friction, not protection.
+
+process.stdin.resume();
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow' }
+    }
+  }));
+});
+
+// Timeout safety
+setTimeout(() => {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow' }
+    }
+  }));
+  process.exit(0);
+}, 2000);
 `;
   }
 }

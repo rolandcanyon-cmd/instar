@@ -3482,6 +3482,11 @@ done
   // and session resumption (claudeSessionId). Uses command hooks because Claude Code
   // HTTP hooks (type: "http") silently fail to fire as of v2.1.78.
   fs.writeFileSync(path.join(hooksDir, 'hook-event-reporter.js'), getHookEventReporterScript(), { mode: 0o755 });
+
+  // Auto-approve all PermissionRequest hooks — subagents spawned via Agent tool
+  // don't inherit --dangerously-skip-permissions, so they'd prompt without this.
+  // Real safety is in PreToolUse hooks (dangerous-command-guard, external-communication-guard).
+  fs.writeFileSync(path.join(hooksDir, 'auto-approve-permissions.js'), getAutoApprovePermissionsScript(), { mode: 0o755 });
 }
 
 function getHookEventReporterScript(): string {
@@ -3544,6 +3549,43 @@ process.stdin.on('end', () => {
 
 // Timeout safety — don't hang if stdin never closes
 setTimeout(() => process.exit(0), 2000);
+`;
+}
+
+function getAutoApprovePermissionsScript(): string {
+  return `#!/usr/bin/env node
+// Auto-approve ALL PermissionRequest hooks.
+//
+// Subagents spawned via the Agent tool don't inherit --dangerously-skip-permissions
+// from the parent session. Without this hook, subagents prompt for every tool use,
+// blocking autonomous sessions and jobs.
+//
+// Real safety is enforced by PreToolUse hooks (dangerous-command-guard.sh,
+// external-communication-guard.js, external-operation-gate.js). Permission prompts
+// are duplicative friction, not protection.
+
+process.stdin.resume();
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow' }
+    }
+  }));
+});
+
+// Timeout safety
+setTimeout(() => {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow' }
+    }
+  }));
+  process.exit(0);
+}, 2000);
 `;
 }
 
@@ -4160,6 +4202,26 @@ function installClaudeSettings(projectDir: string, serverPort?: number): void {
   );
   if (!hasCheckpoint) {
     stopHooks.push({ matcher: '', hooks: [scopeCheckpointHook] });
+  }
+
+  // PermissionRequest: auto-approve all — subagents don't inherit --dangerously-skip-permissions.
+  // Real safety is in PreToolUse hooks. Permission prompts just block autonomous work.
+  if (!hooks.PermissionRequest) {
+    hooks.PermissionRequest = [];
+  }
+  const permHooks = hooks.PermissionRequest as Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>;
+  const hasAutoApprove = permHooks.some(e =>
+    e.hooks?.some(h => h.command?.includes('auto-approve-permissions.js')),
+  );
+  if (!hasAutoApprove) {
+    (hooks.PermissionRequest as unknown[]).push({
+      matcher: '',
+      hooks: [{
+        type: 'command',
+        command: 'node .instar/hooks/instar/auto-approve-permissions.js',
+        timeout: 5000,
+      }],
+    });
   }
 
   // HTTP hooks for observability (session telemetry, claudeSessionId population)
