@@ -205,10 +205,14 @@ export function createRoutes(ctx: RouteContext): Router {
 
   router.get('/health', (req, res) => {
     const uptimeMs = Date.now() - ctx.startTime.getTime();
-    // Determine if anything is degraded
-    const sessions = ctx.sessionManager.listRunningSessions();
+    // Use cached session count to avoid blocking the event loop with synchronous
+    // tmux has-session calls. The cache is updated every 5s by the monitor tick.
+    // This prevents the death spiral where stale sessions overwhelm the health
+    // endpoint, causing the lifeline to restart the server in a tight loop.
+    const cached = ctx.sessionManager.getCachedRunningSessions();
+    const sessionCount = cached.count;
     const maxSessions = ctx.config.sessions?.maxSessions ?? 10;
-    const sessionExhausted = sessions.length >= maxSessions;
+    const sessionExhausted = sessionCount >= maxSessions;
 
     let totalFailures = 0;
     if (ctx.scheduler) {
@@ -258,7 +262,7 @@ export function createRoutes(ctx: RouteContext): Router {
       } else {
         base.version = ctx.config.version || '0.0.0';
       }
-      base.sessions = { current: sessions.length, max: maxSessions };
+      base.sessions = { current: sessionCount, max: maxSessions };
       base.schedulerRunning = ctx.scheduler !== null;
       base.consecutiveJobFailures = totalFailures;
       base.project = ctx.config.projectName;

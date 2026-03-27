@@ -247,11 +247,24 @@ export class CoherenceMonitor extends EventEmitter {
     }
 
     if (integrity.versionMismatch) {
-      results.push({
-        name: 'process-version-mismatch',
-        passed: false,
-        message: `Running v${integrity.runningVersion} but disk has v${integrity.diskVersion} — restart needed`,
-      });
+      // If the AutoUpdater has already applied this version and a restart is pending,
+      // don't flag the mismatch — it's expected and the restart will resolve it.
+      // This prevents the CoherenceMonitor from creating noise while the AutoUpdater
+      // is deferring the restart for active sessions.
+      const autoUpdaterState = this.readAutoUpdaterState();
+      if (autoUpdaterState?.lastAppliedVersion === integrity.diskVersion) {
+        results.push({
+          name: 'process-version-mismatch',
+          passed: true,
+          message: `Running v${integrity.runningVersion} — update to v${integrity.diskVersion} applied, restart pending`,
+        });
+      } else {
+        results.push({
+          name: 'process-version-mismatch',
+          passed: false,
+          message: `Running v${integrity.runningVersion} but disk has v${integrity.diskVersion} — restart needed`,
+        });
+      }
     } else {
       results.push({
         name: 'process-version-mismatch',
@@ -584,6 +597,17 @@ export class CoherenceMonitor extends EventEmitter {
   }
 
   // ── Internal ────────────────────────────────────────────────────
+
+  /** Read the AutoUpdater state file to check if a restart is already pending. */
+  private readAutoUpdaterState(): { lastAppliedVersion?: string } | null {
+    try {
+      const statePath = path.join(this.config.stateDir, 'state', 'auto-updater.json');
+      if (!fs.existsSync(statePath)) return null;
+      return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    } catch {
+      return null;
+    }
+  }
 
   private logCorrection(check: string, detail: string): void {
     this.correctionLog.push({

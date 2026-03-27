@@ -2430,6 +2430,12 @@ export async function startServer(options: StartOptions): Promise<void> {
       });
     }
 
+    // Fast startup purge — remove session records for dead tmux sessions BEFORE
+    // monitoring starts. Prevents the death spiral where stale sessions overwhelm
+    // the health endpoint (synchronous tmux has-session calls) and cause the
+    // lifeline to restart the server in a tight loop.
+    await sessionManager.purgeDeadSessions();
+
     sessionManager.startMonitoring();
 
     // Proactive resume heartbeat: every 60s, update the topic→UUID mapping

@@ -113,6 +113,11 @@ export class SessionManager extends EventEmitter {
    *  Key = tmuxSession name. Cleared when agent replies via /telegram/reply/:topicId. */
   private pendingInjections = new Map<string, { topicId: number; injectedAt: number; text: string }>();
 
+  /** Cached count of running sessions, updated asynchronously by the monitor tick.
+   *  Used by the health endpoint to avoid synchronous tmux polling. */
+  private _cachedRunningCount = 0;
+  private _cachedRunningSessions: Session[] = [];
+
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
     this.config = config;
@@ -381,6 +386,11 @@ export class SessionManager extends EventEmitter {
         this.lastCleanupAt = Date.now();
         this.cleanupStaleSessions();
       }
+
+      // Update cached session list (non-blocking) for health endpoint
+      const stillRunning = this.state.listSessions({ status: 'running' });
+      this._cachedRunningSessions = stillRunning;
+      this._cachedRunningCount = stillRunning.length;
     } finally {
       this.monitoringInProgress = false;
     }
@@ -736,10 +746,56 @@ export class SessionManager extends EventEmitter {
   /**
    * List all sessions that are currently running.
    * Pure filter — does not mutate state. The monitor tick handles lifecycle transitions.
+   * WARNING: This calls synchronous tmux has-session for each session.
+   * For health checks and non-critical callers, prefer getCachedRunningSessions().
    */
   listRunningSessions(): Session[] {
     const sessions = this.state.listSessions({ status: 'running' });
-    return sessions.filter(s => this.isSessionAlive(s.tmuxSession));
+    const alive = sessions.filter(s => this.isSessionAlive(s.tmuxSession));
+    // Update cache as a side effect
+    this._cachedRunningCount = alive.length;
+    this._cachedRunningSessions = alive;
+    return alive;
+  }
+
+  /**
+   * Get cached running session info (count + list) without blocking the event loop.
+   * Updated asynchronously by the monitor tick every 5 seconds.
+   * Safe to call from the health endpoint and other latency-sensitive paths.
+   */
+  getCachedRunningSessions(): { count: number; sessions: Session[] } {
+    return { count: this._cachedRunningCount, sessions: this._cachedRunningSessions };
+  }
+
+  /**
+   * Fast startup purge — immediately remove session records for dead tmux sessions.
+   * Called once at server boot BEFORE monitoring starts, to prevent the death spiral
+   * where stale sessions overwhelm startup and block health checks.
+   * Uses a short timeout (1s) per session to fail fast.
+   */
+  async purgeDeadSessions(): Promise<number> {
+    const running = this.state.listSessions({ status: 'running' });
+    if (running.length === 0) return 0;
+
+    let purged = 0;
+    for (const session of running) {
+      try {
+        execFileSync(this.config.tmuxPath, ['has-session', '-t', `=${session.tmuxSession}`], {
+          stdio: 'ignore', timeout: 1000,
+        });
+      } catch {
+        // tmux session doesn't exist — purge the record
+        session.status = 'completed';
+        session.endedAt = new Date().toISOString();
+        this.state.saveSession(session);
+        purged++;
+      }
+    }
+
+    if (purged > 0) {
+      console.log(`[SessionManager] Startup purge: removed ${purged} dead session(s) of ${running.length} tracked`);
+    }
+    return purged;
   }
 
   /**
