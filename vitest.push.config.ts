@@ -23,6 +23,7 @@ const FLAKY_TESTS = [
   'tests/unit/middleware-behavioral.test.ts',
   'tests/integration/messaging-routes.test.ts',
   'tests/integration/whatsapp-routes.test.ts',
+  'tests/e2e/whatsapp-full-stack-e2e.test.ts',
   'tests/e2e/messaging-multi-agent.test.ts',
   'tests/e2e/lifecycle.test.ts',
 
