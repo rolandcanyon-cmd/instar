@@ -347,42 +347,41 @@ export class InputDetector extends EventEmitter {
     // Sanitize: take last 20 lines, strip any remaining ANSI
     const context = lines.slice(-20).join('\n').slice(0, 3000);
 
-    const prompt = `You are analyzing terminal output from a Claude Code AI agent session to determine if the session is waiting for EXPLICIT user input — a real question or decision that blocks the session.
+    const prompt = `You are analyzing terminal output from a Claude Code AI agent session. Your job is to determine if the session is BLOCKED at a system-level interactive prompt that prevents the agent from continuing.
 
 Terminal output (last 20 lines):
 <terminal>
 ${context}
 </terminal>
 
-CRITICAL — These are NOT prompts (respond NO_PROMPT for all of these):
-- "⏵⏵ bypass permissions on (shift+tab to cycle)" — This is a STATUS BAR, not a prompt
-- "esc to interrupt" — This is a status indicator showing the agent is WORKING
-- "shift+tab to cycle" — This is a UI hint, not a question
-- The agent actively reading, writing, or editing files
-- The agent running bash commands
-- Token counters, progress indicators, or thinking indicators
-- "Scampering", "Thinking", "Reading N files" — agent is working
-- An empty prompt line (❯) with a status bar below it — agent is idle, not blocked
+RESPOND NO_PROMPT for ALL of these (they are NOT blocking prompts):
+- Status bar elements: "bypass permissions on", "esc to interrupt", "shift+tab to cycle"
+- Agent working: "Scampering", "Thinking", "Reading N files", "Writing to", "Editing"
+- Empty prompt line (❯) — agent is idle, not blocked
+- Token counters, progress indicators
+- CONVERSATIONAL QUESTIONS from the agent like "Want me to...", "Should I...", "Shall we...", "Would you like me to..." — these are the agent asking a follow-up in its response text. The user can reply normally via Telegram. These do NOT block the session.
 
-A REAL prompt looks like:
-- "Do you want to create src/foo.ts?" with numbered options (1. Yes  2. No)
-- "Claude has written up a plan... Would you like to proceed?" with numbered options
-- A direct question to the user: "What email address should I use?"
-- "Do you want to proceed? (y/n)"
+A REAL BLOCKING PROMPT looks like:
+- Claude Code's SYSTEM UI asking "Do you want to create src/foo.ts?" with numbered options rendered by the terminal (not in the agent's text output)
+- Plan approval: "Claude has written up a plan... Would you like to proceed?" with system-rendered numbered options (❯ 1. Yes  2. No)
+- A y/n prompt: "Do you want to proceed? (y/n)" at the very bottom of the terminal
+- "Esc to cancel · Tab to amend" — Claude Code's edit confirmation UI
 
-If the terminal is NOT waiting for user input, respond with exactly: NO_PROMPT
+KEY DISTINCTION: If the question appears INSIDE the agent's conversational response text (alongside other paragraphs of explanation), it's conversational — NOT a blocking prompt. Blocking prompts are rendered by Claude Code's UI at the bottom of the terminal, often with special formatting (❯, numbered options, keyboard hints like shift+tab).
 
-If the terminal IS genuinely waiting for a blocking decision, respond with JSON (no markdown fences):
+If NOT a blocking prompt, respond exactly: NO_PROMPT
+
+If it IS a genuine blocking system prompt, respond with JSON (no markdown fences):
 {
   "type": "plan" | "permission" | "question" | "confirmation" | "selection",
-  "summary": "Brief description of what's being asked",
+  "summary": "Brief description of what the system is asking",
   "options": [
-    {"key": "1", "label": "Description of option 1"},
-    {"key": "2", "label": "Description of option 2"}
+    {"key": "1", "label": "Short description of option 1"},
+    {"key": "2", "label": "Short description of option 2"}
   ]
 }
 
-When in doubt, respond NO_PROMPT. False negatives are far better than false positives.`;
+When in doubt, respond NO_PROMPT. False positives cause spam.`;
 
     try {
       const response = await intelligence.evaluate(prompt, {

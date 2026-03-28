@@ -3487,30 +3487,29 @@ export class TelegramAdapter implements MessagingAdapter {
     let result: { message_id: number };
 
     if (prompt.options && prompt.options.length > 0) {
-      // Build inline keyboard buttons
-      const keyboard = prompt.options.map(opt => {
+      // Add numbered options to the message body so full text is visible
+      const optionLines = prompt.options.map((opt, i) => `${i + 1}. ${opt.label}`).join('\n');
+      const fullText = `${text}\n\n${optionLines}`;
+
+      // Build inline keyboard buttons with just the number/key (compact)
+      const keyboard = prompt.options.map((opt, i) => {
         const token = this.callbackRegistry.register({
           sessionName: prompt.sessionName,
           promptId: prompt.id,
           key: opt.key,
         });
         return {
-          text: opt.label,
+          text: String(i + 1),
           callback_data: JSON.stringify({ id: token }),
         };
       });
 
-      // Group into rows of max 3 buttons
-      const rows: Array<typeof keyboard> = [];
-      for (let i = 0; i < keyboard.length; i += 3) {
-        rows.push(keyboard.slice(i, i + 3));
-      }
-
+      // All buttons in a single row (they're just numbers now)
       result = await this.apiCall('sendMessage', {
         chat_id: this.config.chatId,
         message_thread_id: isGeneralTopic(topicId) ? undefined : topicId,
-        text,
-        reply_markup: { inline_keyboard: rows },
+        text: fullText,
+        reply_markup: { inline_keyboard: [keyboard] },
         parse_mode: 'Markdown',
       }) as { message_id: number };
     } else {
