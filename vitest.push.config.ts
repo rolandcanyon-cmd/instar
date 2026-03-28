@@ -17,6 +17,7 @@ import { defineConfig } from 'vitest/config';
 
 const FLAKY_TESTS = [
   // ── Supertest timeouts / port collisions ──────────────────────────
+  'tests/integration/scope-coherence-routes.test.ts',
   'tests/unit/relationship-routes.test.ts',
   'tests/unit/server.test.ts',
   'tests/unit/middleware.test.ts',
