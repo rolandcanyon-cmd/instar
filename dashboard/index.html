@@ -3007,16 +3007,24 @@
     <!-- Systems Tab -->
     <div class="systems-container" id="systemsTab" style="display:none">
       <div class="systems-main">
-        <div class="systems-header">
-          <h2>Systems</h2>
-          <button class="systems-refresh" onclick="loadSystems()">Refresh</button>
+        <!-- Overview (card grid) -->
+        <div id="systemsOverview">
+          <div class="systems-header">
+            <h2>Systems</h2>
+            <button class="systems-refresh" onclick="loadSystems()">Refresh</button>
+          </div>
+          <div id="systemsBanner">
+            <div style="padding:20px;color:var(--text-dim);text-align:center">Loading...</div>
+          </div>
+          <div id="systemsIssues"></div>
+          <div id="systemsCapabilities"></div>
+          <div id="systemsEvents"></div>
         </div>
-        <div id="systemsBanner">
-          <div style="padding:20px;color:var(--text-dim);text-align:center">Loading...</div>
+        <!-- Detail view (single capability) -->
+        <div class="cap-detail-view" id="systemsDetailView">
+          <button class="cap-detail-back" onclick="showSystemsOverview()">&#9664; Back to overview</button>
+          <div id="systemsDetailContent"></div>
         </div>
-        <div id="systemsIssues"></div>
-        <div id="systemsCapabilities"></div>
-        <div id="systemsEvents"></div>
       </div>
     </div>
 
