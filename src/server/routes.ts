@@ -6012,7 +6012,175 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
-  // ── Systems Status (aggregated subsystem overview) ────────────────
+  // ── Systems Dashboard (rich telemetry) ──────────────────────────
+  // Shared helper: safely extract data from a subsystem
+  function safeGet<T>(fn: () => T): T | null {
+    try { return fn(); } catch { return null; }
+  }
+
+  // Build capability telemetry for one capability
+  function buildCapabilityTelemetry(id: string): {
+    metric: string;
+    stats: Record<string, number | string | boolean | null>;
+    lastActivity: string | null;
+  } {
+    const stats: Record<string, number | string | boolean | null> = {};
+    let lastActivity: string | null = null;
+    let metric = 'Active';
+
+    try {
+      switch (id) {
+        case 'session-recovery': {
+          const ws = safeGet(() => ctx.watchdog?.getStats?.());
+          const ts = safeGet(() => ctx.triageNurse?.getStatus?.());
+          if (ws) {
+            stats.interventions = ws.interventionsTotal ?? 0;
+            stats.recoveries = ws.recoveries ?? 0;
+            stats.sessionDeaths = ws.sessionDeaths ?? 0;
+            stats.llmOverrides = ws.llmGateOverrides ?? 0;
+            metric = ws.interventionsTotal > 0
+              ? `${ws.recoveries} recovered · ${ws.interventionsTotal} interventions`
+              : 'No interventions needed';
+          }
+          if (ts) {
+            stats.activeCases = ts.activeCases ?? 0;
+            stats.totalTriages = ts.historyCount ?? 0;
+            stats.cooldowns = ts.cooldowns ?? 0;
+            if (ts.activeCases) metric += ` · ${ts.activeCases} active`;
+          }
+          if (!ws && !ts) metric = 'Standing by';
+          break;
+        }
+        case 'session-intelligence': {
+          stats.monitoring = true;
+          metric = 'Monitoring active sessions';
+          break;
+        }
+        case 'health-monitoring': {
+          const cr = safeGet(() => ctx.coherenceMonitor?.getLastReport?.()) as { passed?: number; failed?: number; corrected?: number; timestamp?: string } | null;
+          const sr = safeGet(() => ctx.systemReviewer?.getHealthStatus?.()) as { status?: string; message?: string; lastCheck?: string } | null;
+          const mp = safeGet(() => ctx.memoryMonitor?.getState?.()) as { pressurePercent?: number; state?: string; freeGB?: number; totalGB?: number; trend?: string; lastChecked?: string } | null;
+          const op = safeGet(() => ctx.orphanReaper?.getLastReport?.()) as { tracked?: unknown[]; orphans?: unknown[]; totalMemoryMB?: number; timestamp?: string } | null;
+          const parts: string[] = [];
+          if (cr) {
+            stats.coherenceChecks = (cr.passed ?? 0) + (cr.failed ?? 0);
+            stats.coherencePassed = cr.passed ?? 0;
+            stats.coherenceFailed = cr.failed ?? 0;
+            stats.coherenceCorrected = cr.corrected ?? 0;
+            if (cr.timestamp) lastActivity = cr.timestamp;
+            parts.push(cr.failed ? `${cr.failed} failing` : `${cr.passed ?? 0} checks passed`);
+          }
+          if (sr) {
+            stats.reviewStatus = sr.status ?? 'unknown';
+            if (sr.lastCheck) lastActivity = sr.lastCheck;
+            if (sr.message) parts.push(sr.message);
+          }
+          if (mp) {
+            stats.memoryPercent = Math.round(mp.pressurePercent ?? 0);
+            stats.memoryState = mp.state ?? 'unknown';
+            stats.memoryFreeGB = Math.round((mp.freeGB ?? 0) * 10) / 10;
+            stats.memoryTotalGB = Math.round((mp.totalGB ?? 0) * 10) / 10;
+            stats.memoryTrend = mp.trend ?? 'stable';
+            if (mp.lastChecked) lastActivity = mp.lastChecked;
+            parts.push(`Memory ${Math.round(mp.pressurePercent ?? 0)}%`);
+          }
+          if (op) {
+            stats.trackedProcesses = Array.isArray(op.tracked) ? op.tracked.length : 0;
+            stats.orphanProcesses = Array.isArray(op.orphans) ? op.orphans.length : 0;
+            stats.totalMemoryMB = Math.round(op.totalMemoryMB ?? 0);
+          }
+          metric = parts.join(' · ') || 'All checks passing';
+          break;
+        }
+        case 'safety-trust': { stats.gatesActive = true; metric = 'All gates active'; break; }
+        case 'coherence': {
+          const cr = safeGet(() => ctx.coherenceMonitor?.getHealth?.()) as { status?: string; lastCheck?: string } | null;
+          if (cr?.lastCheck) lastActivity = cr.lastCheck;
+          metric = 'Monitoring project integrity';
+          break;
+        }
+        case 'scheduled-jobs': {
+          const js = safeGet(() => ctx.scheduler?.getStatus?.());
+          if (js) {
+            stats.totalJobs = js.jobCount ?? 0;
+            stats.enabledJobs = js.enabledJobs ?? 0;
+            stats.queueLength = js.queueLength ?? 0;
+            stats.activeJobSessions = js.activeJobSessions ?? 0;
+            const parts = [`${js.enabledJobs} jobs enabled`];
+            if (js.activeJobSessions > 0) parts.push(`${js.activeJobSessions} running`);
+            if (js.queueLength > 0) parts.push(`${js.queueLength} queued`);
+            metric = parts.join(' · ');
+          }
+          break;
+        }
+        case 'quota': {
+          const qs = safeGet(() => ctx.quotaTracker?.getState?.());
+          if (qs) {
+            stats.weeklyUsage = Math.round(qs.usagePercent ?? 0);
+            stats.fiveHourRate = qs.fiveHourPercent != null ? Math.round(qs.fiveHourPercent) : null;
+            stats.recommendation = qs.recommendation ?? 'normal';
+            if (qs.lastUpdated) lastActivity = qs.lastUpdated;
+            const parts = [`Weekly usage ${Math.round(qs.usagePercent)}%`];
+            if (qs.fiveHourPercent != null) parts.push(`5h rate ${Math.round(qs.fiveHourPercent)}%`);
+            metric = parts.join(' · ');
+          }
+          break;
+        }
+        case 'telegram': {
+          const ts = safeGet(() => ctx.telegram?.getStatus?.());
+          const ls = safeGet(() => ctx.telegram?.getLogStats?.());
+          if (ts) {
+            stats.connected = ts.started ?? false;
+            stats.uptimeMs = ts.uptime ?? 0;
+            stats.topicMappings = ts.topicMappings ?? 0;
+            stats.pendingStalls = ts.pendingStalls ?? 0;
+            const parts: string[] = [];
+            if (ts.uptime) {
+              const hrs = Math.floor(ts.uptime / 3600000);
+              const mins = Math.floor((ts.uptime % 3600000) / 60000);
+              parts.push(`Connected ${hrs > 0 ? hrs + 'h ' : ''}${mins}m`);
+            }
+            if (ts.topicMappings > 0) parts.push(`${ts.topicMappings} topics`);
+            metric = parts.join(' · ') || 'Connected';
+          }
+          if (ls) { stats.totalMessages = ls.totalMessages ?? 0; }
+          break;
+        }
+        case 'whatsapp': { metric = 'Connected'; break; }
+        case 'slack': { metric = 'Connected'; break; }
+        case 'message-routing': { metric = 'Routing active'; break; }
+        case 'memory': { metric = 'Context assembly active'; break; }
+        case 'evolution': {
+          const ed = safeGet(() => ctx.evolution?.getDashboard?.()) as {
+            evolution?: { totalProposals?: number }; learnings?: { totalLearnings?: number; applied?: number };
+            gaps?: { totalGaps?: number }; actions?: { totalActions?: number; overdue?: number };
+          } | null;
+          if (ed) {
+            stats.proposals = ed.evolution?.totalProposals ?? 0;
+            stats.learnings = ed.learnings?.totalLearnings ?? 0;
+            stats.learningsApplied = ed.learnings?.applied ?? 0;
+            stats.gaps = ed.gaps?.totalGaps ?? 0;
+            stats.actions = ed.actions?.totalActions ?? 0;
+            stats.overdueActions = ed.actions?.overdue ?? 0;
+            const parts: string[] = [];
+            if (ed.evolution?.totalProposals) parts.push(`${ed.evolution.totalProposals} proposals`);
+            if (ed.gaps?.totalGaps) parts.push(`${ed.gaps.totalGaps} gaps`);
+            if (ed.learnings?.applied) parts.push(`${ed.learnings.applied} applied`);
+            metric = parts.join(' · ') || 'Monitoring capabilities';
+          }
+          break;
+        }
+        case 'infrastructure': {
+          const tunnelUrl = safeGet(() => ctx.tunnel?.getExternalUrl?.('/'));
+          stats.tunnelActive = !!tunnelUrl;
+          metric = tunnelUrl ? 'Tunnel active' : 'Running';
+          break;
+        }
+      }
+    } catch { /* fallback */ }
+
+    return { metric, stats, lastActivity };
+  }
 
   router.get('/systems/status', (_req, res) => {
     const uptimeMs = Date.now() - ctx.startTime.getTime();
@@ -6029,7 +6197,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'session-recovery',
         label: 'Session Recovery',
-        description: 'Detects stuck or crashed sessions and automatically recovers them',
+        description: 'Detects stuck or crashed sessions and automatically recovers them. Uses a 4-layer stack: watchdog catches stuck commands, mechanical recovery fixes JSONL issues, heuristics handle 90% of remaining cases, and LLM diagnosis covers the rest.',
         processes: [
           { name: 'SessionWatchdog', subsystem: ctx.watchdog, statusFn: () => ctx.watchdog?.getStatus() },
           { name: 'StallTriageNurse', subsystem: ctx.triageNurse, statusFn: () => ctx.triageNurse?.getStatus() },
@@ -6039,7 +6207,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'session-intelligence',
         label: 'Session Intelligence',
-        description: 'Monitors session activity and generates summaries for smart routing',
+        description: 'Monitors session activity and generates summaries for smart message routing. Captures terminal output every 60 seconds to enable intelligent routing of incoming messages to the most relevant session.',
         processes: [
           { name: 'SessionActivitySentinel', subsystem: ctx.activitySentinel },
           { name: 'SessionSummarySentinel', subsystem: ctx.summarySentinel },
@@ -6048,7 +6216,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'health-monitoring',
         label: 'Health Monitoring',
-        description: 'Continuous self-checks for config drift, resource pressure, and system integrity',
+        description: 'Continuous self-checks across config drift, resource pressure, system integrity, and functional probes. Runs coherence checks every 5 minutes and deep system reviews every 6 hours.',
         processes: [
           { name: 'CoherenceMonitor', subsystem: ctx.coherenceMonitor, statusFn: () => ctx.coherenceMonitor?.getLastReport() },
           { name: 'SystemReviewer', subsystem: ctx.systemReviewer, statusFn: () => ctx.systemReviewer?.getHealthStatus() },
@@ -6059,7 +6227,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'safety-trust',
         label: 'Safety & Trust',
-        description: 'Gates external operations, validates messages, and manages trust levels',
+        description: 'Gates external operations by risk level, validates inbound messages against injection patterns, and manages adaptive trust levels per service.',
         processes: [
           { name: 'ExternalOperationGate', subsystem: ctx.operationGate },
           { name: 'MessageSentinel', subsystem: ctx.sentinel },
@@ -6070,7 +6238,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'coherence',
         label: 'Coherence & Integrity',
-        description: 'Ensures project state, scope boundaries, and response quality remain consistent',
+        description: 'Ensures project state, scope boundaries, and response quality remain consistent. Prevents cross-project contamination and validates agent instructions are properly loaded.',
         processes: [
           { name: 'CoherenceGate', subsystem: ctx.coherenceGate },
           { name: 'ResponseReviewGate', subsystem: ctx.responseReviewGate },
@@ -6081,7 +6249,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'scheduled-jobs',
         label: 'Scheduled Jobs',
-        description: 'Runs tasks on cron schedules and tracks commitments',
+        description: 'Runs tasks on cron schedules with priority-based queuing. Also tracks behavioral commitments the agent made to the user.',
         processes: [
           { name: 'JobScheduler', subsystem: ctx.scheduler },
           { name: 'CommitmentTracker', subsystem: ctx.commitmentTracker, statusFn: () => ({ active: ctx.commitmentTracker?.getActive().length ?? 0 }) },
@@ -6090,7 +6258,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'quota',
         label: 'Quota Management',
-        description: 'Tracks API usage, enforces limits, and switches accounts when needed',
+        description: 'Tracks Claude API token usage in real-time. Sends warnings when approaching limits, enforces quotas, and auto-switches between accounts if configured.',
         processes: [
           { name: 'QuotaTracker', subsystem: ctx.quotaTracker, statusFn: () => ctx.quotaTracker?.getState() },
           { name: 'QuotaManager', subsystem: ctx.quotaManager },
@@ -6099,7 +6267,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'telegram',
         label: 'Telegram',
-        description: 'Sends and receives messages through Telegram',
+        description: 'Full Telegram messaging integration with long-polling, topic-based session routing, notification batching, and delivery retry.',
         processes: [
           { name: 'TelegramAdapter', subsystem: ctx.telegram },
         ],
@@ -6123,7 +6291,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'message-routing',
         label: 'Message Routing',
-        description: 'Routes messages between platforms and sessions intelligently',
+        description: 'Routes messages between platforms and sessions intelligently. Handles cross-platform bridging and inter-agent delivery with retry and dead-letter archiving.',
         processes: [
           { name: 'MessageBridge', subsystem: ctx.messageBridge },
           { name: 'MessageRouter', subsystem: ctx.messageRouter },
@@ -6132,7 +6300,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'memory',
         label: 'Memory & Context',
-        description: 'Topic memory, semantic search, and context assembly for sessions',
+        description: 'Topic memory stores conversation history per topic. Semantic memory enables natural language search. Working memory assembles relevant context for each session.',
         processes: [
           { name: 'TopicMemory', subsystem: ctx.topicMemory },
           { name: 'SemanticMemory', subsystem: ctx.semanticMemory },
@@ -6143,7 +6311,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'evolution',
         label: 'Self-Improvement',
-        description: 'Detects capability gaps and proposes improvements autonomously',
+        description: 'Detects capability gaps, generates improvement proposals, tracks learnings, and implements approved changes. The self-improvement loop.',
         processes: [
           { name: 'EvolutionManager', subsystem: ctx.evolution },
           { name: 'AutonomousEvolution', subsystem: ctx.autonomousEvolution },
@@ -6154,7 +6322,7 @@ export function createRoutes(ctx: RouteContext): Router {
       {
         id: 'infrastructure',
         label: 'Infrastructure',
-        description: 'Tunnel access, worktree management, and agent networking',
+        description: 'Cloudflare tunnel for remote access, git worktree management for isolated agent work, and the Threadline agent network.',
         processes: [
           { name: 'TunnelManager', subsystem: ctx.tunnel },
           { name: 'WorktreeMonitor', subsystem: ctx.worktreeMonitor },
@@ -6163,14 +6331,16 @@ export function createRoutes(ctx: RouteContext): Router {
       },
     ];
 
-    // Build active capabilities with live metrics
+    // Build active capabilities with full telemetry
     interface ActiveCapability {
       id: string;
       label: string;
       description: string;
       status: 'active' | 'error';
       metric: string;
-      processes: { name: string; status: 'running' | 'error' }[];
+      stats: Record<string, number | string | boolean | null>;
+      lastActivity: string | null;
+      processes: { name: string; status: 'running' | 'error'; details?: unknown }[];
     }
 
     interface Issue {
@@ -6179,106 +6349,6 @@ export function createRoutes(ctx: RouteContext): Router {
       description: string;
       capability: string;
       process: string;
-    }
-
-    // Generate a human-readable metric for each capability
-    function getCapabilityMetric(id: string): string {
-      try {
-        switch (id) {
-          case 'session-recovery': {
-            const ws = ctx.watchdog?.getStats?.();
-            const ts = ctx.triageNurse?.getStatus?.();
-            const parts: string[] = [];
-            if (ws) {
-              if (ws.interventionsTotal > 0) parts.push(`${ws.recoveries} recovered, ${ws.interventionsTotal} interventions`);
-              else parts.push('No interventions needed');
-            }
-            if (ts?.activeCases) parts.push(`${ts.activeCases} active case${ts.activeCases > 1 ? 's' : ''}`);
-            return parts.join(' · ') || 'Standing by';
-          }
-          case 'session-intelligence': {
-            return 'Monitoring active sessions';
-          }
-          case 'health-monitoring': {
-            const cr = ctx.coherenceMonitor?.getLastReport?.() as { passed?: number; failed?: number; corrected?: number; timestamp?: string } | undefined;
-            const sr = ctx.systemReviewer?.getHealthStatus?.() as { status?: string; message?: string } | undefined;
-            const mp = ctx.memoryMonitor?.getState?.() as { pressurePercent?: number; state?: string } | undefined;
-            const parts: string[] = [];
-            if (cr) {
-              if (cr.failed) parts.push(`${cr.failed} check${cr.failed > 1 ? 's' : ''} failing`);
-              else if (cr.passed) parts.push(`${cr.passed} checks passed`);
-            }
-            if (sr?.message) parts.push(sr.message);
-            if (mp) parts.push(`Memory ${Math.round(mp.pressurePercent ?? 0)}%`);
-            return parts.join(' · ') || 'All checks passing';
-          }
-          case 'safety-trust':
-            return 'All gates active';
-          case 'coherence':
-            return 'Monitoring project integrity';
-          case 'scheduled-jobs': {
-            const js = ctx.scheduler?.getStatus?.();
-            if (js) {
-              const parts = [`${js.enabledJobs} jobs enabled`];
-              if (js.activeJobSessions > 0) parts.push(`${js.activeJobSessions} running`);
-              if (js.queueLength > 0) parts.push(`${js.queueLength} queued`);
-              return parts.join(' · ');
-            }
-            return 'Scheduler active';
-          }
-          case 'quota': {
-            const qs = ctx.quotaTracker?.getState?.();
-            if (qs) {
-              const parts = [`Weekly usage ${Math.round(qs.usagePercent)}%`];
-              if (qs.fiveHourPercent != null) parts.push(`5h rate ${Math.round(qs.fiveHourPercent)}%`);
-              return parts.join(' · ');
-            }
-            return 'Tracking usage';
-          }
-          case 'telegram': {
-            const ts = ctx.telegram?.getStatus?.();
-            if (ts) {
-              const parts: string[] = [];
-              if (ts.uptime) {
-                const hrs = Math.floor(ts.uptime / 3600000);
-                const mins = Math.floor((ts.uptime % 3600000) / 60000);
-                parts.push(`Connected ${hrs > 0 ? hrs + 'h ' : ''}${mins}m`);
-              }
-              if (ts.topicMappings > 0) parts.push(`${ts.topicMappings} topic${ts.topicMappings > 1 ? 's' : ''} linked`);
-              return parts.join(' · ') || 'Connected';
-            }
-            return 'Connected';
-          }
-          case 'whatsapp':
-            return 'Connected';
-          case 'slack':
-            return 'Connected';
-          case 'message-routing':
-            return 'Routing active';
-          case 'memory': {
-            return 'Context assembly active';
-          }
-          case 'evolution': {
-            const ed = ctx.evolution?.getDashboard?.() as { evolution?: { totalProposals?: number }; gaps?: { totalGaps?: number } } | undefined;
-            if (ed) {
-              const parts: string[] = [];
-              if (ed.evolution?.totalProposals) parts.push(`${ed.evolution.totalProposals} proposals`);
-              if (ed.gaps?.totalGaps) parts.push(`${ed.gaps.totalGaps} gaps tracked`);
-              return parts.join(' · ') || 'Monitoring capabilities';
-            }
-            return 'Monitoring capabilities';
-          }
-          case 'infrastructure': {
-            const tunnelUrl = ctx.tunnel?.getExternalUrl?.('/');
-            if (tunnelUrl) return 'Tunnel active';
-            return 'Running';
-          }
-          default:
-            return 'Active';
-        }
-      } catch {
-        return 'Active';
-      }
     }
 
     const activeCapabilities: ActiveCapability[] = [];
@@ -6308,13 +6378,17 @@ export function createRoutes(ctx: RouteContext): Router {
         }
       }
 
+      const telemetry = buildCapabilityTelemetry(def.id);
+
       activeCapabilities.push({
         id: def.id,
         label: def.label,
         description: def.description,
         status: hasError ? 'error' : 'active',
-        metric: getCapabilityMetric(def.id),
-        processes: processResults.map(p => ({ name: p.name, status: p.status })),
+        metric: telemetry.metric,
+        stats: telemetry.stats,
+        lastActivity: telemetry.lastActivity,
+        processes: processResults,
       });
     }
 
@@ -6340,6 +6414,14 @@ export function createRoutes(ctx: RouteContext): Router {
       issues,
       recentEvents,
     });
+  });
+
+  // Detail endpoint for a single capability
+  router.get('/systems/capability/:id', (req, res) => {
+    const capId = req.params.id;
+    const telemetry = buildCapabilityTelemetry(capId);
+    const uptimeMs = Date.now() - ctx.startTime.getTime();
+    res.json({ id: capId, uptime: uptimeMs, ...telemetry });
   });
 
   // ── External Operation Safety ────────────────────────────────────
