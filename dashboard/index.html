@@ -205,6 +205,11 @@
     .type-badge.job { background: #1b2e1b; color: #86efac; }
     .type-badge.interactive { background: #2e2e1b; color: #fde047; }
 
+    .platform-badge {
+      font-size: 12px;
+      cursor: default;
+    }
+
     .session-telemetry {
       display: flex;
       align-items: center;
@@ -2066,38 +2071,36 @@
       margin-bottom: 12px;
     }
 
-    .capabilities-grid {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .capability-pill {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 16px;
+    /* Capability Cards */
+    .capability-card {
       background: var(--bg-panel);
       border: 1px solid var(--border);
       border-radius: 8px;
+      margin-bottom: 6px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+    }
+
+    .capability-card:hover {
+      border-color: rgba(255,255,255,0.12);
+    }
+
+    .capability-card.expanded {
+      border-color: var(--accent);
+    }
+
+    .capability-card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 16px;
       cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
       user-select: none;
     }
 
-    .capability-pill:hover {
-      background: var(--bg-hover);
-      border-color: var(--text-dim);
-    }
-
-    .capability-pill.expanded {
-      border-color: var(--accent);
-      background: var(--bg-hover);
-    }
-
     .cap-dot {
-      width: 7px;
-      height: 7px;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
       flex-shrink: 0;
     }
@@ -2105,38 +2108,62 @@
     .cap-dot.active { background: var(--accent); }
     .cap-dot.error { background: var(--red); }
 
+    .cap-info {
+      flex: 1;
+      min-width: 0;
+    }
+
     .cap-label {
       font-size: 13px;
       color: var(--text-bright);
       font-weight: 500;
+      margin-bottom: 2px;
     }
 
-    .cap-count {
+    .cap-metric {
       font-size: 11px;
       color: var(--text-dim);
-      margin-left: auto;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    /* Capability Detail (inline expand) */
-    .capability-detail {
+    .cap-arrow {
+      font-size: 10px;
+      color: var(--text-dim);
+      transition: transform 0.2s;
+      flex-shrink: 0;
+    }
+
+    .capability-card.expanded .cap-arrow {
+      transform: rotate(90deg);
+    }
+
+    /* Capability Detail (expandable) */
+    .cap-detail {
       display: none;
-      padding: 12px 16px;
-      background: var(--bg-panel);
-      border: 1px solid var(--border);
-      border-top: none;
-      border-radius: 0 0 8px 8px;
-      margin-top: -8px;
-      margin-bottom: 8px;
+      padding: 0 16px 14px;
+      border-top: 1px solid var(--border);
     }
 
-    .capability-detail.visible {
+    .capability-card.expanded .cap-detail {
       display: block;
     }
 
     .cap-detail-desc {
       font-size: 12px;
       color: var(--text-dim);
-      margin-bottom: 10px;
+      margin: 12px 0 10px;
+      line-height: 1.5;
+    }
+
+    .cap-detail-label {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
     }
 
     .cap-detail-processes {
@@ -2888,12 +2915,17 @@
                onkeydown="if(event.key==='Enter')createNewSession()" autofocus>
       </div>
       <div class="modal-field">
-        <label class="modal-toggle">
-          <input type="checkbox" id="newSessionHeadless">
-          <span>Headless (no Telegram topic)</span>
-        </label>
-        <div class="modal-hint">Headless sessions still appear in the dashboard but won't create a Telegram topic.</div>
+        <label for="newSessionPlatform">Platform</label>
+        <select id="newSessionPlatform" style="width:100%;padding:8px 12px;background:var(--bg-panel);color:var(--text-bright);border:1px solid var(--border);border-radius:6px;font-size:14px;">
+          <option value="auto">Auto (best available)</option>
+          <option value="telegram">✈️ Telegram</option>
+          <option value="slack">💬 Slack</option>
+          <option value="headless">🖥️ Headless (no messaging)</option>
+        </select>
+        <div class="modal-hint">Choose which messaging platform to link this session to.</div>
       </div>
+      <!-- Keep hidden checkbox for backward compat -->
+      <input type="hidden" id="newSessionHeadless">
       <div class="modal-actions">
         <button class="modal-btn-cancel" onclick="closeNewSessionModal()">Cancel</button>
         <button class="modal-btn-create" id="createSessionBtn" onclick="createNewSession()">Create Session</button>
@@ -3344,6 +3376,10 @@
           }
         }
 
+        const platform = session.platform || 'headless';
+        const platformIcon = platform === 'telegram' ? '✈️' : platform === 'slack' ? '💬' : platform === 'whatsapp' ? '📱' : '🖥️';
+        const platformLabel = platform.charAt(0).toUpperCase() + platform.slice(1);
+
         el.innerHTML = `
           <div class="session-name-row">
             <div class="session-name">${escapeHtml(session.name)}</div>
@@ -3352,6 +3388,7 @@
           <div class="session-meta">
             <span class="type-badge ${sType}">${sType}</span>
             <span class="model-badge ${model}">${model}</span>
+            <span class="platform-badge ${platform}" title="${platformLabel}">${platformIcon}</span>
             <span>${elapsed}</span>
           </div>
           ${telemetryHtml}
@@ -3664,7 +3701,9 @@
 
     async function createNewSession() {
       const nameInput = document.getElementById('newSessionName');
-      const headless = document.getElementById('newSessionHeadless').checked;
+      const platformSelect = document.getElementById('newSessionPlatform');
+      const platform = platformSelect ? platformSelect.value : 'auto';
+      const headless = platform === 'headless';
       const name = nameInput.value.trim();
       const btn = document.getElementById('createSessionBtn');
 
@@ -3685,7 +3724,7 @@
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ name, headless }),
+          body: JSON.stringify({ name, headless, platform: platform === 'auto' ? undefined : platform }),
         });
         const data = await resp.json();
 
@@ -5625,32 +5664,37 @@
         issuesEl.innerHTML = '';
       }
 
-      // Zone 3: Active Capabilities Grid
+      // Zone 3: Active Capabilities (card list)
       const capsEl = document.getElementById('systemsCapabilities');
       if (activeCapabilities.length > 0) {
-        const pills = activeCapabilities.map(cap => {
+        const cards = activeCapabilities.map(cap => {
           const dotClass = cap.status === 'error' ? 'error' : 'active';
-          const countLabel = cap.processes.length > 1 ? cap.processes.length + ' processes' : '';
-          return `<div class="capability-pill" data-cap-id="${esc(cap.id)}" onclick="toggleCapabilityDetail('${esc(cap.id)}')">
+          return `<div class="capability-card" data-cap-id="${esc(cap.id)}">
+            <div class="capability-card-header" onclick="toggleCapabilityCard(this)">
               <span class="cap-dot ${dotClass}"></span>
-              <span class="cap-label">${esc(cap.label)}</span>
-              ${countLabel ? '<span class="cap-count">' + esc(countLabel) + '</span>' : ''}
+              <div class="cap-info">
+                <div class="cap-label">${esc(cap.label)}</div>
+                <div class="cap-metric">${esc(cap.metric)}</div>
+              </div>
+              <span class="cap-arrow">&#9654;</span>
             </div>
-            <div class="capability-detail" id="cap-detail-${esc(cap.id)}">
+            <div class="cap-detail">
               <div class="cap-detail-desc">${esc(cap.description)}</div>
+              <div class="cap-detail-label">Components</div>
               <div class="cap-detail-processes">
                 ${cap.processes.map(p => {
                   const pDotColor = p.status === 'running' ? 'var(--accent)' : 'var(--red)';
                   return '<div class="cap-detail-proc"><span class="cap-detail-proc-dot" style="background:' + pDotColor + '"></span>' + esc(p.name) + '</div>';
                 }).join('')}
               </div>
-            </div>`;
+            </div>
+          </div>`;
         }).join('');
 
         capsEl.innerHTML = `
           <div class="capabilities-section">
             <div class="capabilities-section-title">Active Capabilities</div>
-            <div class="capabilities-grid">${pills}</div>
+            ${cards}
           </div>`;
       } else {
         capsEl.innerHTML = '';
@@ -5680,20 +5724,16 @@
       }
     }
 
-    function toggleCapabilityDetail(capId) {
-      const detail = document.getElementById('cap-detail-' + capId);
-      const pill = document.querySelector('[data-cap-id="' + capId + '"]');
-      if (!detail || !pill) return;
+    function toggleCapabilityCard(headerEl) {
+      const card = headerEl.closest('.capability-card');
+      if (!card) return;
+      const wasExpanded = card.classList.contains('expanded');
 
-      const isExpanded = detail.classList.contains('visible');
+      // Close all others
+      document.querySelectorAll('.capability-card.expanded').forEach(el => el.classList.remove('expanded'));
 
-      // Close all others first
-      document.querySelectorAll('.capability-detail.visible').forEach(el => el.classList.remove('visible'));
-      document.querySelectorAll('.capability-pill.expanded').forEach(el => el.classList.remove('expanded'));
-
-      if (!isExpanded) {
-        detail.classList.add('visible');
-        pill.classList.add('expanded');
+      if (!wasExpanded) {
+        card.classList.add('expanded');
       }
     }
 

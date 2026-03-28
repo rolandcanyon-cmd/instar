@@ -2510,7 +2510,8 @@ export function createRoutes(ctx: RouteContext): Router {
     // Create Slack channel
     if (resolvedPlatform === 'slack' && ctx.slack) {
       try {
-        const agentName = (ctx.slack as unknown as { config: { workspaceName?: string } }).config?.workspaceName?.replace(/-agent$/, '') || 'agent';
+        const rawAgentName = (ctx.slack as unknown as { config: { workspaceName?: string } }).config?.workspaceName?.replace(/-agent$/i, '') || 'agent';
+        const agentName = rawAgentName.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
         const channelName = `${agentName}-sess-${topicName.toLowerCase().replace(/[^a-z0-9]/g, '-').slice(0, 40)}`;
         slackChannelId = await ctx.slack.createChannel(channelName);
       } catch (err) {
@@ -2540,9 +2541,17 @@ export function createRoutes(ctx: RouteContext): Router {
         }
       }
 
-      // Update Slack channel-session registry if we created a Slack channel
+      // Update Slack channel-session registry and invite authorized users
       if (slackChannelId && ctx.slack) {
         ctx.slack.registerChannelSession(slackChannelId, tmuxSession, topicName);
+        // Invite authorized users to the new channel
+        try {
+          const slackConfig = ctx.config.messaging?.find(m => m.type === 'slack')?.config as Record<string, unknown> | undefined;
+          const authorizedUserIds = (slackConfig?.authorizedUserIds as string[]) ?? [];
+          for (const userId of authorizedUserIds) {
+            await ctx.slack.api.call('conversations.invite', { channel: slackChannelId, users: userId }).catch(() => {});
+          }
+        } catch { /* non-fatal */ }
       }
 
       res.status(201).json({
@@ -5059,6 +5068,82 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // ── Plan Prompt Relay (from hook) ─────────────────────────────
+  // Receives plan mode entry events from the PreToolUse hook on EnterPlanMode.
+  // Relays the plan to Telegram for user approval via inline keyboard.
+
+  router.post('/hooks/plan-prompt', async (req, res) => {
+    const { event, session_id, tool_input, instar_sid } = req.body;
+
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    console.log(`[PlanRelay] Received plan-prompt event: sid=${instar_sid} claude_sid=${session_id}`);
+
+    // Find the session and its topic binding
+    let topicId: number | undefined;
+    let tmuxSession: string | undefined;
+
+    // Strategy 1: look up by instar session ID or Claude session ID
+    const sessions = ctx.sessionManager.listRunningSessions();
+    const session = sessions.find(s =>
+      s.id === instar_sid || s.claudeSessionId === session_id
+    );
+    if (session) {
+      tmuxSession = session.tmuxSession;
+      topicId = ctx.telegram.getTopicForSession(session.tmuxSession) ?? undefined;
+    }
+
+    // Strategy 2: check all topic-session mappings for a match
+    if (!topicId && instar_sid) {
+      const allTopics = ctx.telegram.getAllTopicMappings?.() ?? [];
+      for (const mapping of allTopics) {
+        if (mapping.sessionName && (mapping.sessionName === instar_sid || instar_sid.includes(mapping.sessionName))) {
+          topicId = mapping.topicId;
+          tmuxSession = mapping.sessionName;
+          break;
+        }
+      }
+    }
+
+    // Strategy 3: use the INSTAR_TELEGRAM_TOPIC env if the hook passed it
+    if (!topicId && req.body.telegram_topic) {
+      topicId = parseInt(req.body.telegram_topic, 10);
+    }
+
+    if (!topicId) {
+      console.log(`[PlanRelay] No topic binding found for sid=${instar_sid}`);
+      res.json({ ok: false, reason: 'no topic binding' });
+      return;
+    }
+
+    // Build a DetectedPrompt and relay it
+    try {
+      const prompt = {
+        type: 'plan' as const,
+        raw: '',
+        summary: 'Plan approval requested — the agent has a plan and is waiting for your decision.',
+        options: [
+          { key: '1', label: 'Yes, and bypass permissions' },
+          { key: '2', label: 'Yes, manually approve edits' },
+          { key: '3', label: 'Tell Claude what to change' },
+        ],
+        sessionName: tmuxSession || session?.tmuxSession || 'unknown',
+        detectedAt: Date.now(),
+        id: crypto.randomUUID().slice(0, 8),
+      };
+
+      await ctx.telegram.relayPrompt(topicId, prompt);
+      console.log(`[PlanRelay] Relayed plan prompt to topic ${topicId} for session ${tmuxSession || session?.tmuxSession}`);
+      res.json({ ok: true, topicId });
+    } catch (err) {
+      console.error(`[PlanRelay] Failed:`, err instanceof Error ? err.message : err);
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── Telegram Callback Query Forwarding (from Lifeline) ────────
   // Receives inline keyboard callback queries that the Lifeline forwarded.
   // Processes them through TelegramAdapter.processCallbackQuery().
@@ -6078,12 +6163,13 @@ export function createRoutes(ctx: RouteContext): Router {
       },
     ];
 
-    // Build active capabilities (only include if at least one process is configured)
+    // Build active capabilities with live metrics
     interface ActiveCapability {
       id: string;
       label: string;
       description: string;
       status: 'active' | 'error';
+      metric: string;
       processes: { name: string; status: 'running' | 'error' }[];
     }
 
@@ -6095,12 +6181,112 @@ export function createRoutes(ctx: RouteContext): Router {
       process: string;
     }
 
+    // Generate a human-readable metric for each capability
+    function getCapabilityMetric(id: string): string {
+      try {
+        switch (id) {
+          case 'session-recovery': {
+            const ws = ctx.watchdog?.getStats?.();
+            const ts = ctx.triageNurse?.getStatus?.();
+            const parts: string[] = [];
+            if (ws) {
+              if (ws.interventionsTotal > 0) parts.push(`${ws.recoveries} recovered, ${ws.interventionsTotal} interventions`);
+              else parts.push('No interventions needed');
+            }
+            if (ts?.activeCases) parts.push(`${ts.activeCases} active case${ts.activeCases > 1 ? 's' : ''}`);
+            return parts.join(' · ') || 'Standing by';
+          }
+          case 'session-intelligence': {
+            return 'Monitoring active sessions';
+          }
+          case 'health-monitoring': {
+            const cr = ctx.coherenceMonitor?.getLastReport?.() as { passed?: number; failed?: number; corrected?: number; timestamp?: string } | undefined;
+            const sr = ctx.systemReviewer?.getHealthStatus?.() as { status?: string; message?: string } | undefined;
+            const mp = ctx.memoryMonitor?.getState?.() as { pressurePercent?: number; state?: string } | undefined;
+            const parts: string[] = [];
+            if (cr) {
+              if (cr.failed) parts.push(`${cr.failed} check${cr.failed > 1 ? 's' : ''} failing`);
+              else if (cr.passed) parts.push(`${cr.passed} checks passed`);
+            }
+            if (sr?.message) parts.push(sr.message);
+            if (mp) parts.push(`Memory ${Math.round(mp.pressurePercent ?? 0)}%`);
+            return parts.join(' · ') || 'All checks passing';
+          }
+          case 'safety-trust':
+            return 'All gates active';
+          case 'coherence':
+            return 'Monitoring project integrity';
+          case 'scheduled-jobs': {
+            const js = ctx.scheduler?.getStatus?.();
+            if (js) {
+              const parts = [`${js.enabledJobs} jobs enabled`];
+              if (js.activeJobSessions > 0) parts.push(`${js.activeJobSessions} running`);
+              if (js.queueLength > 0) parts.push(`${js.queueLength} queued`);
+              return parts.join(' · ');
+            }
+            return 'Scheduler active';
+          }
+          case 'quota': {
+            const qs = ctx.quotaTracker?.getState?.();
+            if (qs) {
+              const parts = [`Weekly usage ${Math.round(qs.usagePercent)}%`];
+              if (qs.fiveHourPercent != null) parts.push(`5h rate ${Math.round(qs.fiveHourPercent)}%`);
+              return parts.join(' · ');
+            }
+            return 'Tracking usage';
+          }
+          case 'telegram': {
+            const ts = ctx.telegram?.getStatus?.();
+            if (ts) {
+              const parts: string[] = [];
+              if (ts.uptime) {
+                const hrs = Math.floor(ts.uptime / 3600000);
+                const mins = Math.floor((ts.uptime % 3600000) / 60000);
+                parts.push(`Connected ${hrs > 0 ? hrs + 'h ' : ''}${mins}m`);
+              }
+              if (ts.topicMappings > 0) parts.push(`${ts.topicMappings} topic${ts.topicMappings > 1 ? 's' : ''} linked`);
+              return parts.join(' · ') || 'Connected';
+            }
+            return 'Connected';
+          }
+          case 'whatsapp':
+            return 'Connected';
+          case 'slack':
+            return 'Connected';
+          case 'message-routing':
+            return 'Routing active';
+          case 'memory': {
+            return 'Context assembly active';
+          }
+          case 'evolution': {
+            const ed = ctx.evolution?.getDashboard?.() as { evolution?: { totalProposals?: number }; gaps?: { totalGaps?: number } } | undefined;
+            if (ed) {
+              const parts: string[] = [];
+              if (ed.evolution?.totalProposals) parts.push(`${ed.evolution.totalProposals} proposals`);
+              if (ed.gaps?.totalGaps) parts.push(`${ed.gaps.totalGaps} gaps tracked`);
+              return parts.join(' · ') || 'Monitoring capabilities';
+            }
+            return 'Monitoring capabilities';
+          }
+          case 'infrastructure': {
+            const tunnelUrl = ctx.tunnel?.getExternalUrl?.('/');
+            if (tunnelUrl) return 'Tunnel active';
+            return 'Running';
+          }
+          default:
+            return 'Active';
+        }
+      } catch {
+        return 'Active';
+      }
+    }
+
     const activeCapabilities: ActiveCapability[] = [];
     const issues: Issue[] = [];
 
     for (const def of capabilityDefs) {
       const configuredProcesses = def.processes.filter(p => p.subsystem != null);
-      if (configuredProcesses.length === 0) continue; // Skip entirely unconfigured capabilities
+      if (configuredProcesses.length === 0) continue;
 
       const processResults: { name: string; status: 'running' | 'error'; details?: unknown }[] = [];
       let hasError = false;
@@ -6127,6 +6313,7 @@ export function createRoutes(ctx: RouteContext): Router {
         label: def.label,
         description: def.description,
         status: hasError ? 'error' : 'active',
+        metric: getCapabilityMetric(def.id),
         processes: processResults.map(p => ({ name: p.name, status: p.status })),
       });
     }
