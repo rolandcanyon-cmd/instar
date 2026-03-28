@@ -3575,6 +3575,15 @@ export class TelegramAdapter implements MessagingAdapter {
   }
 
   /**
+   * Handle a forwarded callback query from the Lifeline process.
+   * In send-only mode the server doesn't poll for callbacks, so the
+   * Lifeline forwards them via /internal/telegram-callback.
+   */
+  async handleForwardedCallback(query: any): Promise<void> {
+    await this.processCallbackQuery(query);
+  }
+
+  /**
    * Handle a Telegram callback query from an inline keyboard button press.
    */
   private async processCallbackQuery(query: NonNullable<TelegramUpdate['callback_query']>): Promise<void> {
