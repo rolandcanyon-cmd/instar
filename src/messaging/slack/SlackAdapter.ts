@@ -508,8 +508,6 @@ export class SlackAdapter implements MessagingAdapter {
     const threadTs = event.thread_ts as string | undefined;
     const files = event.files as Array<Record<string, unknown>> | undefined;
 
-    console.log(`[slack] Message received: user=${userId} channel=${channelId} subtype=${event.subtype ?? 'none'} files=${files?.length ?? 0} text="${text.slice(0, 50)}"`);
-
     // Skip bot messages and most subtypes (edits, deletes, etc.)
     // Allow file_share subtype through — that's how Slack sends messages with attachments
     if (event.bot_id) return;
