@@ -167,7 +167,8 @@ export class TelegramLifeline {
   private lifelineTopicId: number | null = null;
   private lockPath: string;
   private consecutive409s = 0;
-  private pollBackoffMs = 2000; // Grows on 409 errors
+  private consecutive429s = 0;
+  private pollBackoffMs = 2000; // Grows on 409/429 errors
 
   // Doctor session tracking (Crash Recovery UX)
   private activeDoctorSession: string | null = null;
@@ -426,8 +427,9 @@ export class TelegramLifeline {
         // messages that were already processed.
         this.saveOffset();
       }
-      // Success — reset 409 backoff
+      // Success — reset backoff counters
       this.consecutive409s = 0;
+      this.consecutive429s = 0;
       this.pollBackoffMs = this.config.pollIntervalMs ?? 2000;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -443,6 +445,16 @@ export class TelegramLifeline {
         this.pollBackoffMs = Math.min(60_000, 2000 * Math.pow(2, this.consecutive409s));
         if (this.consecutive409s === 1 || this.consecutive409s % 10 === 0) {
           console.warn(`[Lifeline] Telegram 409 Conflict (${this.consecutive409s}x) — another bot instance is polling. Backing off to ${this.pollBackoffMs / 1000}s`);
+        }
+      } else if (errMsg.includes('429') || errMsg.includes('rate limited')) {
+        // Handle 429 Too Many Requests — back off the poll loop itself
+        // The per-call retry in apiCall() handles individual requests, but if the
+        // rate limit persists across calls, the poll loop must also slow down.
+        this.consecutive429s++;
+        // Exponential backoff: 10s, 20s, 40s, 60s max
+        this.pollBackoffMs = Math.min(60_000, 5000 * Math.pow(2, this.consecutive429s));
+        if (this.consecutive429s === 1 || this.consecutive429s % 5 === 0) {
+          console.warn(`[Lifeline] Telegram 429 rate limit (${this.consecutive429s}x) — backing off poll to ${this.pollBackoffMs / 1000}s`);
         }
       } else if (!errMsg.includes('abort')) {
         // Non-fatal error — continue polling
