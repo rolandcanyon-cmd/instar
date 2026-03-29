@@ -4170,8 +4170,8 @@ export async function startServer(options: StartOptions): Promise<void> {
           // Route through ThreadlineRouter (cold-spawn path)
           const envelope = {
             schemaVersion: 1 as const,
-            message: { id: msg.messageId ?? crypto.randomUUID(), from: { agent: senderName, session: 'relay', machine: 'relay' }, to: { agent: config.projectName, session: 'best', machine: 'local' }, subject: 'Relay message', body: textContent, type: 'query' as const, priority: 'medium' as const, threadId: msg.threadId, createdAt: new Date().toISOString() },
-            transport: { protocol: 'relay' as const, origin: { agent: senderName, machine: 'relay' }, nonce: `${crypto.randomUUID()}:${new Date().toISOString()}`, timestamp: new Date().toISOString() },
+            message: { id: msg.messageId ?? crypto.randomUUID(), from: { agent: senderFingerprint, session: 'relay', machine: 'relay' }, to: { agent: config.projectName, session: 'best', machine: 'local' }, subject: 'Relay message', body: textContent, type: 'query' as const, priority: 'medium' as const, threadId: msg.threadId, createdAt: new Date().toISOString() },
+            transport: { protocol: 'relay' as const, origin: { agent: senderFingerprint, machine: 'relay' }, nonce: `${crypto.randomUUID()}:${new Date().toISOString()}`, timestamp: new Date().toISOString() },
             delivery: { status: 'delivered' as const, attempts: 1, lastAttempt: new Date().toISOString() },
           } as unknown as import('../messaging/types.js').MessageEnvelope;
 
