@@ -123,6 +123,35 @@ export class ServerSupervisor extends EventEmitter {
       console.log(`[Supervisor] Server already running in tmux session: ${this.serverSessionName}`);
       this.isRunning = true;
       this.lastHealthy = Date.now();
+      // Set spawnedAt so the startup grace period applies. Without this, a fresh
+      // Supervisor (e.g., after Lifeline self-restart for an update) has spawnedAt=0,
+      // which disables the grace check and can cause false serverDown alerts if the
+      // server responds slowly during the transition window.
+      this.spawnedAt = Date.now();
+      // Check for planned-exit-marker or restart-requested flag — if present,
+      // pre-set maintenance wait so handleUnhealthy() suppresses alerts.
+      if (this.stateDir) {
+        const markerPath = path.join(this.stateDir, 'state', 'planned-exit-marker.json');
+        const restartPath = path.join(this.stateDir, 'state', 'restart-requested.json');
+        try {
+          if (fs.existsSync(markerPath)) {
+            const data = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
+            const markerAge = Date.now() - (new Date(data.exitedAt).getTime() || Date.now());
+            if (markerAge < 10 * 60_000) {
+              console.log(`[Supervisor] Found planned-exit marker on start — entering maintenance wait`);
+              this.maintenanceWaitStartedAt = new Date(data.exitedAt).getTime() || Date.now();
+              this.pendingUpdateVersion = data.targetVersion ?? null;
+            }
+          } else if (fs.existsSync(restartPath)) {
+            const data = JSON.parse(fs.readFileSync(restartPath, 'utf-8'));
+            if (data.plannedRestart && (!data.expiresAt || new Date(data.expiresAt).getTime() > Date.now())) {
+              console.log(`[Supervisor] Found restart-requested flag on start — entering maintenance wait`);
+              this.maintenanceWaitStartedAt = Date.now();
+              this.pendingUpdateVersion = data.targetVersion ?? null;
+            }
+          }
+        } catch { /* best-effort marker check */ }
+      }
       this.startHealthChecks();
       return true;
     }

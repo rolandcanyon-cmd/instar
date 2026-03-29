@@ -25,7 +25,7 @@ interface OutboundQueueItem {
 }
 
 const MAX_OUTBOUND_QUEUE = 100;
-const HEARTBEAT_TIMEOUT_MS = 60_000;
+const HEARTBEAT_TIMEOUT_MS = 300_000; // 5 min — quiet channels have no events; only detect zombie connections
 const MAX_BACKOFF_MS = 60_000;
 const TOO_MANY_WS_DELAY_MS = 30_000;
 
@@ -116,7 +116,9 @@ export class SocketModeClient {
 
     this.ws.addEventListener('message', (event: MessageEvent) => {
       this.lastEventAt = Date.now();
-      this._handleRawMessage(typeof event.data === 'string' ? event.data : String(event.data));
+      const raw = typeof event.data === 'string' ? event.data : String(event.data);
+      console.log(`[slack-socket] Raw WS message: ${raw.slice(0, 200)}`);
+      this._handleRawMessage(raw);
     });
 
     this.ws.addEventListener('close', (event: Event & { reason?: string; code?: number }) => {
@@ -141,6 +143,12 @@ export class SocketModeClient {
       console.error('[slack-socket] Failed to parse WebSocket message');
       return;
     }
+
+    // Debug: log all incoming envelopes
+    const eventType = envelope.type === 'events_api'
+      ? ((envelope.payload as Record<string, unknown>)?.event as Record<string, unknown>)?.type as string ?? 'unknown'
+      : envelope.type;
+    console.log(`[slack-socket] Envelope: type=${envelope.type} event=${eventType} id=${envelope.envelope_id ?? 'none'}`);
 
     // Handle disconnect events (no envelope_id to ack)
     if (envelope.type === 'disconnect') {
@@ -217,14 +225,14 @@ export class SocketModeClient {
     this.heartbeatTimer = setInterval(() => {
       const elapsed = Date.now() - this.lastEventAt;
       if (elapsed > HEARTBEAT_TIMEOUT_MS) {
-        console.warn('[slack-socket] No events for 60s — connection presumed dead, reconnecting');
+        console.warn('[slack-socket] No events for 5min — connection presumed dead, reconnecting');
         if (this.ws) {
           this.ws.close();
           this.ws = null;
         }
         // Close event handler will trigger reconnect
       }
-    }, HEARTBEAT_TIMEOUT_MS / 2); // Check every 30s
+    }, HEARTBEAT_TIMEOUT_MS / 2); // Check every 2.5min
   }
 
   private _clearHeartbeat(): void {

@@ -13,9 +13,9 @@
  * - JSON-encoded context files (no delimiter-based injection)
  *
  * Required bot scopes (each event subscription requires its read scope):
- *   app_mentions:read, channels:history, channels:manage, channels:read,
- *   chat:write, files:read, groups:history, im:history, im:read, im:write,
- *   pins:write, reactions:read, reactions:write, users:read
+ *   app_mentions:read, channels:history, channels:join, channels:manage,
+ *   channels:read, chat:write, files:read, groups:history, im:history,
+ *   im:read, im:write, pins:write, reactions:read, reactions:write, users:read
  */
 
 import path from 'node:path';
@@ -27,7 +27,7 @@ import { ChannelManager } from './ChannelManager.js';
 import { FileHandler } from './FileHandler.js';
 import { RingBuffer } from './RingBuffer.js';
 import { MessageLogger, type LogEntry } from '../shared/MessageLogger.js';
-import type { SlackConfig, SlackMessage, PendingPrompt, InteractionPayload, InteractionAction } from './types.js';
+import type { SlackConfig, SlackMessage, PendingPrompt, InteractionPayload, InteractionAction, SlackWorkspaceMode, SlackRespondMode } from './types.js';
 import { sanitizeDisplayName, validateChannelId, escapeMrkdwn } from './sanitize.js';
 
 const RING_BUFFER_CAPACITY = 50;
@@ -48,6 +48,12 @@ export class SlackAdapter implements MessagingAdapter {
   private channelManager: ChannelManager;
   private fileHandler: FileHandler;
   private logger: MessageLogger;
+
+  // Workspace behavior (resolved from config + mode defaults)
+  private workspaceMode: SlackWorkspaceMode;
+  private autoJoinChannels: boolean;
+  private respondMode: SlackRespondMode;
+  private botUserId: string | null = null;
 
   // State
   private messageHandler: ((message: Message) => Promise<void>) | null = null;
@@ -92,6 +98,14 @@ export class SlackAdapter implements MessagingAdapter {
     if (this.authorizedUsers.size === 0) {
       console.warn('[slack] authorizedUserIds is empty — all messages will be rejected (fail-closed)');
     }
+
+    // Resolve workspace mode and defaults
+    this.workspaceMode = this.config.workspaceMode ?? 'dedicated';
+    const isDedicated = this.workspaceMode === 'dedicated';
+    this.autoJoinChannels = this.config.autoJoinChannels ?? isDedicated;
+    this.respondMode = this.config.respondMode ?? (isDedicated ? 'all' : 'mention-only');
+
+    console.log(`[slack] Workspace mode: ${this.workspaceMode} (autoJoin: ${this.autoJoinChannels}, respond: ${this.respondMode})`);
 
     // Initialize components
     this.apiClient = new SlackApiClient(this.config.botToken, this.config.appToken);
@@ -146,6 +160,22 @@ export class SlackAdapter implements MessagingAdapter {
 
     await Promise.race([connectPromise, timeoutPromise]);
     this.started = true;
+
+    // Fetch bot user ID (needed for @mention detection in shared mode)
+    try {
+      const authResult = await this.apiClient.call('auth.test', {}) as Record<string, unknown>;
+      this.botUserId = authResult.user_id as string ?? null;
+      if (this.botUserId) {
+        console.log(`[slack] Bot user ID: ${this.botUserId}`);
+      }
+    } catch {
+      console.warn('[slack] Could not fetch bot user ID — mention detection may not work');
+    }
+
+    // Auto-join all public channels if in dedicated mode
+    if (this.autoJoinChannels) {
+      this._autoJoinAllChannels();
+    }
 
     // Start pending prompt TTL eviction
     this._startPromptEviction();
@@ -218,6 +248,15 @@ export class SlackAdapter implements MessagingAdapter {
   }
 
   // ── Slack-Specific Public Methods ──
+
+  /** Get the current workspace behavior config. */
+  getWorkspaceConfig(): { mode: SlackWorkspaceMode; autoJoinChannels: boolean; respondMode: SlackRespondMode } {
+    return {
+      mode: this.workspaceMode,
+      autoJoinChannels: this.autoJoinChannels,
+      respondMode: this.respondMode,
+    };
+  }
 
   /** Check if a user is authorized. */
   isAuthorized(userId: string): boolean {
@@ -447,8 +486,18 @@ export class SlackAdapter implements MessagingAdapter {
       await this._handleMessage(event);
     } else if (type === 'file_shared') {
       await this._handleFileShared(event);
+    } else if (type === 'channel_created' && this.autoJoinChannels) {
+      // Auto-join newly created channels in dedicated mode
+      const channel = event.channel as Record<string, unknown> | undefined;
+      const newChannelId = channel?.id as string ?? event.channel as string;
+      if (newChannelId) {
+        this.apiClient.call('conversations.join', { channel: newChannelId }).then(() => {
+          console.log(`[slack] Auto-joined new channel ${newChannelId}`);
+        }).catch((err) => {
+          console.warn(`[slack] Could not auto-join new channel: ${(err as Error).message}`);
+        });
+      }
     }
-    // reaction_added, app_mention can be handled later
   }
 
   private async _handleMessage(event: Record<string, unknown>): Promise<void> {
@@ -457,14 +506,30 @@ export class SlackAdapter implements MessagingAdapter {
     const channelId = event.channel as string;
     const ts = event.ts as string;
     const threadTs = event.thread_ts as string | undefined;
+    const files = event.files as Array<Record<string, unknown>> | undefined;
 
-    // Skip bot messages and subtypes (edits, deletes, etc.)
-    if (event.bot_id || event.subtype) return;
+    console.log(`[slack] Message received: user=${userId} channel=${channelId} subtype=${event.subtype ?? 'none'} files=${files?.length ?? 0} text="${text.slice(0, 50)}"`);
+
+    // Skip bot messages and most subtypes (edits, deletes, etc.)
+    // Allow file_share subtype through — that's how Slack sends messages with attachments
+    if (event.bot_id) return;
+    const subtype = event.subtype as string | undefined;
+    if (subtype && subtype !== 'file_share') return;
     if (!userId || !channelId) return;
 
     // AuthGate — fail-closed
     if (!this.isAuthorized(userId)) {
       return; // Silently drop unauthorized messages
+    }
+
+    // In mention-only mode, skip messages that don't @mention the bot (except DMs and commands)
+    const isDM = channelId.startsWith('D');
+    if (this.respondMode === 'mention-only' && !isDM && !this._isBotMentioned(text)) {
+      // Still populate ring buffer for context, but don't process
+      const buffer = this.channelHistory.get(channelId) ?? new RingBuffer<SlackMessage>(RING_BUFFER_CAPACITY);
+      buffer.push({ ts, user: userId, text, channel: channelId, thread_ts: threadTs });
+      this.channelHistory.set(channelId, buffer);
+      return;
     }
 
     // Handle commands (Slack intercepts / prefix, so we use ! prefix)
@@ -475,9 +540,44 @@ export class SlackAdapter implements MessagingAdapter {
       if (handled) return;
     }
 
+    // Strip @mention of the bot from message text (so sessions see clean content)
+    let cleanText = text;
+    if (this.botUserId) {
+      cleanText = text.replace(new RegExp(`<@${this.botUserId}>\\s*`, 'g'), '').trim();
+    }
+
+    // Download attached files (images, documents) and append [image:path]/[document:path] tags
+    const filePaths: string[] = [];
+    if (files && files.length > 0) {
+      for (const file of files) {
+        const url = file.url_private as string;
+        const mimetype = file.mimetype as string ?? '';
+        const filename = file.name as string ?? 'file';
+        if (!url) continue;
+
+        try {
+          const isImage = mimetype.startsWith('image/');
+          const destName = `${isImage ? 'photo' : 'file'}-${Date.now()}-${file.id ?? ts}.${filename.split('.').pop() ?? 'bin'}`;
+          const destPath = path.join(this.fileHandler.downloadDir, destName);
+          const savedPath = await this.fileHandler.downloadFile(url, destPath);
+          filePaths.push(savedPath);
+
+          if (isImage) {
+            cleanText = cleanText ? `${cleanText} [image:${savedPath}]` : `[image:${savedPath}]`;
+          } else {
+            cleanText = cleanText ? `${cleanText} [document:${savedPath}]` : `[document:${savedPath}]`;
+          }
+        } catch (err) {
+          console.warn(`[slack] Failed to download file ${filename}: ${(err as Error).message}`);
+          const isImage = mimetype.startsWith('image/');
+          cleanText = cleanText ? `${cleanText} [${isImage ? 'image' : 'document'}:download-failed]` : `[${isImage ? 'image' : 'document'}:download-failed]`;
+        }
+      }
+    }
+
     // Populate ring buffer (authorized messages only — prevents cache poisoning)
     const buffer = this.channelHistory.get(channelId) ?? new RingBuffer<SlackMessage>(RING_BUFFER_CAPACITY);
-    buffer.push({ ts, user: userId, text, channel: channelId, thread_ts: threadTs });
+    buffer.push({ ts, user: userId, text: cleanText, channel: channelId, thread_ts: threadTs });
     this.channelHistory.set(channelId, buffer);
 
     // Resolve user name
@@ -493,7 +593,7 @@ export class SlackAdapter implements MessagingAdapter {
     const logEntry: LogEntry = {
       messageId: ts,
       channelId,
-      text,
+      text: cleanText,
       fromUser: true,
       timestamp: new Date(parseFloat(ts) * 1000).toISOString(),
       sessionName: null,
@@ -511,7 +611,7 @@ export class SlackAdapter implements MessagingAdapter {
     const message: Message = {
       id: `slack-${ts}`,
       userId,
-      content: text,
+      content: cleanText,
       channel: {
         type: 'slack',
         identifier: channelId,
@@ -523,7 +623,7 @@ export class SlackAdapter implements MessagingAdapter {
         ts,
         threadTs: threadTs,
         channelId,
-        isDM: channelId.startsWith('D'),
+        isDM,
       },
     };
 
@@ -579,6 +679,8 @@ export class SlackAdapter implements MessagingAdapter {
   }
 
   private async _handleFileShared(event: Record<string, unknown>): Promise<void> {
+    // Files attached to messages are handled inline in _handleMessage.
+    // This handler catches standalone file_shared events (e.g., drag-and-drop without text).
     const userId = event.user_id as string ?? event.user as string;
 
     // AuthGate — check before download (prevents disk exhaustion from unauthorized users)
@@ -586,8 +688,13 @@ export class SlackAdapter implements MessagingAdapter {
       return;
     }
 
-    // File handling would download and route to session
-    // Full implementation depends on session injection patterns
+    // Standalone file_shared events are rare — most files come as message attachments.
+    // The file_id is in the event, but we'd need files.info to get the URL.
+    // For now, message-embedded files (handled in _handleMessage) cover the primary use case.
+    const fileId = event.file_id as string;
+    if (fileId) {
+      console.log(`[slack] file_shared event for ${fileId} — handled inline with message`);
+    }
   }
 
   // ── Prompt Gate ──
@@ -852,6 +959,50 @@ export class SlackAdapter implements MessagingAdapter {
         // Unknown command — don't handle, let it pass through as a regular message
         return false;
     }
+  }
+
+  /**
+   * Auto-join all public channels in the workspace.
+   * Only called in dedicated mode or when autoJoinChannels is true.
+   * Runs asynchronously — doesn't block startup.
+   */
+  private async _autoJoinAllChannels(): Promise<void> {
+    try {
+      const result = await this.apiClient.call('conversations.list', {
+        types: 'public_channel',
+        limit: 200,
+        exclude_archived: true,
+      }) as Record<string, unknown>;
+
+      const channels = (result.channels ?? []) as Array<Record<string, unknown>>;
+      let joined = 0;
+
+      for (const ch of channels) {
+        if (ch.is_member) continue;
+        try {
+          await this.apiClient.call('conversations.join', { channel: ch.id });
+          joined++;
+        } catch (err) {
+          // channels:join scope might not be available — log and continue
+          console.warn(`[slack] Could not auto-join #${ch.name}: ${(err as Error).message}`);
+        }
+      }
+
+      if (joined > 0) {
+        console.log(`[slack] Auto-joined ${joined} channel(s)`);
+      }
+    } catch (err) {
+      console.warn(`[slack] Auto-join channel scan failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Check if a message mentions the bot (via @mention).
+   * Slack encodes mentions as <@U12345> in message text.
+   */
+  private _isBotMentioned(text: string): boolean {
+    if (!this.botUserId) return false;
+    return text.includes(`<@${this.botUserId}>`);
   }
 
   private _chunkText(text: string): string[] {

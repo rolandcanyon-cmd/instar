@@ -4,6 +4,20 @@
 
 // ── Configuration ──
 
+/**
+ * Workspace mode determines default behaviors:
+ * - "dedicated": Workspace created for the agent. Auto-join channels, respond to all messages.
+ * - "shared": Pre-existing workspace. Don't auto-join, only respond when @mentioned.
+ */
+export type SlackWorkspaceMode = 'dedicated' | 'shared';
+
+/**
+ * When the agent responds to messages:
+ * - "all": Respond to every message in channels the agent is in.
+ * - "mention-only": Only respond when @mentioned (or in DMs).
+ */
+export type SlackRespondMode = 'all' | 'mention-only';
+
 export interface SlackConfig {
   /** Bot token (xoxb-...) from OAuth installation */
   botToken: string;
@@ -18,6 +32,24 @@ export interface SlackConfig {
    * REQUIRED — fail-closed. Empty array = reject all messages.
    */
   authorizedUserIds: string[];
+  /**
+   * Workspace mode — sets defaults for autoJoinChannels and respondMode.
+   * "dedicated" (default): auto-join on, respond to all.
+   * "shared": no auto-join, mention-only.
+   */
+  workspaceMode?: SlackWorkspaceMode;
+  /**
+   * Whether the bot automatically joins new public channels.
+   * Default depends on workspaceMode: true for dedicated, false for shared.
+   * Requires the channels:join scope.
+   */
+  autoJoinChannels?: boolean;
+  /**
+   * When the agent responds to messages in channels.
+   * Default depends on workspaceMode: "all" for dedicated, "mention-only" for shared.
+   * DMs always use "all" mode regardless of this setting.
+   */
+  respondMode?: SlackRespondMode;
   /** Audio file transcription provider */
   audioTranscriptionProvider?: 'groq' | 'openai';
   /** Stall detection timeout in minutes (default: 5) */

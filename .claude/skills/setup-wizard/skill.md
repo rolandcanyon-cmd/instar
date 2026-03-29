@@ -1621,8 +1621,8 @@ Build the app manifest JSON with minimal Phase 1 scopes:
   "oauth_config": {
     "scopes": {
       "bot": [
-        "channels:history", "channels:manage", "channels:read",
-        "chat:write", "im:history", "im:read", "im:write",
+        "channels:history", "channels:join", "channels:manage", "channels:read",
+        "chat:write", "files:read", "groups:history", "im:history", "im:read", "im:write",
         "pins:write", "reactions:read", "reactions:write", "users:read"
       ]
     }

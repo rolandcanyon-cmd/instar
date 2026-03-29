@@ -16,13 +16,14 @@
  * No flags needed. No manual config editing. Just answers.
  */
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pc from 'picocolors';
 import { detectClaudePath, detectGhPath } from '../core/Config.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
+import { allocatePort } from '../core/AgentRegistry.js';
 import type { SecretBackend } from '../core/SecretManager.js';
 import {
   runDiscovery,
@@ -32,6 +33,25 @@ import {
   type SetupDiscoveryContext,
   type SetupScenarioContext,
 } from './discovery.js';
+
+/**
+ * Try allocatePort from the registry, fall back to scanning for a free port.
+ */
+function allocatePortSafe(agentDir: string): number {
+  try {
+    return allocatePort(agentDir);
+  } catch {
+    // Registry unavailable — scan for a free port directly
+    for (let port = 4040; port <= 4099; port++) {
+      try {
+        execSync(`lsof -iTCP:${port} -sTCP:LISTEN -P -n`, { stdio: 'ignore' });
+      } catch {
+        return port; // lsof found nothing — port is free
+      }
+    }
+    return 4040;
+  }
+}
 
 /**
  * Launch the conversational setup wizard via Claude Code.
@@ -1172,7 +1192,7 @@ export async function runNonInteractiveSetup(opts: NonInteractiveOptions): Promi
   // Build config
   const config: Record<string, unknown> = {
     projectName: agentName,
-    port: 4040,
+    port: allocatePortSafe(agentDir),
     sessions: {
       tmuxPath: '/opt/homebrew/bin/tmux',
       claudePath: '/usr/local/bin/claude',

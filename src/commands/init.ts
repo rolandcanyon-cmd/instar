@@ -32,7 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import pc from 'picocolors';
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { detectTmuxPath, detectClaudePath, detectGitPath, detectGhPath, ensureStateDir, standaloneAgentsDir, getInstarVersion } from '../core/Config.js';
 import { ensurePrerequisites } from '../core/Prerequisites.js';
 import { allocatePort, registerAgent, validateAgentName } from '../core/AgentRegistry.js';
@@ -53,6 +53,24 @@ import {
   generateSoulMd,
 } from '../scaffold/templates.js';
 import type { InstarConfig } from '../core/types.js';
+
+/**
+ * Find a free port in the default range (4040-4099) by checking if anything
+ * is listening. Used as fallback when allocatePort() fails (e.g., registry
+ * is corrupted or locked).
+ */
+function findFreePortFallback(): number {
+  for (let port = 4040; port <= 4099; port++) {
+    try {
+      execSync(`lsof -iTCP:${port} -sTCP:LISTEN -P -n`, { stdio: 'ignore' });
+      // lsof found a listener — port is in use
+    } catch {
+      // lsof found nothing — port is free
+      return port;
+    }
+  }
+  return 4040; // All ports in range are busy — return default and let server fail with a clear error
+}
 
 interface InitOptions {
   dir?: string;
@@ -151,7 +169,7 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
       port = allocatePort(projectDir);
       console.log(`  ${pc.green('✓')} Auto-allocated port ${port} (from ~/.instar/registry.json)`);
     } catch {
-      port = 4040; // Fallback to default
+      port = findFreePortFallback();
     }
   }
 
@@ -458,7 +476,7 @@ async function initExistingProject(options: InitOptions): Promise<void> {
     try {
       port = allocatePort(projectDir);
     } catch {
-      port = 4040;
+      port = findFreePortFallback();
     }
   }
 
@@ -810,7 +828,7 @@ async function initStandaloneAgent(agentName: string, options: InitOptions): Pro
       port = allocatePort(projectDir);
       console.log(`  ${pc.green('✓')} Auto-allocated port ${port}`);
     } catch {
-      port = 4040;
+      port = findFreePortFallback();
     }
   }
 

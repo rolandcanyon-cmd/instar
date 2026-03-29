@@ -2506,7 +2506,26 @@ export async function startServer(options: StartOptions): Promise<void> {
           }, null, 2);
           fs.writeFileSync(ctxPath, contextData);
 
-          const bootstrapMessage = `${prefix} ${message.content} (IMPORTANT: Read ${ctxPath} for thread history and Slack relay instructions — you MUST relay your response back.)`;
+          // Transform [image:path] and [document:path] tags into explicit read instructions
+          let transformedContent = message.content.replace(
+            /\[image:([^\]]+)\]/g,
+            (_, imagePath: string) => {
+              if (imagePath === 'download-failed') {
+                return '[User sent a photo but the download failed]';
+              }
+              return `[User sent a photo — read the image file at ${imagePath} to view it]`;
+            },
+          ).replace(
+            /\[document:([^\]]+)\]/g,
+            (_, docPath: string) => {
+              if (docPath === 'download-failed') {
+                return '[User sent a file but the download failed]';
+              }
+              return `[User sent a file — it has been saved to ${docPath}. Read the file to view its contents]`;
+            },
+          );
+
+          const bootstrapMessage = `${prefix} ${transformedContent} (IMPORTANT: Read ${ctxPath} for thread history and Slack relay instructions — you MUST relay your response back.)`;
 
           // Check for existing session bound to this channel
           const existingSession = slackAdapter!.getSessionForChannel(channelId);
