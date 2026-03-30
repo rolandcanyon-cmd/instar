@@ -5,7 +5,7 @@
 > consistent user experience regardless of which platform an agent communicates through.
 >
 > **Maintained by**: Echo (instar developer agent)
-> **Last updated**: 2026-03-29
+> **Last updated**: 2026-03-30
 
 ---
 
@@ -18,7 +18,7 @@
 | 1.1.1 | Text messages | Plain text from user | Yes | Yes | - |
 | 1.1.2 | Photo/image messages | User sends photo, downloaded to disk, passed as `[image:path]` | Yes | Yes | - |
 | 1.1.3 | Document/file messages | User sends file, downloaded with original filename, passed as `[document:path]` | Yes | Yes (via file_share subtype) | - |
-| 1.1.4 | Voice messages | User sends voice memo, transcribed via Whisper (Groq/OpenAI), passed as `[voice] transcript` | Yes | No | - |
+| 1.1.4 | Voice messages | User sends voice memo, transcribed via Whisper (Groq/OpenAI), passed as `[voice] transcript` | Yes | Yes (v0.25.0: transcribeVoice callback; Groq/OpenAI) | - |
 | 1.1.5 | Sticker messages | Silently ignored | N/A | N/A | - |
 | 1.1.6 | Callback queries | Inline keyboard button presses (Prompt Gate responses) | Yes | Yes (Block Kit actions) | - |
 | 1.1.7 | Forwarded messages | Silently rejected (prevents forwarding attacks on Prompt Gate) | Blocked | Not implemented | - |
@@ -64,7 +64,7 @@
 | 3.1.1 | Channel-session registry | Bidirectional mapping persisted to disk | Yes (topicToSession/sessionToTopic) | Yes (channelToSession) | - |
 | 3.1.2 | Session spawn on message | Auto-spawn Claude session when user sends message | Yes | Yes | - |
 | 3.1.3 | Session resume | Resume previous session using stored UUID | Yes (TopicResumeMap) | Yes (channelResumeMap, 24h expiry) | - |
-| 3.1.4 | Session resume UUID proactive save | Save UUID before session ends for next resume | Yes | No | - |
+| 3.1.4 | Session resume UUID proactive save | Save UUID before session ends for next resume | Yes | Yes (v0.25.0: beforeSessionKill hook) | - |
 | 3.1.5 | Message injection into live session | Inject subsequent messages via tmux send-keys | Yes (`injectTelegramMessage`) | Yes (tmux send-keys in server.ts) | - |
 | 3.1.6 | Stuck session recovery | Kill stuck sessions and respawn on new message | No (injects anyway) | Yes (v0.24.29: kills and respawns) | - |
 | 3.1.7 | Wait for Claude ready | Wait for Claude prompt before injecting | Yes (`waitForClaudeReady`) | Yes (15s timeout) | - |
@@ -76,12 +76,12 @@
 | 3.2.1 | Image tag transformation | `[image:path]` → explicit read instruction for Claude | Yes | Yes | - |
 | 3.2.2 | Document tag transformation | `[document:path]` → explicit read instruction | Yes | Yes | - |
 | 3.2.3 | Voice tag transformation | `[voice] transcript` handling | Yes | N/A (voice not supported yet) | - |
-| 3.2.4 | Long message temp files | Messages >500 chars written to temp file, reference injected | Yes (`/tmp/instar-telegram/`) | No (full message injected) | - |
+| 3.2.4 | Long message temp files | Messages >500 chars written to temp file, reference injected | Yes (`/tmp/instar-telegram/`) | Yes (v0.25.0: >500 chars → `/tmp/instar-slack/`) | - |
 | 3.2.5 | Injection tag format | `[telegram:N "topic" from User (uid:123)]` | Yes | `[slack:CHANNEL_ID]` (no sender info) | - |
-| 3.2.6 | Sender name sanitization | Strip control chars, collapse whitespace, neuter instruction-framing | Yes | No | - |
+| 3.2.6 | Sender name sanitization | Strip control chars, collapse whitespace, neuter instruction-framing | Yes | Yes (v0.25.0) | - |
 | 3.2.7 | Topic name sanitization | Lowercase ALL-CAPS patterns, strip injection attempts | Yes | No | - |
 | 3.2.8 | Bracketed paste mode | Multi-line injection via terminal escape sequences | Yes | No (uses cat + tmux) | - |
-| 3.2.9 | Idle prompt timer reset | Clear zombie-kill timer on message injection | Yes | No | - |
+| 3.2.9 | Idle prompt timer reset | Clear zombie-kill timer on message injection | Yes | Yes (v0.25.0: sessionManager.injectMessage) | - |
 
 ### 3.3 Session Context
 
@@ -100,7 +100,7 @@
 | # | Feature | Description | Telegram | Slack | WhatsApp |
 |---|---------|-------------|----------|-------|----------|
 | 4.1 | Immediate acknowledgment | Mandatory brief ack when receiving a message | Yes (CLAUDE.md instruction) | Yes (CLAUDE.md instruction) | - |
-| 4.2 | Delivery confirmation | `✓ Delivered` message after injection | Yes (when adapter owns polling) | No | - |
+| 4.2 | Delivery confirmation | `✓ Delivered` message after injection | Yes (when adapter owns polling) | Yes (v0.25.0: ✅ reaction after injection) | - |
 | 4.3 | Reaction on receipt | Add reaction emoji when message received | No | Yes (👀 eyes, then ✅ on complete) | - |
 | 4.4 | Reaction on completion | Replace receipt reaction with completion | No | Yes (remove 👀, add ✅) | - |
 
@@ -115,10 +115,10 @@
 | 5.3 | Tier 3 standby (5min) | Sonnet assesses if agent is stuck | Yes | Yes | - |
 | 5.4 | Standby cancellation on response | Cancel timer when agent responds | Yes (via onMessageLogged fromUser:false) | Yes (v0.24.26: /slack/reply fires synthetic event) | - |
 | 5.5 | Platform isolation | Standby only fires for platform where user sent message | Yes | Yes (v0.24.25: removed Telegram→Slack mirroring) | - |
-| 5.6 | Standby commands | `unstick`, `restart`, `quiet`, `resume` | Yes | No (commands not routed to PresenceProxy) | - |
-| 5.7 | Silence duration | Suppress standby for 30min after `quiet` | Yes | No | - |
+| 5.6 | Standby commands | `unstick`, `restart`, `quiet`, `resume` | Yes | Yes (v0.25.0: onStandbyCommand → PresenceProxy) | - |
+| 5.7 | Silence duration | Suppress standby for 30min after `quiet` | Yes | Yes (v0.25.0) | - |
 | 5.8 | Conversation history in standby | Multi-turn context in tiered messages | Yes | No (state not carried across tiers) | - |
-| 5.9 | State persistence/recovery | Recover standby state after server restart | Yes (disk-persisted) | No (lost on restart) | - |
+| 5.9 | State persistence/recovery | Recover standby state after server restart | Yes (disk-persisted) | Yes (v0.25.0: channel map pre-populated on startup) | - |
 
 ---
 
@@ -126,13 +126,13 @@
 
 | # | Feature | Description | Telegram | Slack | WhatsApp |
 |---|---------|-------------|----------|-------|----------|
-| 6.1 | Stall tracking | Track injected messages, alert if no response within timeout | Yes (5min default) | No | - |
+| 6.1 | Stall tracking | Track injected messages, alert if no response within timeout | Yes (5min default) | Yes (v0.25.0: trackMessageInjection, 5min default) | - |
 | 6.2 | LLM-gated stall alerts | Confirm stall with Haiku before alerting user (prevents false positives) | Yes | No | - |
 | 6.3 | Promise tracking | Detect "give me a minute" patterns, alert if not followed through | Yes (10min default) | No | - |
 | 6.4 | Stall triage (StallTriageNurse) | LLM-powered diagnosis and recovery | Yes | No | - |
 | 6.5 | Triage orchestrator | Advanced multi-step triage with diagnostic sessions | Yes | No | - |
-| 6.6 | `/interrupt` command | Send Escape to unstick session | Yes | No | - |
-| 6.7 | `/restart` command | Kill and respawn session | Yes | No | - |
+| 6.6 | `/interrupt` command | Send Escape to unstick session | Yes | Yes (v0.25.0: !interrupt) | - |
+| 6.7 | `/restart` command | Kill and respawn session | Yes | Yes (v0.25.0: !restart) | - |
 | 6.8 | `/triage` command | Show triage status | Yes | No | - |
 | 6.9 | Session death classification | Classify exit cause (quota, timeout, error) | Yes | No | - |
 
@@ -145,11 +145,11 @@
 | 7.1 | `/sessions` or `!sessions` | List running sessions with claim status | Yes | Yes | - |
 | 7.2 | `/new` | Create new forum topic/channel | Yes | Yes (`!new`) | - |
 | 7.3 | `/help` | Show available commands | Yes | Yes (`!help`) | - |
-| 7.4 | `/claim` or `/link` | Bind session to topic/channel | Yes | No | - |
-| 7.5 | `/unlink` | Unbind session from topic/channel | Yes | No | - |
-| 7.6 | `/interrupt` | Send Escape to session | Yes | No | - |
-| 7.7 | `/restart` | Kill and respawn session | Yes | No | - |
-| 7.8 | `/status` | Show adapter status | Yes | No | - |
+| 7.4 | `/claim` or `/link` | Bind session to topic/channel | Yes | Yes (v0.25.0: !claim) | - |
+| 7.5 | `/unlink` | Unbind session from topic/channel | Yes | Yes (v0.25.0: !unlink) | - |
+| 7.6 | `/interrupt` | Send Escape to session | Yes | Yes (v0.25.0: !interrupt) | - |
+| 7.7 | `/restart` | Kill and respawn session | Yes | Yes (v0.25.0: !restart) | - |
+| 7.8 | `/status` | Show adapter status | Yes | Yes (v0.25.0: !status via getStatus()) | - |
 | 7.9 | `/flush` | Flush batched notifications | Yes | No | - |
 | 7.10 | `/triage` | Show triage status | Yes | No | - |
 | 7.11 | `/switch-account` or `/sa` | Switch active Claude account | Yes | No | - |
@@ -163,11 +163,11 @@
 
 | # | Feature | Description | Telegram | Slack | WhatsApp |
 |---|---------|-------------|----------|-------|----------|
-| 8.1 | Tiered notifications | IMMEDIATE, SUMMARY (30min), DIGEST (2h) | Yes | Partial (IMMEDIATE only via attention channel) | - |
-| 8.2 | Notification batcher | Aggregate non-urgent notifications | Yes | No | - |
+| 8.1 | Tiered notifications | IMMEDIATE, SUMMARY (30min), DIGEST (2h) | Yes | Yes (v0.25.0: all tiers route to attention channel) | - |
+| 8.2 | Notification batcher | Aggregate non-urgent notifications | Yes | Partial (v0.25.0: all tiers delivered; no batching/deduplication logic) | - |
 | 8.3 | Quiet hours | Suppress notifications during configured hours | Yes | No | - |
 | 8.4 | Attention channel/topic | Dedicated channel for critical alerts | Yes (Agent Attention topic) | Yes (echo-agent-sys-attention) | - |
-| 8.5 | Updates channel/topic | Dedicated channel for version updates | Yes (Agent Updates topic) | No | - |
+| 8.5 | Updates channel/topic | Dedicated channel for version updates | Yes (Agent Updates topic) | Yes (v0.25.0: echo-sys-updates auto-created) | - |
 | 8.6 | Cross-platform alerts | Bridge alerts between platforms | Yes (Telegram ↔ WhatsApp) | No | - |
 
 ---
@@ -193,7 +193,7 @@
 |---|---------|-------------|----------|-------|----------|
 | 10.1 | Authorized user whitelist | Only process messages from authorized users | Yes (authorizedUserIds) | Yes (authorizedUserIds) | - |
 | 10.2 | Fail-closed auth | Empty whitelist = reject all | Yes | Yes | - |
-| 10.3 | Unknown user handling | Registration policy (admin-only/invite-only/open) | Yes | No (silently drops) | - |
+| 10.3 | Unknown user handling | Registration policy (admin-only/invite-only/open) | Yes | Partial (v0.25.0: ephemeral "not authorized" message; no registration flow) | - |
 | 10.4 | Admin join request notification | Notify admin when unknown user tries to message | Yes | No | - |
 | 10.5 | Invite code validation | Validate invite codes for open registration | Yes | No | - |
 | 10.6 | Mini onboarding flow | Guided onboarding for new users | Yes | No | - |
@@ -222,7 +222,7 @@
 | 12.3 | Full-text search | Search log by query, topic, date range | Yes (via routes) | No (no search route) | - |
 | 12.4 | Log stats | Total messages, file size | Yes (via routes) | Yes (via routes) | - |
 | 12.5 | Ring buffer | In-memory recent messages per channel | Yes (via TopicMemory/JSONL) | Yes (50-message ring buffer; includes both user and bot messages; backfilled from `conversations.history` API on startup) | - |
-| 12.6 | TopicMemory (SQLite) | Structured message storage with summaries | Yes (dual-write from onMessageLogged) | No | - |
+| 12.6 | TopicMemory (SQLite) | Structured message storage with summaries | Yes (dual-write from onMessageLogged) | Yes (v0.25.0: dual-write via synthetic channel ID) | - |
 | 12.7 | Topic auto-summarization | LLM-generated summaries on session end | Yes | No | - |
 
 ---
@@ -280,8 +280,8 @@
 |---|---------|-------------|----------|-------|----------|
 | 16.1 | Reply script | Shell script for sessions to send responses | Yes (`telegram-reply.sh`) | Yes (`slack-reply.sh`) | - |
 | 16.2 | CLAUDE.md relay section | Instructions for Claude on how to relay responses | Yes | Yes | - |
-| 16.3 | Topic context hook | UserPromptSubmit hook for fetching thread history | Yes (`telegram-topic-context.sh`) | No | - |
-| 16.4 | Channel context hook | Equivalent of topic context for Slack | No | No (needed) | - |
+| 16.3 | Topic context hook | UserPromptSubmit hook for fetching thread history | Yes (`telegram-topic-context.sh`) | N/A | - |
+| 16.4 | Channel context hook | Equivalent of topic context for Slack | No | Yes (`slack-channel-context.sh` — already existed) | - |
 
 ---
 
@@ -291,7 +291,7 @@
 |---|---------|-------------|----------|-------|----------|
 | 17.1 | Outbound content validation | Validate messages against topic/channel purpose | Yes (validateOutboundContent) | No | - |
 | 17.2 | Content classification | Classify message content by category | Yes (classifyContent) | No | - |
-| 17.3 | Sentinel intercept | Real-time message filtering before routing (emergency stop, pause, redirect) | Yes | No | - |
+| 17.3 | Sentinel intercept | Real-time message filtering before routing (emergency stop, pause, redirect) | Yes | Yes (v0.25.0: emergency-stop, pause) | - |
 | 17.4 | Input guard provenance | Check injection provenance and cross-topic blocking | Yes (injectTelegramMessage) | No | - |
 
 ---
@@ -313,7 +313,7 @@
 | 18.11 | `/slack/channels` | GET | - | Yes | List channels |
 | 18.12 | `/slack/channels` | POST | - | Yes | Create channel |
 | 18.13 | `/slack/channels/:channelId/messages` | GET | - | Yes | Fetch messages |
-| 18.14 | `/slack/search` | GET | - | No (needed) | Search log |
+| 18.14 | `/slack/search` | GET | - | Yes (already existed) | Search log |
 | 18.15 | `/slack/log-stats` | GET | - | Yes | Log statistics |
 | 18.16 | `/internal/slack-forward` | POST | - | Yes | Internal forward |
 | 18.17 | `/attention` | CRUD | Yes | Yes (shared) | Escalation queue |
