@@ -25,6 +25,16 @@ if [ -z "$MESSAGE" ]; then
   exit 1
 fi
 
+# Guard against channel flooding — truncate extremely long messages
+MAX_CHARS=4000
+if [ ${#MESSAGE} -gt $MAX_CHARS ]; then
+  ORIGINAL_LEN=${#MESSAGE}
+  MESSAGE="${MESSAGE:0:$MAX_CHARS}
+
+_(Message truncated from ${ORIGINAL_LEN} to ${MAX_CHARS} characters)_"
+  echo "Warning: message truncated from ${ORIGINAL_LEN} to ${MAX_CHARS} chars" >&2
+fi
+
 # Get port from env or config
 PORT="${INSTAR_PORT:-}"
 AUTH=""
