@@ -3319,6 +3319,14 @@ export function createRoutes(ctx: RouteContext): Router {
         });
       }
 
+      // Track for promise detection (detect "give me a minute" patterns)
+      if (ctx.slack.trackPromise) {
+        const sessionName = ctx.slack.getSessionForChannel(channelId);
+        if (sessionName) {
+          ctx.slack.trackPromise(channelId, sessionName, text);
+        }
+      }
+
       res.json({ ok: true, topicId: channelId, ts });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });

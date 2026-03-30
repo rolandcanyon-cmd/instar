@@ -80,6 +80,9 @@ export class SlackAdapter implements MessagingAdapter {
   private pendingStalls: Map<string, { channelId: string; sessionName: string; text: string; injectedAt: number }> = new Map();
   private stallCheckTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Promise tracking (matches Telegram's "give me a minute" detection)
+  private pendingPromises: Map<string, { channelId: string; sessionName: string; promiseText: string; promisedAt: number; alerted: boolean }> = new Map();
+
   // Callbacks (wired by server.ts)
   /** Called when a prompt gate response is received */
   onPromptResponse: ((channelId: string, promptId: string, value: string) => void) | null = null;
@@ -99,6 +102,12 @@ export class SlackAdapter implements MessagingAdapter {
   transcribeVoice: ((filePath: string) => Promise<string>) | null = null;
   /** Called to handle standby commands (unstick, quiet, resume, restart) */
   onStandbyCommand: ((channelId: string, command: string, userId: string) => Promise<boolean>) | null = null;
+  /** Called to get triage status for a channel's session */
+  onGetTriageStatus: ((channelId: string) => { active: boolean; classification?: string; checkCount: number; lastCheck?: string } | null) | null = null;
+  /** Called to classify why a session died */
+  onClassifySessionDeath: ((sessionName: string) => Promise<{ cause: string; detail: string } | null>) | null = null;
+  /** Intelligence provider for LLM-gated stall confirmation */
+  intelligence: { evaluate: (prompt: string, opts: { maxTokens: number; temperature: number }) => Promise<string> } | null = null;
 
   constructor(config: Record<string, unknown>, stateDir: string) {
     this.config = config as unknown as SlackConfig;
@@ -476,16 +485,64 @@ export class SlackAdapter implements MessagingAdapter {
     }
   }
 
-  /** Start periodic stall checking. */
-  startStallDetection(timeoutMs: number = 5 * 60 * 1000): void {
+  /** Start periodic stall checking (stalls + promise expiry, LLM-gated). */
+  startStallDetection(timeoutMs: number = 5 * 60 * 1000, promiseTimeoutMs: number = 10 * 60 * 1000): void {
     if (this.stallCheckTimer) return;
-    this.stallCheckTimer = setInterval(() => {
+    this.stallCheckTimer = setInterval(async () => {
       const now = Date.now();
+
+      // Check for stalled messages
       for (const [key, entry] of this.pendingStalls) {
         if (now - entry.injectedAt > timeoutMs) {
           this.pendingStalls.delete(key);
+
+          // Delegate to triage system if available
           if (this.onStallDetected) {
             this.onStallDetected(entry.channelId, entry.sessionName, entry.text, entry.injectedAt);
+            continue;
+          }
+
+          // Fallback: LLM-gated user-facing alert
+          const minutesAgo = Math.round((now - entry.injectedAt) / 60000);
+          const alive = this.onIsSessionAlive ? this.onIsSessionAlive(entry.sessionName) : true;
+          const shouldAlert = await this.confirmStallAlert({
+            type: 'stall', sessionName: entry.sessionName,
+            messageText: entry.text, minutesElapsed: minutesAgo, sessionAlive: alive,
+          });
+          if (shouldAlert) {
+            const status = alive ? 'running but not responding' : 'no longer running';
+            this.sendToChannel(entry.channelId,
+              `⚠️ No response after ${minutesAgo} minutes. "${entry.sessionName}" is ${status}.\n\n${alive ? 'Use `!interrupt` to nudge it, or `!restart` to start fresh.' : 'Send another message to start a new session.'}`
+            ).catch(() => {});
+          }
+        }
+      }
+
+      // Check for expired promises
+      if (promiseTimeoutMs > 0) {
+        for (const [channelId, promise] of this.pendingPromises) {
+          if (promise.alerted) continue;
+          if (now - promise.promisedAt < promiseTimeoutMs) continue;
+
+          promise.alerted = true;
+          const alive = this.onIsSessionAlive ? this.onIsSessionAlive(promise.sessionName) : true;
+
+          // Delegate to triage if available
+          if (this.onStallDetected) {
+            this.onStallDetected(channelId, promise.sessionName, `[promise expired] ${promise.promiseText}`, promise.promisedAt);
+            continue;
+          }
+
+          // Fallback: LLM-gated alert
+          const minutesAgo = Math.round((now - promise.promisedAt) / 60000);
+          const shouldAlert = await this.confirmStallAlert({
+            type: 'promise-expired', sessionName: promise.sessionName,
+            messageText: promise.promiseText, minutesElapsed: minutesAgo, sessionAlive: alive,
+          });
+          if (shouldAlert) {
+            this.sendToChannel(channelId,
+              `⚠️ The agent said "${promise.promiseText.slice(0, 80)}..." ${minutesAgo} minutes ago but hasn't followed up.\n\n${alive ? 'Use `!interrupt` to nudge or `!restart` to start fresh.' : 'Session has ended. Send a new message to start.'}`
+            ).catch(() => {});
           }
         }
       }
@@ -498,12 +555,99 @@ export class SlackAdapter implements MessagingAdapter {
     return this.pendingStalls.size;
   }
 
+  /** Track a promise from the agent ("give me a minute" etc.) */
+  trackPromise(channelId: string, sessionName: string, text: string): void {
+    if (this._isPromiseMessage(text)) {
+      this.pendingPromises.set(channelId, {
+        channelId,
+        sessionName,
+        promiseText: text.slice(0, 200),
+        promisedAt: Date.now(),
+        alerted: false,
+      });
+    } else if (this.pendingPromises.has(channelId) && this._isFollowThroughMessage(text)) {
+      this.pendingPromises.delete(channelId);
+    }
+  }
+
+  /** Clear promise tracking for a channel. */
+  clearPromiseTracking(channelId: string): void {
+    this.pendingPromises.delete(channelId);
+  }
+
+  private _isPromiseMessage(text: string): boolean {
+    const patterns = [
+      /give me (?:a )?(?:couple|few|some) (?:more )?minutes/i,
+      /give me (?:a )?(?:minute|moment|second|sec)/i,
+      /working on (?:it|this|that)/i,
+      /looking into (?:it|this|that)/i,
+      /let me (?:check|look|investigate|dig|research)/i,
+      /investigating/i,
+      /still (?:on it|working|looking)/i,
+      /one moment/i, /hang on/i, /bear with me/i,
+      /i'll (?:get back|follow up|check|look into)/i,
+      /narrowing (?:it |this |that )?down/i,
+    ];
+    return patterns.some(p => p.test(text));
+  }
+
+  private _isFollowThroughMessage(text: string): boolean {
+    if (text.length > 200) return true;
+    const patterns = [
+      /here(?:'s| is| are) (?:what|the)/i,
+      /i found/i,
+      /the (?:issue|problem|bug|fix|solution|answer|result)/i,
+      /done|completed|finished|resolved/i,
+      /summary|overview|analysis/i,
+    ];
+    return patterns.some(p => p.test(text));
+  }
+
+  /** LLM-gated stall alert confirmation. Returns true if alert should be sent. Fail-open. */
+  async confirmStallAlert(context: {
+    type: 'stall' | 'promise-expired';
+    sessionName: string;
+    messageText: string;
+    minutesElapsed: number;
+    sessionAlive: boolean;
+  }): Promise<boolean> {
+    if (!this.intelligence) return true;
+
+    const prompt = [
+      'You are evaluating whether to send an alert to a user about an AI agent session.',
+      '',
+      `Alert type: ${context.type}`,
+      `Session: "${context.sessionName}" (${context.sessionAlive ? 'still running' : 'stopped'})`,
+      `Time elapsed: ${context.minutesElapsed} minutes`,
+      `Context: "${context.messageText}"`,
+      '',
+      'Should we send a user-facing alert about this? Consider:',
+      '- If the session stopped, the user needs to know',
+      '- If the session is still running, it might just be working on a complex task',
+      `- ${context.minutesElapsed} minutes is ${context.minutesElapsed > 15 ? 'a long time' : 'moderate'} for an AI task`,
+      '',
+      'Respond with exactly one word: yes or no.',
+    ].join('\n');
+
+    try {
+      const response = await this.intelligence.evaluate(prompt, { maxTokens: 5, temperature: 0 });
+      if (response.trim().toLowerCase() === 'no') {
+        console.log(`[slack] LLM suppressed ${context.type} alert for "${context.sessionName}" (${context.minutesElapsed}m)`);
+        return false;
+      }
+      return true;
+    } catch {
+      return true; // Fail-open
+    }
+  }
+
   /** Get adapter status. */
-  getStatus(): { started: boolean; uptime: number | null; pendingStalls: number; channelMappings: number } {
+  getStatus(): { started: boolean; uptime: number | null; pendingStalls: number; pendingPromises: number; channelMappings: number } {
     return {
       started: this.started,
       uptime: this.started ? Date.now() : null,
       pendingStalls: this.pendingStalls.size,
+      pendingPromises: this.pendingPromises.size,
       channelMappings: this.channelToSession.size,
     };
   }
@@ -1152,6 +1296,26 @@ export class SlackAdapter implements MessagingAdapter {
         return true;
       }
 
+      case '/triage': {
+        if (!this.onGetTriageStatus) {
+          await this.sendToChannel(channelId, 'Triage system not available.');
+          return true;
+        }
+        const status = this.onGetTriageStatus(channelId);
+        if (!status || !status.active) {
+          await this.sendToChannel(channelId, '🔍 No active triage for this channel. Session appears to be operating normally.');
+        } else {
+          const triageLines = [
+            '🔍 Active triage for this channel:',
+            `Classification: ${status.classification || 'pending'}`,
+            `Checks: ${status.checkCount}`,
+            status.lastCheck ? `Last check: ${status.lastCheck}` : '',
+          ].filter(Boolean);
+          await this.sendToChannel(channelId, triageLines.join('\n'));
+        }
+        return true;
+      }
+
       case '/status': {
         const s = this.getStatus();
         const wsConfig = this.getWorkspaceConfig();
@@ -1160,6 +1324,7 @@ export class SlackAdapter implements MessagingAdapter {
           `Workspace mode: ${wsConfig.mode} (respond: ${wsConfig.respondMode})`,
           `Channel mappings: ${s.channelMappings}`,
           `Pending stall alerts: ${s.pendingStalls}`,
+          `Pending promises: ${s.pendingPromises}`,
         ];
         await this.sendToChannel(channelId, lines.join('\n'));
         return true;
@@ -1174,6 +1339,7 @@ export class SlackAdapter implements MessagingAdapter {
           `• \`!unlink\` — Unlink session from this channel\n` +
           `• \`!interrupt\` — Nudge a stuck session\n` +
           `• \`!restart\` — Kill and respawn the session\n` +
+          `• \`!triage\` — Show triage status for this channel\n` +
           `• \`!status\` — Show adapter status\n` +
           `• \`!help\` — Show this help message`
         );

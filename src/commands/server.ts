@@ -2799,10 +2799,16 @@ export async function startServer(options: StartOptions): Promise<void> {
           }
         };
 
-        // Start stall detection timer
+        // Wire intelligence provider for LLM-gated stall confirmation
+        if (sharedIntelligence) {
+          slackAdapter.intelligence = sharedIntelligence;
+        }
+
+        // Start stall detection timer (with promise tracking)
         const stallTimeout = (slackConfig.config as Record<string, unknown>).stallTimeoutMinutes as number ?? 5;
+        const promiseTimeout = (slackConfig.config as Record<string, unknown>).promiseTimeoutMinutes as number ?? 10;
         if (stallTimeout > 0) {
-          slackAdapter.startStallDetection(stallTimeout * 60 * 1000);
+          slackAdapter.startStallDetection(stallTimeout * 60 * 1000, promiseTimeout * 60 * 1000);
         }
 
         // Wire session management callbacks for slash commands
@@ -2845,7 +2851,7 @@ export async function startServer(options: StartOptions): Promise<void> {
           console.log(`[slack] Prompt response injected: session="${sessionName}" key="${value}"`);
         };
 
-        // Standby commands will be wired after PresenceProxy is initialized (below)
+        // Standby commands and triage status will be wired after PresenceProxy/TriageOrchestrator (below)
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         console.error(pc.red(`  Slack init failed: ${reason}`));
@@ -4001,6 +4007,21 @@ export async function startServer(options: StartOptions): Promise<void> {
             const syntheticId = slackChannelToSyntheticId(channelId);
             return presenceProxy!.handleCommand(syntheticId, command, parseInt(userId, 10) || 0);
           };
+
+          // Wire triage status for Slack !triage command
+          if (triageOrchestrator) {
+            _slackAdapter.onGetTriageStatus = (channelId) => {
+              const syntheticId = slackChannelToSyntheticId(channelId);
+              const ts = triageOrchestrator!.getTriageState(syntheticId);
+              if (!ts) return null;
+              return {
+                active: true,
+                classification: ts.classification,
+                checkCount: ts.checkCount,
+                lastCheck: new Date(ts.lastCheckAt).toISOString(),
+              };
+            };
+          }
         }
 
         console.log(pc.green('  Presence Proxy enabled (🔭 [Standby])'));
