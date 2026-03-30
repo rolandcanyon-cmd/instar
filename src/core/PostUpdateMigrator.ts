@@ -503,18 +503,42 @@ export class PostUpdateMigrator {
   ): boolean {
     let patched = false;
 
-    // 1. Deploy skill hooks directory if missing
-    const skillHooksDir = path.join(this.config.projectDir, '.claude', 'skills', 'autonomous', 'hooks');
+    // 1. Deploy full autonomous skill directory (skill.md, hooks/, scripts/) if missing
+    const skillDir = path.join(this.config.projectDir, '.claude', 'skills', 'autonomous');
+    const skillHooksDir = path.join(skillDir, 'hooks');
     const hookScript = path.join(skillHooksDir, 'autonomous-stop-hook.sh');
     const hooksJson = path.join(skillHooksDir, 'hooks.json');
+    const skillMd = path.join(skillDir, 'skill.md');
 
-    if (!fs.existsSync(hookScript)) {
-      // Copy from bundled source
-      const bundledDir = path.join(path.dirname(path.dirname(__dirname)), '.claude', 'skills', 'autonomous', 'hooks');
-      if (fs.existsSync(bundledDir)) {
+    const bundledSkillDir = path.join(path.dirname(path.dirname(__dirname)), '.claude', 'skills', 'autonomous');
+    if (fs.existsSync(bundledSkillDir)) {
+      // Deploy skill.md if missing
+      const bundledSkillMd = path.join(bundledSkillDir, 'skill.md');
+      if (!fs.existsSync(skillMd) && fs.existsSync(bundledSkillMd)) {
+        fs.mkdirSync(skillDir, { recursive: true });
+        fs.copyFileSync(bundledSkillMd, skillMd);
+        result.upgraded.push('.claude/skills/autonomous/skill.md: deployed skill prompt');
+        patched = true;
+      }
+
+      // Deploy scripts/ if missing
+      const bundledScriptsDir = path.join(bundledSkillDir, 'scripts');
+      const skillScriptsDir = path.join(skillDir, 'scripts');
+      if (!fs.existsSync(skillScriptsDir) && fs.existsSync(bundledScriptsDir)) {
+        fs.mkdirSync(skillScriptsDir, { recursive: true });
+        for (const f of fs.readdirSync(bundledScriptsDir)) {
+          fs.copyFileSync(path.join(bundledScriptsDir, f), path.join(skillScriptsDir, f));
+          fs.chmodSync(path.join(skillScriptsDir, f), 0o755);
+        }
+        result.upgraded.push('.claude/skills/autonomous/scripts: deployed skill scripts');
+        patched = true;
+      }
+
+      // Deploy hooks/ if missing
+      if (!fs.existsSync(hookScript)) {
         fs.mkdirSync(skillHooksDir, { recursive: true });
-        const bundledHook = path.join(bundledDir, 'autonomous-stop-hook.sh');
-        const bundledJson = path.join(bundledDir, 'hooks.json');
+        const bundledHook = path.join(bundledSkillDir, 'hooks', 'autonomous-stop-hook.sh');
+        const bundledJson = path.join(bundledSkillDir, 'hooks', 'hooks.json');
         if (fs.existsSync(bundledHook)) {
           fs.copyFileSync(bundledHook, hookScript);
           fs.chmodSync(hookScript, 0o755);
