@@ -1376,7 +1376,7 @@ export class SessionManager extends EventEmitter {
    * This avoids tmux load-buffer/paste-buffer which trigger macOS TCC
    * "access data from other apps" permission prompts.
    */
-  private injectMessage(tmuxSession: string, text: string): void {
+  injectMessage(tmuxSession: string, text: string): void {
     // ── Input Guard: Layer 1 + 1.5 (deterministic, synchronous) ──
     if (this.inputGuard) {
       const binding = this.getTopicBinding(tmuxSession);

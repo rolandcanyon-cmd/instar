@@ -1173,6 +1173,29 @@ async function ensureSlackAttentionChannel(
 }
 
 /**
+ * Ensure a Slack updates channel exists — for version updates and feature announcements.
+ */
+async function ensureSlackUpdatesChannel(
+  slack: import('../messaging/slack/SlackAdapter.js').SlackAdapter,
+  state: StateManager,
+): Promise<void> {
+  const existingChannelId = state.get<string>('slack-updates-channel');
+  if (existingChannelId) return;
+
+  try {
+    const agentName = (slack as unknown as { config: { workspaceName?: string } }).config?.workspaceName?.replace(/-agent$/, '') || 'agent';
+    const channelId = await slack.createChannel(`${agentName}-sys-updates`);
+    state.set('slack-updates-channel', channelId);
+    await slack.sendToChannel(channelId,
+      `Updates channel active. Version updates, new features, and system announcements will appear here.`
+    );
+    console.log(`  Created Slack Updates channel: ${channelId}`);
+  } catch (err) {
+    console.error(`  Failed to create Slack Updates channel: ${err}`);
+  }
+}
+
+/**
  * Ensure the Agent Updates topic exists — for version updates, feature announcements, etc.
  * Separates informational updates from critical attention items.
  * Created once on first server start, persisted in state.
@@ -1425,8 +1448,8 @@ export async function startServer(options: StartOptions): Promise<void> {
       }).catch(() => { /* @silent-fallback-ok */ });
     }
 
-    // Slack: send IMMEDIATE notifications to attention channel (batching deferred to future)
-    if (tier === 'IMMEDIATE' && _slackAdapter) {
+    // Slack: send all notification tiers to attention channel
+    if (_slackAdapter) {
       const slackAttentionChannel = _notifyState?.get<string>('slack-attention-channel');
       if (slackAttentionChannel) {
         _slackAdapter.sendToChannel(slackAttentionChannel, message).catch(() => { /* @silent-fallback-ok */ });
@@ -2480,8 +2503,41 @@ export async function startServer(options: StartOptions): Promise<void> {
           const isDM = message.metadata?.isDM as boolean;
           const senderName = message.metadata?.senderName as string || 'User';
 
-          // Build injection tag
-          const prefix = `[slack:${channelId}]`;
+          // Sentinel intercept — classify message for emergency stop/pause
+          if (sentinel) {
+            try {
+              const classification = await sentinel.classify(message.content);
+              if (classification.category === 'emergency-stop') {
+                // Kill all sessions
+                const sessions = sessionManager.listRunningSessions();
+                for (const s of sessions) {
+                  try { sessionManager.killSession(s.id); } catch { /* ok */ }
+                }
+                slackAdapter!.sendToChannel(channelId, '🛑 Emergency stop — all sessions killed.').catch(() => {});
+                return;
+              } else if (classification.category === 'pause') {
+                const existingSession = slackAdapter!.getSessionForChannel(channelId);
+                if (existingSession) {
+                  sessionManager.sendKey(existingSession, 'Escape');
+                  slackAdapter!.sendToChannel(channelId, '⏸️ Session paused.').catch(() => {});
+                }
+                return;
+              }
+            } catch { /* fail-open — if Sentinel errors, process message normally */ }
+          }
+
+          // Build injection tag with sender info (matches Telegram's buildInjectionTag pattern)
+          const slackUserId = message.metadata?.slackUserId as string;
+          // Sanitize sender name at injection boundary (prevents injection attacks)
+          const safeSenderName = senderName
+            ? senderName.replace(/[\x00-\x1f\x7f]/g, '').replace(/\s+/g, ' ').replace(/["\[\]]/g, '').trim().slice(0, 64) || 'User'
+            : undefined;
+          let prefix = `[slack:${channelId}]`;
+          if (safeSenderName && slackUserId) {
+            prefix = `[slack:${channelId} from ${safeSenderName} (uid:${slackUserId})]`;
+          } else if (safeSenderName) {
+            prefix = `[slack:${channelId} from ${safeSenderName}]`;
+          }
 
           // Write context file for the session
           const tmpDir = '/tmp/instar-slack';
@@ -2541,7 +2597,18 @@ export async function startServer(options: StartOptions): Promise<void> {
             },
           );
 
-          const bootstrapMessage = `${prefix} ${transformedContent} (IMPORTANT: Read ${ctxPath} for thread history and Slack relay instructions — you MUST relay your response back.)`;
+          const FILE_THRESHOLD = 500;
+          const fullMessage = `${prefix} ${transformedContent} (IMPORTANT: Read ${ctxPath} for thread history and Slack relay instructions — you MUST relay your response back.)`;
+
+          // Long messages: write to temp file and inject reference (matches Telegram pattern)
+          let bootstrapMessage: string;
+          if (fullMessage.length > FILE_THRESHOLD) {
+            const msgFilePath = path.join(tmpDir, `msg-${channelId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`);
+            fs.writeFileSync(msgFilePath, fullMessage);
+            bootstrapMessage = `${prefix} [Long message saved to ${msgFilePath} — read it to see the full message]`;
+          } else {
+            bootstrapMessage = fullMessage;
+          }
 
           // Check for existing session bound to this channel
           const existingSession = slackAdapter!.getSessionForChannel(channelId);
@@ -2565,13 +2632,13 @@ export async function startServer(options: StartOptions): Promise<void> {
                 } catch { /* ok if already dead */ }
                 // Fall through to respawn below — registerChannelSession will be called with new session name
               } else {
-                // Session is ready — inject the message
+                // Session is ready — inject via SessionManager (handles idle timer reset + bracketed paste)
                 try {
-                  const { execSync } = await import('node:child_process');
-                  const msgFile = path.join(tmpDir, `inject-${Date.now()}.txt`);
-                  fs.writeFileSync(msgFile, bootstrapMessage);
-                  execSync(`tmux send-keys -t '=${existingSession}:' "$(cat '${msgFile}')" Enter`, { timeout: 5000 });
-                  fs.unlinkSync(msgFile);
+                  sessionManager.injectMessage(existingSession, bootstrapMessage);
+                  // Track for stall detection
+                  slackAdapter!.trackMessageInjection(channelId, existingSession, message.content);
+                  // Delivery confirmation
+                  slackAdapter!.sendToChannel(channelId, '✓ Delivered').catch(() => {});
                 } catch (injectErr) {
                   console.error(`[slack→session] Injection failed: ${injectErr instanceof Error ? injectErr.message : injectErr}`);
                 }
@@ -2598,6 +2665,7 @@ export async function startServer(options: StartOptions): Promise<void> {
             );
             if (newSessionName) {
               slackAdapter!.registerChannelSession(channelId, newSessionName);
+              slackAdapter!.trackMessageInjection(channelId, newSessionName, message.content);
               console.log(`[slack→session] ${resumeSessionId ? 'Resumed' : 'Spawned'} "${newSessionName}" for channel ${channelId}`);
             }
           } catch (err) {
@@ -2609,20 +2677,103 @@ export async function startServer(options: StartOptions): Promise<void> {
         _slackAdapter = slackAdapter;
         console.log(pc.green(`  Slack connected (workspace: ${(slackConfig.config as Record<string, unknown>).workspaceName || 'unknown'})`));
 
-        // Ensure Slack attention channel exists
+        // Ensure Slack system channels exist
         ensureSlackAttentionChannel(slackAdapter, state).catch(err => {
           console.error(`[server] Failed to ensure Slack Attention channel: ${err}`);
         });
+        ensureSlackUpdatesChannel(slackAdapter, state).catch(err => {
+          console.error(`[server] Failed to ensure Slack Updates channel: ${err}`);
+        });
 
         // Wire stall detection — route stall alerts to Slack attention channel
-        slackAdapter.onStallDetected = (channelId, sessionName, messageText) => {
+        slackAdapter.onStallDetected = (channelId, sessionName, messageText, injectedAt) => {
           const slackAttentionChannel = state.get<string>('slack-attention-channel');
           if (slackAttentionChannel) {
             slackAdapter!.sendToChannel(slackAttentionChannel,
-              `Stall detected in session "${sessionName}" (channel ${channelId}). Message may not have been answered: "${messageText.slice(0, 100)}"`
+              `⚠️ Stall detected in session "${sessionName}" (channel ${channelId}). Message may not have been answered: "${messageText.slice(0, 100)}"`
             ).catch(() => {});
           }
+          // Also notify in the originating channel
+          slackAdapter!.sendToChannel(channelId,
+            `⚠️ The session appears to have stalled. Use \`!restart\` to restart or \`!interrupt\` to nudge it.`
+          ).catch(() => {});
         };
+
+        // Wire voice transcription (reuses Telegram's provider resolution: Groq → OpenAI)
+        slackAdapter.transcribeVoice = async (filePath: string) => {
+          const providers: Record<string, { envKey: string; baseUrl: string; model: string }> = {
+            groq: { envKey: 'GROQ_API_KEY', baseUrl: 'https://api.groq.com/openai/v1', model: 'whisper-large-v3' },
+            openai: { envKey: 'OPENAI_API_KEY', baseUrl: 'https://api.openai.com/v1', model: 'whisper-1' },
+          };
+          let provider: { apiKey: string; baseUrl: string; model: string } | null = null;
+          const explicit = (slackConfig.config as Record<string, unknown>).audioTranscriptionProvider as string;
+          if (explicit && providers[explicit.toLowerCase()]) {
+            const p = providers[explicit.toLowerCase()];
+            const apiKey = process.env[p.envKey];
+            if (apiKey) provider = { apiKey, baseUrl: p.baseUrl, model: p.model };
+          }
+          if (!provider) {
+            for (const [, p] of Object.entries(providers)) {
+              const apiKey = process.env[p.envKey];
+              if (apiKey) { provider = { apiKey, baseUrl: p.baseUrl, model: p.model }; break; }
+            }
+          }
+          if (!provider) throw new Error('No voice transcription provider. Set GROQ_API_KEY or OPENAI_API_KEY.');
+
+          const formData = new FormData();
+          const fileBuffer = fs.readFileSync(filePath);
+          const blob = new Blob([fileBuffer], { type: 'audio/ogg' });
+          formData.append('file', blob, path.basename(filePath));
+          formData.append('model', provider.model);
+
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 60_000);
+          try {
+            const response = await fetch(`${provider.baseUrl}/audio/transcriptions`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${provider.apiKey}` },
+              body: formData,
+              signal: controller.signal,
+            });
+            if (!response.ok) throw new Error(`Transcription API error (${response.status}): ${await response.text()}`);
+            const data = await response.json() as { text: string };
+            return data.text;
+          } finally {
+            clearTimeout(timer);
+          }
+        };
+
+        // Start stall detection timer
+        const stallTimeout = (slackConfig.config as Record<string, unknown>).stallTimeoutMinutes as number ?? 5;
+        if (stallTimeout > 0) {
+          slackAdapter.startStallDetection(stallTimeout * 60 * 1000);
+        }
+
+        // Wire session management callbacks for slash commands
+        slackAdapter.onInterruptSession = async (sessionName) => {
+          return sessionManager.sendKey(sessionName, 'Escape');
+        };
+        slackAdapter.onRestartSession = async (sessionName, channelId) => {
+          try {
+            const stuckSession = sessionManager.listRunningSessions().find(s => s.tmuxSession === sessionName);
+            if (stuckSession) {
+              sessionManager.killSession(stuckSession.id);
+            }
+          } catch { /* ok if already dead */ }
+        };
+        slackAdapter.onListSessions = () => {
+          return sessionManager.listRunningSessions().map(s => ({
+            name: s.name,
+            tmuxSession: s.tmuxSession,
+            status: s.status,
+            alive: sessionManager.isSessionAlive(s.tmuxSession),
+          }));
+        };
+        slackAdapter.onIsSessionAlive = (tmuxSession) => {
+          return sessionManager.isSessionAlive(tmuxSession);
+        };
+
+        // Standby commands will be wired after PresenceProxy is initialized (below)
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         console.error(pc.red(`  Slack init failed: ${reason}`));
@@ -2736,13 +2887,26 @@ export async function startServer(options: StartOptions): Promise<void> {
     if (_topicResumeMap && telegram) {
       sessionManager.on('beforeSessionKill', (session: import('../core/types.js').Session) => {
         try {
+          // Save Telegram topic resume UUID
           const topicId = telegram!.getTopicForSession(session.tmuxSession);
-          if (!topicId) return;
-          // Use authoritative claudeSessionId from hook events, fall back to mtime heuristic
-          const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
-          if (uuid) {
-            _topicResumeMap!.save(topicId, uuid, session.tmuxSession);
-            console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${session.claudeSessionId ? 'hook' : 'mtime'})`);
+          if (topicId) {
+            const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
+            if (uuid) {
+              _topicResumeMap!.save(topicId, uuid, session.tmuxSession);
+              console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${session.claudeSessionId ? 'hook' : 'mtime'})`);
+            }
+          }
+
+          // Save Slack channel resume UUID
+          if (_slackAdapter) {
+            const channelId = _slackAdapter.getChannelForSession(session.tmuxSession);
+            if (channelId) {
+              const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
+              if (uuid) {
+                _slackAdapter.saveChannelResume(channelId, uuid, session.tmuxSession);
+                console.log(`[beforeSessionKill] Saved Slack resume UUID ${uuid} for channel ${channelId} (session: ${session.name})`);
+              }
+            }
           }
         } catch (err) {
           console.error(`[beforeSessionKill] Failed to save resume UUID:`, err);
@@ -3444,6 +3608,15 @@ export async function startServer(options: StartOptions): Promise<void> {
       return syntheticId;
     }
 
+    // Pre-populate the Slack proxy channel map from existing channel registry
+    // so PresenceProxy state recovery can resolve synthetic IDs on restart
+    if (_slackAdapter) {
+      const registry = _slackAdapter.getChannelRegistry();
+      for (const channelId of Object.keys(registry)) {
+        slackChannelToSyntheticId(channelId);
+      }
+    }
+
     let presenceProxy: import('../monitoring/PresenceProxy.js').PresenceProxy | undefined;
     if (sharedIntelligence && telegram) {
       try {
@@ -3579,17 +3752,37 @@ export async function startServer(options: StartOptions): Promise<void> {
 
         presenceProxy.start();
 
-        // Wire Slack's onMessageLogged into PresenceProxy (if Slack is active)
+        // Wire Slack's onMessageLogged into PresenceProxy + TopicMemory (if Slack is active)
         if (_slackAdapter) {
           const existingSlackCallback = _slackAdapter.onMessageLogged;
           _slackAdapter.onMessageLogged = (entry) => {
             if (existingSlackCallback) {
               existingSlackCallback(entry);
             }
+
+            // TopicMemory dual-write (matches Telegram's insertMessage pattern)
+            // TopicMemory uses numeric topicId; for Slack we use the synthetic hash
+            if (entry.channelId && topicMemory) {
+              const synId = slackChannelToSyntheticId(String(entry.channelId));
+              topicMemory.insertMessage({
+                messageId: typeof entry.messageId === 'number' ? entry.messageId : 0,
+                topicId: synId,
+                text: entry.text,
+                fromUser: entry.fromUser,
+                timestamp: entry.timestamp,
+                sessionName: entry.sessionName,
+                senderName: entry.senderName,
+              });
+            }
+
+            // Clear stall tracking when agent responds in this channel
+            if (!entry.fromUser && entry.channelId) {
+              _slackAdapter!.clearStallTracking(String(entry.channelId));
+            }
+
             // Convert Slack channelId to synthetic numeric ID for PresenceProxy
             if (!entry.channelId) return;
             const syntheticId = slackChannelToSyntheticId(String(entry.channelId));
-            console.log(`[slack-proxy] onMessageLogged: channel=${entry.channelId} syntheticId=${syntheticId} fromUser=${entry.fromUser} text="${(entry.text || '').slice(0, 40)}"`);
             presenceProxy!.onMessageLogged({
               messageId: typeof entry.messageId === 'number' ? entry.messageId : parseInt(String(entry.messageId), 10) || 0,
               channelId: syntheticId.toString(),
@@ -3602,6 +3795,12 @@ export async function startServer(options: StartOptions): Promise<void> {
             });
           };
           console.log(pc.green('  Presence Proxy wired to Slack'));
+
+          // Wire standby commands for Slack (unstick, quiet, resume, restart)
+          _slackAdapter.onStandbyCommand = async (channelId, command, userId) => {
+            const syntheticId = slackChannelToSyntheticId(channelId);
+            return presenceProxy!.handleCommand(syntheticId, command, parseInt(userId, 10) || 0);
+          };
         }
 
         console.log(pc.green('  Presence Proxy enabled (🔭 [Standby])'));

@@ -74,13 +74,29 @@ export class SlackAdapter implements MessagingAdapter {
   private channelResumeMap: Map<string, { uuid: string; savedAt: string; sessionName: string }> = new Map();
   private channelResumeMapPath: string;
 
+  // Stall tracking (matches Telegram's trackMessageInjection pattern)
+  private pendingStalls: Map<string, { channelId: string; sessionName: string; text: string; injectedAt: number }> = new Map();
+  private stallCheckTimer: ReturnType<typeof setInterval> | null = null;
+
   // Callbacks (wired by server.ts)
   /** Called when a prompt gate response is received */
   onPromptResponse: ((channelId: string, promptId: string, value: string) => void) | null = null;
   /** Called when a message is logged (for dual-write to SQLite) */
   onMessageLogged: ((entry: LogEntry) => void) | null = null;
   /** Called when a stall is detected */
-  onStallDetected: ((channelId: string, sessionName: string, messageText: string) => void) | null = null;
+  onStallDetected: ((channelId: string, sessionName: string, messageText: string, injectedAt: number) => void) | null = null;
+  /** Called to interrupt a session (send Escape) */
+  onInterruptSession: ((sessionName: string) => Promise<boolean>) | null = null;
+  /** Called to restart a session */
+  onRestartSession: ((sessionName: string, channelId: string) => Promise<void>) | null = null;
+  /** Called to list running sessions */
+  onListSessions: (() => Array<{ name: string; tmuxSession: string; status: string; alive: boolean }>) | null = null;
+  /** Called to check if a session is alive */
+  onIsSessionAlive: ((tmuxSession: string) => boolean) | null = null;
+  /** Called to transcribe a voice/audio file (via Whisper API) */
+  transcribeVoice: ((filePath: string) => Promise<string>) | null = null;
+  /** Called to handle standby commands (unstick, quiet, resume, restart) */
+  onStandbyCommand: ((channelId: string, command: string, userId: string) => Promise<boolean>) | null = null;
 
   constructor(config: Record<string, unknown>, stateDir: string) {
     this.config = config as unknown as SlackConfig;
@@ -195,18 +211,10 @@ export class SlackAdapter implements MessagingAdapter {
 
   async stop(): Promise<void> {
     this.started = false;
-    if (this.promptEvictionTimer) {
-      clearInterval(this.promptEvictionTimer);
-      this.promptEvictionTimer = null;
-    }
-    if (this.housekeepingTimer) {
-      clearInterval(this.housekeepingTimer);
-      this.housekeepingTimer = null;
-    }
-    if (this.logPurgeTimer) {
-      clearInterval(this.logPurgeTimer);
-      this.logPurgeTimer = null;
-    }
+    if (this.promptEvictionTimer) { clearInterval(this.promptEvictionTimer); this.promptEvictionTimer = null; }
+    if (this.housekeepingTimer) { clearInterval(this.housekeepingTimer); this.housekeepingTimer = null; }
+    if (this.logPurgeTimer) { clearInterval(this.logPurgeTimer); this.logPurgeTimer = null; }
+    if (this.stallCheckTimer) { clearInterval(this.stallCheckTimer); this.stallCheckTimer = null; }
     if (this.socketClient) {
       await this.socketClient.disconnect();
       this.socketClient = null;
@@ -431,6 +439,60 @@ export class SlackAdapter implements MessagingAdapter {
     this._saveChannelResumeMap();
   }
 
+  // ── Stall Detection ──
+
+  /** Track an injected message for stall detection. */
+  trackMessageInjection(channelId: string, sessionName: string, text: string): void {
+    const key = `${channelId}-${Date.now()}`;
+    this.pendingStalls.set(key, {
+      channelId,
+      sessionName,
+      text: text.slice(0, 200),
+      injectedAt: Date.now(),
+    });
+  }
+
+  /** Clear stall tracking for a channel (agent responded). */
+  clearStallTracking(channelId: string): void {
+    for (const [key, entry] of this.pendingStalls) {
+      if (entry.channelId === channelId) {
+        this.pendingStalls.delete(key);
+      }
+    }
+  }
+
+  /** Start periodic stall checking. */
+  startStallDetection(timeoutMs: number = 5 * 60 * 1000): void {
+    if (this.stallCheckTimer) return;
+    this.stallCheckTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [key, entry] of this.pendingStalls) {
+        if (now - entry.injectedAt > timeoutMs) {
+          this.pendingStalls.delete(key);
+          if (this.onStallDetected) {
+            this.onStallDetected(entry.channelId, entry.sessionName, entry.text, entry.injectedAt);
+          }
+        }
+      }
+    }, 30_000); // Check every 30s
+    if (this.stallCheckTimer.unref) this.stallCheckTimer.unref();
+  }
+
+  /** Get pending stall count. */
+  getPendingStallCount(): number {
+    return this.pendingStalls.size;
+  }
+
+  /** Get adapter status. */
+  getStatus(): { started: boolean; uptime: number | null; pendingStalls: number; channelMappings: number } {
+    return {
+      started: this.started,
+      uptime: this.started ? Date.now() : null,
+      pendingStalls: this.pendingStalls.size,
+      channelMappings: this.channelToSession.size,
+    };
+  }
+
   // ── Registry Persistence ──
 
   private _loadChannelRegistry(): void {
@@ -533,7 +595,11 @@ export class SlackAdapter implements MessagingAdapter {
 
     // AuthGate — fail-closed
     if (!this.isAuthorized(userId)) {
-      return; // Silently drop unauthorized messages
+      // Send ephemeral "not authorized" message instead of silently dropping
+      this.postEphemeral(channelId, userId,
+        `You're not authorized to interact with this agent. Contact the workspace admin to get access.`
+      ).catch(() => {});
+      return;
     }
 
     // In mention-only mode, skip messages that don't @mention the bot (except DMs and commands)
@@ -544,6 +610,13 @@ export class SlackAdapter implements MessagingAdapter {
       buffer.push({ ts, user: userId, text, channel: channelId, thread_ts: threadTs });
       this.channelHistory.set(channelId, buffer);
       return;
+    }
+
+    // Check for standby commands (unstick, quiet, resume, restart) — these bypass normal processing
+    const lowerText = text.trim().toLowerCase();
+    if (this.onStandbyCommand && ['unstick', 'quiet', 'resume', 'restart'].includes(lowerText)) {
+      const handled = await this.onStandbyCommand(channelId, lowerText, userId);
+      if (handled) return;
     }
 
     // Handle commands (Slack intercepts / prefix, so we use ! prefix)
@@ -560,7 +633,7 @@ export class SlackAdapter implements MessagingAdapter {
       cleanText = text.replace(new RegExp(`<@${this.botUserId}>\\s*`, 'g'), '').trim();
     }
 
-    // Download attached files (images, documents) and append [image:path]/[document:path] tags
+    // Download attached files (images, documents, voice/audio) and append appropriate tags
     const filePaths: string[] = [];
     if (files && files.length > 0) {
       for (const file of files) {
@@ -571,13 +644,23 @@ export class SlackAdapter implements MessagingAdapter {
 
         try {
           const isImage = mimetype.startsWith('image/');
-          const destName = `${isImage ? 'photo' : 'file'}-${Date.now()}-${file.id ?? ts}.${filename.split('.').pop() ?? 'bin'}`;
+          const isAudio = mimetype.startsWith('audio/');
+          const destName = `${isImage ? 'photo' : isAudio ? 'voice' : 'file'}-${Date.now()}-${file.id ?? ts}.${filename.split('.').pop() ?? 'bin'}`;
           const destPath = path.join(this.fileHandler.downloadDir, destName);
           const savedPath = await this.fileHandler.downloadFile(url, destPath);
           filePaths.push(savedPath);
 
           if (isImage) {
             cleanText = cleanText ? `${cleanText} [image:${savedPath}]` : `[image:${savedPath}]`;
+          } else if (isAudio && this.transcribeVoice) {
+            // Voice message: transcribe and inject as [voice] transcript
+            try {
+              const transcript = await this.transcribeVoice(savedPath);
+              cleanText = cleanText ? `${cleanText} [voice] ${transcript}` : `[voice] ${transcript}`;
+            } catch (transcribeErr) {
+              console.warn(`[slack] Voice transcription failed: ${(transcribeErr as Error).message}`);
+              cleanText = cleanText ? `${cleanText} [document:${savedPath}]` : `[document:${savedPath}]`;
+            }
           } else {
             cleanText = cleanText ? `${cleanText} [document:${savedPath}]` : `[document:${savedPath}]`;
           }
@@ -959,11 +1042,100 @@ export class SlackAdapter implements MessagingAdapter {
         return true;
       }
 
+      case '/claim':
+      case '/link': {
+        // Claim/link a session to this channel
+        if (!args) {
+          await this.sendToChannel(channelId, `Please include a session name — e.g. \`!claim my-session\``);
+          return true;
+        }
+        const existingSession = this.getSessionForChannel(channelId);
+        if (existingSession) {
+          await this.sendToChannel(channelId, `This channel is already linked to "${existingSession}". Use \`!unlink\` first.`);
+          return true;
+        }
+        this.registerChannelSession(channelId, args);
+        await this.sendToChannel(channelId, `Claimed session "${args}" into this channel.`);
+        return true;
+      }
+
+      case '/unlink': {
+        const sessionName = this.getSessionForChannel(channelId);
+        if (!sessionName) {
+          await this.sendToChannel(channelId, 'No session linked to this channel.');
+          return true;
+        }
+        this.unregisterChannel(channelId);
+        await this.sendToChannel(channelId, `Unlinked session "${sessionName}" from this channel.`);
+        return true;
+      }
+
+      case '/interrupt': {
+        const sessionName = this.getSessionForChannel(channelId);
+        if (!sessionName) {
+          await this.sendToChannel(channelId, 'No session linked to this channel.');
+          return true;
+        }
+        if (!this.onInterruptSession) {
+          await this.sendToChannel(channelId, 'Interrupt not available.');
+          return true;
+        }
+        try {
+          const success = await this.onInterruptSession(sessionName);
+          this.clearStallTracking(channelId);
+          await this.sendToChannel(channelId, success
+            ? `Nudged "${sessionName}" — it should resume shortly.`
+            : `Failed to interrupt "${sessionName}" — session may not exist.`);
+        } catch {
+          await this.sendToChannel(channelId, `Couldn't interrupt the session. It may have already ended.`);
+        }
+        return true;
+      }
+
+      case '/restart': {
+        const sessionName = this.getSessionForChannel(channelId);
+        if (!sessionName) {
+          await this.sendToChannel(channelId, 'No session linked to this channel.');
+          return true;
+        }
+        if (!this.onRestartSession) {
+          await this.sendToChannel(channelId, 'Restart not available.');
+          return true;
+        }
+        this.clearStallTracking(channelId);
+        await this.sendToChannel(channelId, `Restarting "${sessionName}"...`);
+        try {
+          await this.onRestartSession(sessionName, channelId);
+          await this.sendToChannel(channelId, 'Session restarted.');
+        } catch {
+          await this.sendToChannel(channelId, `Restart didn't work. Try sending a new message to start a fresh session.`);
+        }
+        return true;
+      }
+
+      case '/status': {
+        const s = this.getStatus();
+        const wsConfig = this.getWorkspaceConfig();
+        const lines = [
+          `Slack adapter: ${s.started ? '✅ running' : '❌ stopped'}`,
+          `Workspace mode: ${wsConfig.mode} (respond: ${wsConfig.respondMode})`,
+          `Channel mappings: ${s.channelMappings}`,
+          `Pending stall alerts: ${s.pendingStalls}`,
+        ];
+        await this.sendToChannel(channelId, lines.join('\n'));
+        return true;
+      }
+
       case '/help': {
         await this.sendToChannel(channelId,
-          `Available commands (use \`!\` prefix in Slack — Slack intercepts \`/\`):\n` +
-          `• \`!sessions\` — List running Slack sessions\n` +
-          `• \`!new [name]\` — Create a new session with a Slack channel\n` +
+          `Available commands (use \`!\` prefix in Slack):\n` +
+          `• \`!sessions\` — List running sessions\n` +
+          `• \`!new [name]\` — Create a new session channel\n` +
+          `• \`!claim <session>\` — Link a session to this channel\n` +
+          `• \`!unlink\` — Unlink session from this channel\n` +
+          `• \`!interrupt\` — Nudge a stuck session\n` +
+          `• \`!restart\` — Kill and respawn the session\n` +
+          `• \`!status\` — Show adapter status\n` +
           `• \`!help\` — Show this help message`
         );
         return true;

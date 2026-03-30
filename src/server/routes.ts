@@ -3308,7 +3308,6 @@ export function createRoutes(ctx: RouteContext): Router {
 
       // Notify onMessageLogged that the agent responded (so PresenceProxy cancels standby)
       if (ctx.slack.onMessageLogged) {
-        console.log(`[slack-reply] Firing onMessageLogged(fromUser:false) for channel ${channelId}`);
         ctx.slack.onMessageLogged({
           messageId: ts,
           channelId,
@@ -3318,8 +3317,6 @@ export function createRoutes(ctx: RouteContext): Router {
           sessionName: null,
           platform: 'slack',
         });
-      } else {
-        console.warn(`[slack-reply] onMessageLogged not wired — standby won't cancel`);
       }
 
       res.json({ ok: true, topicId: channelId, ts });
