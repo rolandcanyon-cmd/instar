@@ -1905,16 +1905,45 @@ export async function startServer(options: StartOptions): Promise<void> {
             // If handle() returned false, fall through to relay
           }
 
-          // Relay to Telegram if adapter is available and session has a topic binding
+          // Relay to messaging platform if adapter is available and session has a binding
           if (classification.action === 'relay' || classification.action === 'auto-approve') {
+            let relayed = false;
+
+            // Try Telegram first
             if (telegram) {
               const topicId = telegram.getTopicForSession(prompt.sessionName);
               if (topicId) {
                 try {
                   await telegram.relayPrompt(topicId, prompt);
-                  console.log(`[PromptGate] Relayed ${prompt.type} prompt to topic ${topicId}`);
+                  console.log(`[PromptGate] Relayed ${prompt.type} prompt to Telegram topic ${topicId}`);
+                  relayed = true;
                 } catch (relayErr) {
-                  console.error(`[PromptGate] Relay failed: ${relayErr instanceof Error ? relayErr.message : relayErr}`);
+                  console.error(`[PromptGate] Telegram relay failed: ${relayErr instanceof Error ? relayErr.message : relayErr}`);
+                }
+              }
+            }
+
+            // Try Slack if not already relayed via Telegram
+            if (!relayed && _slackAdapter) {
+              const channelId = _slackAdapter.getChannelForSession(prompt.sessionName);
+              if (channelId) {
+                try {
+                  const question = prompt.summary || 'Agent needs your input';
+                  const options = (prompt.options || []).map((opt, i) => ({
+                    label: opt.label.slice(0, 75),
+                    value: opt.key,
+                    primary: i === 0,
+                  }));
+                  if (options.length > 0) {
+                    await _slackAdapter.relayPrompt(channelId, prompt.id, question, options);
+                  } else {
+                    await _slackAdapter.sendToChannel(channelId,
+                      `⏳ *Agent needs your input:*\n${question}\n\n_Reply in this channel to respond._`
+                    );
+                  }
+                  console.log(`[PromptGate] Relayed ${prompt.type} prompt to Slack channel ${channelId}`);
+                } catch (relayErr) {
+                  console.error(`[PromptGate] Slack relay failed: ${relayErr instanceof Error ? relayErr.message : relayErr}`);
                 }
               }
             }
@@ -2900,20 +2929,38 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     // Proactive resume heartbeat: every 60s, update the topic→UUID mapping
     // for all active topic-linked sessions. Ensures crash recovery via --resume.
-    if (_topicResumeMap && telegram) {
+    if (_topicResumeMap && (telegram || _slackAdapter)) {
       const resumeHeartbeatInterval = setInterval(() => {
         try {
-          const topicSessions = telegram!.getAllTopicSessions();
-          // Enrich with authoritative Claude session IDs from SessionManager
           const enriched = new Map<number, { sessionName: string; claudeSessionId?: string }>();
-          for (const [topicId, sessionName] of topicSessions) {
-            const sessions = sessionManager.listRunningSessions();
-            const session = sessions.find(s => s.tmuxSession === sessionName);
-            enriched.set(topicId, {
-              sessionName,
-              claudeSessionId: session?.claudeSessionId ?? undefined,
-            });
+
+          // Telegram topic-session mappings
+          if (telegram) {
+            const topicSessions = telegram.getAllTopicSessions();
+            for (const [topicId, sessionName] of topicSessions) {
+              const sessions = sessionManager.listRunningSessions();
+              const session = sessions.find(s => s.tmuxSession === sessionName);
+              enriched.set(topicId, {
+                sessionName,
+                claudeSessionId: session?.claudeSessionId ?? undefined,
+              });
+            }
           }
+
+          // Slack channel-session mappings (use synthetic IDs for compatibility)
+          if (_slackAdapter) {
+            const registry = _slackAdapter.getChannelRegistry();
+            for (const [channelId, entry] of Object.entries(registry)) {
+              const syntheticId = slackChannelToSyntheticId(channelId);
+              const sessions = sessionManager.listRunningSessions();
+              const session = sessions.find(s => s.tmuxSession === entry.sessionName);
+              enriched.set(syntheticId, {
+                sessionName: entry.sessionName,
+                claudeSessionId: session?.claudeSessionId ?? undefined,
+              });
+            }
+          }
+
           _topicResumeMap?.refreshResumeMappings(enriched);
         } catch (err) {
           console.error('[server] Resume heartbeat error:', err);
@@ -3077,26 +3124,30 @@ export async function startServer(options: StartOptions): Promise<void> {
       watchdog.intelligence = sharedIntelligence ?? null;
 
       watchdog.on('intervention', (event: any) => {
+        const levelNames = ['Monitoring', 'Ctrl+C', 'SIGTERM', 'SIGKILL', 'Kill Session'];
+        const levelName = levelNames[event.level] || `Level ${event.level}`;
+        const msg = `🔧 Watchdog [${levelName}]: ${event.action}\nStuck: \`${event.stuckCommand.slice(0, 60)}\``;
+
         if (telegram) {
           const topicId = telegram.getTopicForSession(event.sessionName);
-          if (topicId) {
-            const levelNames = ['Monitoring', 'Ctrl+C', 'SIGTERM', 'SIGKILL', 'Kill Session'];
-            const levelName = levelNames[event.level] || `Level ${event.level}`;
-            telegram.sendToTopic(topicId,
-              `🔧 Watchdog [${levelName}]: ${event.action}\nStuck: \`${event.stuckCommand.slice(0, 60)}\``
-            ).catch(() => {});
-          }
+          if (topicId) telegram.sendToTopic(topicId, msg).catch(() => {});
+        }
+        if (_slackAdapter) {
+          const channelId = _slackAdapter.getChannelForSession(event.sessionName);
+          if (channelId) _slackAdapter.sendToChannel(channelId, msg).catch(() => {});
         }
       });
 
       watchdog.on('recovery', (sessionName: string, fromLevel: number) => {
+        const msg = `✅ Watchdog: session recovered (was at escalation level ${fromLevel})`;
+
         if (telegram) {
           const topicId = telegram.getTopicForSession(sessionName);
-          if (topicId) {
-            telegram.sendToTopic(topicId,
-              `✅ Watchdog: session recovered (was at escalation level ${fromLevel})`
-            ).catch(() => { /* @silent-fallback-ok — notification loss */ });
-          }
+          if (topicId) telegram.sendToTopic(topicId, msg).catch(() => {});
+        }
+        if (_slackAdapter) {
+          const channelId = _slackAdapter.getChannelForSession(sessionName);
+          if (channelId) _slackAdapter.sendToChannel(channelId, msg).catch(() => {});
         }
       });
 
@@ -4756,23 +4807,41 @@ export async function startServer(options: StartOptions): Promise<void> {
       // 1. Resume entries are consumed (removed) on spawn
       // 2. Proactive save may not have run yet
       // 3. beforeSessionKill doesn't fire for bulk process exit
-      if (_topicResumeMap && telegram) {
+      if (_topicResumeMap) {
         try {
           const runningSessions = sessionManager.listRunningSessions();
-          const topicSessions = telegram.getAllTopicSessions?.();
-          if (topicSessions) {
-            let saved = 0;
-            for (const [topicId, sessionName] of topicSessions) {
-              const session = runningSessions.find(s => s.tmuxSession === sessionName);
-              const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
+          let saved = 0;
+
+          // Save Telegram topic resume UUIDs
+          if (telegram) {
+            const topicSessions = telegram.getAllTopicSessions?.();
+            if (topicSessions) {
+              for (const [topicId, sessionName] of topicSessions) {
+                const session = runningSessions.find(s => s.tmuxSession === sessionName);
+                const uuid = _topicResumeMap.findUuidForSession(sessionName, session?.claudeSessionId ?? undefined);
+                if (uuid) {
+                  _topicResumeMap.save(topicId, uuid, sessionName);
+                  saved++;
+                }
+              }
+            }
+          }
+
+          // Save Slack channel resume UUIDs
+          if (_slackAdapter) {
+            const registry = _slackAdapter.getChannelRegistry();
+            for (const [channelId, entry] of Object.entries(registry)) {
+              const session = runningSessions.find(s => s.tmuxSession === entry.sessionName);
+              const uuid = _topicResumeMap.findUuidForSession(entry.sessionName, session?.claudeSessionId ?? undefined);
               if (uuid) {
-                _topicResumeMap.save(topicId, uuid, sessionName);
+                _slackAdapter.saveChannelResume(channelId, uuid, entry.sessionName);
                 saved++;
               }
             }
-            if (saved > 0) {
-              console.log(`[shutdown] Saved ${saved} resume UUID(s) for active sessions`);
-            }
+          }
+
+          if (saved > 0) {
+            console.log(`[shutdown] Saved ${saved} resume UUID(s) for active sessions`);
           }
         } catch (err) {
           console.error('[shutdown] Failed to save resume UUIDs:', err);

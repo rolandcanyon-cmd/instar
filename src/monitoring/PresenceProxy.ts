@@ -199,12 +199,21 @@ const QUOTA_EXHAUSTION_PATTERNS = [
 /**
  * Check if terminal output indicates quota exhaustion.
  * Returns a human-friendly message if detected, null otherwise.
+ *
+ * Only checks the LAST 15 lines of the snapshot to avoid false positives
+ * from historical quota errors that the session already recovered from.
+ * Quota errors are terminal — if the session recovered and kept working,
+ * the error scrolls up and out of the recent window.
  */
 export function detectQuotaExhaustion(snapshot: string): string | null {
+  // Only scan recent output — old quota errors in the scrollback are stale
+  const lines = snapshot.split('\n');
+  const recentOutput = lines.slice(-15).join('\n');
+
   for (const pattern of QUOTA_EXHAUSTION_PATTERNS) {
-    if (pattern.test(snapshot)) {
+    if (pattern.test(recentOutput)) {
       // Try to extract the reset time
-      const resetMatch = snapshot.match(/resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*\([^)]+\))/i);
+      const resetMatch = recentOutput.match(/resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*\([^)]+\))/i);
       const resetTime = resetMatch ? resetMatch[1] : null;
       if (resetTime) {
         return `The agent has hit its Claude API usage limit. Quota resets ${resetTime}. The session is paused until then — no work is being done.`;

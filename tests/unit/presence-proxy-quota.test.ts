@@ -50,6 +50,44 @@ All tests passing`;
     expect(detectQuotaExhaustion(snapshot)).toBeNull();
   });
 
+  it('returns null when quota error is old and session has recovered', () => {
+    // Simulate a scrollback buffer where quota error happened earlier
+    // but the session recovered and continued working (>15 lines after error)
+    const snapshot = `Working on feature implementation...
+You've hit your limit - resets 7pm (America/Los_Angeles)
+/extra-usage to finish what you're working on.
+[session recovers]
+Resuming work on the task...
+Reading file src/index.ts
+Editing src/components/Header.tsx
+Running npm test...
+All 42 tests passed
+Creating new commit with changes
+Working on next feature...
+Analyzing codebase structure...
+Found 3 files to modify
+Applying changes to src/utils.ts
+Building project...
+Build successful
+Deploying to staging...
+Deploy complete
+Ready for review`;
+    expect(detectQuotaExhaustion(snapshot)).toBeNull();
+  });
+
+  it('detects quota error when it appears in last 15 lines', () => {
+    // Quota error is recent — should still be detected
+    const snapshot = `Working on feature...
+Some earlier output
+More work happening
+Almost done with task
+You've hit your limit - resets 7pm (America/Los_Angeles)
+/extra-usage to finish what you're working on.`;
+    const result = detectQuotaExhaustion(snapshot);
+    expect(result).not.toBeNull();
+    expect(result).toContain('7pm (America/Los_Angeles)');
+  });
+
   it('returns null for empty input', () => {
     expect(detectQuotaExhaustion('')).toBeNull();
   });
