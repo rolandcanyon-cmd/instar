@@ -297,6 +297,8 @@ export class SessionManager extends EventEmitter {
         if (!this.config.protectedSessions.includes(session.tmuxSession) &&
             this.detectCompletion(session.tmuxSession)) {
           console.log(`[SessionManager] Session "${session.name}" completed (pattern detected). Cleaning up.`);
+          // Emit beforeSessionKill so listeners (TopicResumeMap, SlackAdapter) can save resume UUIDs
+          this.emit('beforeSessionKill', session);
           try {
             await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
           } catch { /* ignore */ }

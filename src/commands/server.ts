@@ -2927,20 +2927,22 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Save Claude session UUID before any session kill so the topic can be
     // resumed later with --resume. This fires BEFORE the tmux session is
     // destroyed, so the UUID can still be discovered from the JSONL mtime.
-    if (_topicResumeMap && telegram) {
+    if (_topicResumeMap) {
       sessionManager.on('beforeSessionKill', (session: import('../core/types.js').Session) => {
         try {
-          // Save Telegram topic resume UUID
-          const topicId = telegram!.getTopicForSession(session.tmuxSession);
-          if (topicId) {
-            const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
-            if (uuid) {
-              _topicResumeMap!.save(topicId, uuid, session.tmuxSession);
-              console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${session.claudeSessionId ? 'hook' : 'mtime'})`);
+          // Save Telegram topic resume UUID (if Telegram is configured)
+          if (telegram) {
+            const topicId = telegram!.getTopicForSession(session.tmuxSession);
+            if (topicId) {
+              const uuid = _topicResumeMap!.findUuidForSession(session.tmuxSession, session.claudeSessionId ?? undefined);
+              if (uuid) {
+                _topicResumeMap!.save(topicId, uuid, session.tmuxSession);
+                console.log(`[beforeSessionKill] Saved resume UUID ${uuid} for topic ${topicId} (session: ${session.name}, source: ${session.claudeSessionId ? 'hook' : 'mtime'})`);
+              }
             }
           }
 
-          // Save Slack channel resume UUID
+          // Save Slack channel resume UUID (if Slack is configured)
           if (_slackAdapter) {
             const channelId = _slackAdapter.getChannelForSession(session.tmuxSession);
             if (channelId) {
