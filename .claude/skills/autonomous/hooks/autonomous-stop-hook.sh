@@ -19,7 +19,7 @@ set -euo pipefail
 HOOK_INPUT=$(cat)
 
 # Check if autonomous mode is active
-STATE_FILE=".claude/autonomous-state.local.md"
+STATE_FILE=".instar/autonomous-state.local.md"
 
 if [[ ! -f "$STATE_FILE" ]]; then
   # No active autonomous session — allow exit
@@ -38,6 +38,18 @@ fi
 # Uses self-bootstrapping: if no session_id in state file yet, the FIRST
 # session to trigger the hook claims it. All other sessions see a mismatch.
 STATE_SESSION=$(echo "$FRONTMATTER" | grep '^session_id:' | sed 's/^session_id: *//' | tr -d '"' || true)
+
+# VALIDATE: If state has a session_id but it's not a valid UUID, treat as empty.
+# Claude sometimes writes a custom string instead of the real $CLAUDE_CODE_SESSION_ID.
+# Non-UUID values will never match the real hook session_id, causing the hook to
+# fail-open and allow premature exit. By clearing invalid values, we fall through
+# to self-bootstrap, which captures the REAL session_id from the first hook call.
+UUID_REGEX='^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+if [[ -n "$STATE_SESSION" ]] && ! [[ "$STATE_SESSION" =~ $UUID_REGEX ]]; then
+  echo "[autonomous] Invalid session_id in state file (not UUID): '$STATE_SESSION' — falling back to self-bootstrap" >&2
+  STATE_SESSION=""
+fi
+
 HOOK_SESSION=$(echo "$HOOK_INPUT" | jq -r '.session_id // ""' 2>/dev/null || echo "")
 
 # If hook has no session_id → fail OPEN (unknown context, don't trap)
@@ -94,10 +106,10 @@ fi
 
 # Check for emergency stop (look in recent messages)
 # The MessageSentinel handles this at the messaging layer, but also check here
-if [[ -f ".claude/autonomous-emergency-stop" ]]; then
+if [[ -f ".instar/autonomous-emergency-stop" ]]; then
   echo "🛑 Autonomous mode: Emergency stop detected."
   rm "$STATE_FILE"
-  rm -f ".claude/autonomous-emergency-stop"
+  rm -f ".instar/autonomous-emergency-stop"
   exit 0
 fi
 

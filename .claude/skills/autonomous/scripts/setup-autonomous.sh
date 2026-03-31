@@ -89,9 +89,9 @@ if [[ -z "$COMPLETION_PROMISE" ]]; then
 fi
 
 # Create state file
-mkdir -p .claude
+mkdir -p .instar
 
-cat > .claude/autonomous-state.local.md <<EOF
+cat > .instar/autonomous-state.local.md <<EOF
 ---
 active: true
 iteration: 1

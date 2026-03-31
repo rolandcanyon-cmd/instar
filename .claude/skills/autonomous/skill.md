@@ -67,7 +67,7 @@ if not any('autonomous-stop-hook' in str(h) for h in hooks):
 
 **2b. Write the state file DIRECTLY** (do NOT shell out to bash — the session ID env var is only available inside Claude Code):
 
-Use the **Write tool** to create `.claude/autonomous-state.local.md` with this content:
+Use the **Write tool** to create `.instar/autonomous-state.local.md` with this content:
 
 ```markdown
 ---
@@ -180,7 +180,7 @@ The stop hook will detect the promise and allow exit.
 The user can always stop autonomous mode:
 
 1. **Via messaging**: Send "stop everything" or "emergency stop" — the MessageSentinel intercepts
-2. **Via file**: `touch .claude/autonomous-emergency-stop` — the stop hook checks for this
+2. **Via file**: `touch .instar/autonomous-emergency-stop` — the stop hook checks for this
 3. **Via cancel**: `/cancel-autonomous` — removes the state file
 
 The stop hook checks for emergency stop on EVERY iteration. User safety is never compromised.
@@ -189,7 +189,7 @@ The stop hook checks for emergency stop on EVERY iteration. User safety is never
 
 To manually cancel:
 ```bash
-rm -f .claude/autonomous-state.local.md
+rm -f .instar/autonomous-state.local.md
 ```
 
 ---
@@ -242,7 +242,7 @@ Feeling tired (as an AI) and deferring. **You don't get tired. The hook knows th
 
 The stop hook is at `.claude/skills/autonomous/hooks/autonomous-stop-hook.sh`.
 
-It reads state from `.claude/autonomous-state.local.md` and:
+It reads state from `.instar/autonomous-state.local.md` and:
 - Blocks exit if tasks are incomplete
 - Feeds the task list + goal back as the next prompt
 - Increments the iteration counter
