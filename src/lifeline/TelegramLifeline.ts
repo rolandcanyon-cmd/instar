@@ -145,6 +145,12 @@ interface TelegramUpdate {
     };
     date: number;
   };
+  callback_query?: {
+    id: string;
+    from: { id: number; first_name: string; username?: string };
+    data?: string;
+    message?: { message_id: number; chat: { id: number } };
+  };
 }
 
 export class TelegramLifeline {
@@ -161,7 +167,8 @@ export class TelegramLifeline {
   private lifelineTopicId: number | null = null;
   private lockPath: string;
   private consecutive409s = 0;
-  private pollBackoffMs = 2000; // Grows on 409 errors
+  private consecutive429s = 0;
+  private pollBackoffMs = 2000; // Grows on 409/429 errors
 
   // Doctor session tracking (Crash Recovery UX)
   private activeDoctorSession: string | null = null;
@@ -198,6 +205,11 @@ export class TelegramLifeline {
     // Wire supervisor events
     this.supervisor.on('serverUp', () => {
       console.log('[Lifeline] Server is up — replaying queued messages');
+      if (this.hasNotifiedServerDown) {
+        this.hasNotifiedServerDown = false;
+        this.suppressedServerDownCount = 0;
+        this.saveRateLimitState();
+      }
       this.replayQueue();
     });
 
@@ -213,6 +225,16 @@ export class TelegramLifeline {
     this.supervisor.on('circuitBroken', (totalFailures: number, lastCrashOutput: string) => {
       console.error(`[Lifeline] Circuit breaker triggered after ${totalFailures} failures`);
       this.notifyCircuitBroken(totalFailures, lastCrashOutput);
+    });
+
+    this.supervisor.on('updateApplied', (targetVersion: string) => {
+      console.log(`[Lifeline] Update to v${targetVersion} applied — scheduling self-restart to pick up new code`);
+      // Delay the self-exit to allow queue replay and notifications to flush.
+      // launchd KeepAlive will respawn the process with the updated shadow install.
+      setTimeout(() => {
+        console.log(`[Lifeline] Self-restarting for v${targetVersion}...`);
+        process.exit(0);
+      }, 5_000);
     });
 
     this.supervisor.on('debugRestartRequested', (request: { fixDescription: string; requestedBy: string }) => {
@@ -352,7 +374,7 @@ export class TelegramLifeline {
       await this.apiCall('getUpdates', {
         offset: this.lastUpdateId + 1,
         timeout: 0,
-        allowed_updates: ['message'],
+        allowed_updates: ['message', 'callback_query'],
       });
       console.log('[Lifeline] Stale connection flushed');
     } catch (err) {
@@ -371,7 +393,7 @@ export class TelegramLifeline {
             await this.apiCall('getUpdates', {
               offset: this.lastUpdateId + 1,
               timeout: 0,
-              allowed_updates: ['message'],
+              allowed_updates: ['message', 'callback_query'],
             });
             console.log(`[Lifeline] Stale connection flushed (retry ${i + 1} succeeded)`);
             return;
@@ -405,8 +427,9 @@ export class TelegramLifeline {
         // messages that were already processed.
         this.saveOffset();
       }
-      // Success — reset 409 backoff
+      // Success — reset backoff counters
       this.consecutive409s = 0;
+      this.consecutive429s = 0;
       this.pollBackoffMs = this.config.pollIntervalMs ?? 2000;
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -423,6 +446,16 @@ export class TelegramLifeline {
         if (this.consecutive409s === 1 || this.consecutive409s % 10 === 0) {
           console.warn(`[Lifeline] Telegram 409 Conflict (${this.consecutive409s}x) — another bot instance is polling. Backing off to ${this.pollBackoffMs / 1000}s`);
         }
+      } else if (errMsg.includes('429') || errMsg.includes('rate limited')) {
+        // Handle 429 Too Many Requests — back off the poll loop itself
+        // The per-call retry in apiCall() handles individual requests, but if the
+        // rate limit persists across calls, the poll loop must also slow down.
+        this.consecutive429s++;
+        // Exponential backoff: 10s, 20s, 40s, 60s max
+        this.pollBackoffMs = Math.min(60_000, 5000 * Math.pow(2, this.consecutive429s));
+        if (this.consecutive429s === 1 || this.consecutive429s % 5 === 0) {
+          console.warn(`[Lifeline] Telegram 429 rate limit (${this.consecutive429s}x) — backing off poll to ${this.pollBackoffMs / 1000}s`);
+        }
       } else if (!errMsg.includes('abort')) {
         // Non-fatal error — continue polling
         console.error(`[Lifeline] Poll error: ${errMsg}`);
@@ -433,6 +466,13 @@ export class TelegramLifeline {
   }
 
   private async processUpdate(update: TelegramUpdate): Promise<void> {
+    // Forward callback queries (inline keyboard button presses) to the server
+    // These come from Prompt Gate relay buttons — the server handles the response injection
+    if (update.callback_query) {
+      await this.forwardCallbackQuery(update.callback_query);
+      return;
+    }
+
     const msg = update.message;
     if (!msg) return;
 
@@ -681,6 +721,57 @@ export class TelegramLifeline {
   }
 
   /**
+   * Forward an inline keyboard callback query to the server for processing.
+   * Prompt Gate relay buttons generate these when the user taps a button.
+   */
+  private async forwardCallbackQuery(query: NonNullable<TelegramUpdate['callback_query']>): Promise<void> {
+    if (!this.supervisor.healthy) {
+      // Server is down — can't process the callback. Answer with error.
+      await this.apiCall('answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: 'Server is restarting — please try again in a moment.',
+      }).catch(() => {});
+      return;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      try {
+        const response = await fetch(
+          `http://127.0.0.1:${this.projectConfig.port}/internal/telegram-callback`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              callbackQueryId: query.id,
+              data: query.data,
+              fromUserId: query.from.id,
+              fromUsername: query.from.username,
+              messageId: query.message?.message_id,
+              chatId: query.message?.chat?.id,
+            }),
+            signal: controller.signal,
+          }
+        );
+        if (!response.ok) {
+          await this.apiCall('answerCallbackQuery', {
+            callback_query_id: query.id,
+            text: 'Failed to process — please try again.',
+          }).catch(() => {});
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {
+      await this.apiCall('answerCallbackQuery', {
+        callback_query_id: query.id,
+        text: 'Server unreachable.',
+      }).catch(() => {});
+    }
+  }
+
+  /**
    * Forward a message to the Instar server's Telegram webhook.
    */
   private async forwardToServer(
@@ -885,16 +976,36 @@ export class TelegramLifeline {
     if (replayed > 0 || failed > 0 || dropped > 0) {
       console.log(`[Lifeline] Replay complete: ${replayed} delivered, ${failed} re-queued, ${dropped} dropped`);
     }
+
+    // Notify the user that their queued messages were delivered
+    if (replayed > 0) {
+      // Collect unique topics that received replayed messages
+      const replayedTopics = new Set(
+        messages.filter((_, i) => i < replayed + failed + dropped).map(m => m.topicId)
+      );
+      for (const topicId of replayedTopics) {
+        try {
+          const count = messages.filter(m => m.topicId === topicId).length;
+          await this.sendToTopic(topicId,
+            count === 1
+              ? '✓ Server recovered — your queued message has been delivered.'
+              : `✓ Server recovered — ${count} queued messages delivered.`
+          );
+        } catch { /* best effort */ }
+      }
+    }
   }
 
   // ── Notifications ─────────────────────────────────────────
 
-  /** Timestamp of last "server down" notification — for rate limiting. */
-  private lastServerDownNotifyAt = 0;
-  /** Suppressed "server down" count during rate limit window. */
+  /** Whether we've already notified for the current outage. Reset on recovery. */
+  private hasNotifiedServerDown = false;
+  /** Suppressed "server down" count during current outage. */
   private suppressedServerDownCount = 0;
-  /** Minimum interval between "server down" notifications (30 minutes). */
-  private static readonly SERVER_DOWN_RATE_LIMIT_MS = 30 * 60_000;
+  /** Timestamp of last "server down" notification sent (for cross-outage rate limiting). */
+  private lastServerDownNotifyAt = 0;
+  /** Minimum interval between "server down" notifications, even across separate outages (30 min). */
+  private static readonly SERVER_DOWN_COOLDOWN_MS = 30 * 60_000;
 
   /** Per-topic timestamps for rate-limiting queue acknowledgment messages. */
   private lastQueueAckAt = new Map<number, number>();
@@ -913,8 +1024,9 @@ export class TelegramLifeline {
       const rateLimitPath = path.join(this.projectConfig.stateDir, 'state', 'lifeline-rate-limit.json');
       if (fs.existsSync(rateLimitPath)) {
         const data = JSON.parse(fs.readFileSync(rateLimitPath, 'utf-8'));
-        this.lastServerDownNotifyAt = data.lastServerDownNotifyAt ?? 0;
+        this.hasNotifiedServerDown = data.hasNotifiedServerDown ?? false;
         this.suppressedServerDownCount = data.suppressedServerDownCount ?? 0;
+        this.lastServerDownNotifyAt = data.lastServerDownNotifyAt ?? 0;
       }
     } catch {
       // Start fresh if state is corrupted
@@ -928,8 +1040,9 @@ export class TelegramLifeline {
       const rateLimitPath = path.join(stateSubdir, 'lifeline-rate-limit.json');
       const tmpPath = `${rateLimitPath}.${process.pid}.tmp`;
       fs.writeFileSync(tmpPath, JSON.stringify({
-        lastServerDownNotifyAt: this.lastServerDownNotifyAt,
+        hasNotifiedServerDown: this.hasNotifiedServerDown,
         suppressedServerDownCount: this.suppressedServerDownCount,
+        lastServerDownNotifyAt: this.lastServerDownNotifyAt,
         savedAt: new Date().toISOString(),
       }));
       fs.renameSync(tmpPath, rateLimitPath);
@@ -959,27 +1072,34 @@ export class TelegramLifeline {
   }
 
   private async notifyServerDown(reason: string): Promise<void> {
-    const now = Date.now();
-    const elapsed = now - this.lastServerDownNotifyAt;
-
-    // Rate limit: don't spam "server went down" if it keeps cycling
-    if (this.lastServerDownNotifyAt > 0 && elapsed < TelegramLifeline.SERVER_DOWN_RATE_LIMIT_MS) {
+    // Only notify once per outage — reset happens on serverUp
+    if (this.hasNotifiedServerDown) {
       this.suppressedServerDownCount++;
       this.saveRateLimitState();
-      console.log(`[Lifeline] Suppressing duplicate "server down" notification (${this.suppressedServerDownCount} suppressed, next allowed in ${Math.round((TelegramLifeline.SERVER_DOWN_RATE_LIMIT_MS - elapsed) / 60_000)}m)`);
+      console.log(`[Lifeline] Suppressing duplicate "server down" notification (${this.suppressedServerDownCount} suppressed this outage)`);
       return;
     }
 
+    // Cross-outage rate limit: suppress if we notified within the cooldown window.
+    // This prevents spam during flap cycles (e.g., Power Nap causing repeated down→up→down).
+    const now = Date.now();
+    if (this.lastServerDownNotifyAt > 0 &&
+        (now - this.lastServerDownNotifyAt) < TelegramLifeline.SERVER_DOWN_COOLDOWN_MS) {
+      this.hasNotifiedServerDown = true;
+      this.suppressedServerDownCount++;
+      this.saveRateLimitState();
+      const remainingMin = Math.round((TelegramLifeline.SERVER_DOWN_COOLDOWN_MS - (now - this.lastServerDownNotifyAt)) / 60_000);
+      console.log(`[Lifeline] Suppressing "server down" notification — cooldown active (${remainingMin}min remaining)`);
+      return;
+    }
+
+    this.hasNotifiedServerDown = true;
     this.lastServerDownNotifyAt = now;
     const topicId = this.lifelineTopicId ?? 1;
-    const status = this.supervisor.getStatus();
 
-    let message = `Server went down: ${reason}\n\n` +
+    const message = `Server went down: ${reason}\n\n` +
       `Your messages will be queued until recovery. Use /lifeline status to check.`;
 
-    if (this.suppressedServerDownCount > 0) {
-      message += `\n\n(${this.suppressedServerDownCount} similar notifications were suppressed since the last alert)`;
-    }
     this.suppressedServerDownCount = 0;
     this.saveRateLimitState();
 
@@ -1579,7 +1699,7 @@ export class TelegramLifeline {
     const result = await this.apiCall('getUpdates', {
       offset: this.lastUpdateId + 1,
       timeout: 30,
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'callback_query'],
     });
     return (result as TelegramUpdate[]) ?? [];
   }

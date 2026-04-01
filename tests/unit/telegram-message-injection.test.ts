@@ -66,8 +66,9 @@ describe('Telegram message injection logic', () => {
       path.join(process.cwd(), 'src/core/SessionManager.ts'),
       'utf-8'
     );
-    // Should have two execFileSync calls in sendInput — one for text, one for Enter
-    const sendInputMatch = source.match(/sendInput[\s\S]*?(?=\n\s{2}\w|\n\s{2}\/\*\*)/);
+    // Should have two execFileSync calls in sendInput method — one for text, one for Enter
+    // Match the method definition specifically (not call sites)
+    const sendInputMatch = source.match(/sendInput\(tmuxSession: string[\s\S]*?(?=\n\s{2}\w|\n\s{2}\/\*\*)/);
     if (sendInputMatch) {
       const sendInputBody = sendInputMatch[0];
       expect(sendInputBody).toContain("'Enter'");

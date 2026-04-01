@@ -21,6 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { TreeGenerator } from '../knowledge/TreeGenerator.js';
+import { HTTP_HOOK_TEMPLATES, buildHttpHookSettings } from '../data/http-hook-templates.js';
 
 export interface MigrationResult {
   /** What was upgraded */
@@ -190,6 +191,13 @@ export class PostUpdateMigrator {
     } catch (err) {
       result.errors.push(`response-review.js: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    try {
+      fs.writeFileSync(path.join(instarHooksDir, 'auto-approve-permissions.js'), this.getAutoApprovePermissionsHook(), { mode: 0o755 });
+      result.upgraded.push('hooks/instar/auto-approve-permissions.js (subagent permission unblocking)');
+    } catch (err) {
+      result.errors.push(`auto-approve-permissions.js: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -206,6 +214,7 @@ export class PostUpdateMigrator {
       'scope-coherence-collector.js', 'scope-coherence-checkpoint.js',
       'instructions-loaded-tracker.js', 'subagent-start-tracker.js',
       'free-text-guard.sh', 'claim-intercept.js', 'claim-intercept-response.js', 'response-review.js',
+      'auto-approve-permissions.js',
     ];
 
     // Check if we're still on the old flat layout (hooks directly in .instar/hooks/)
@@ -373,6 +382,357 @@ export class PostUpdateMigrator {
     }
 
     return patched;
+  }
+
+  /**
+   * Ensure HTTP hooks from the template exist in settings.json.
+   * Previous migrations only patched existing HTTP hooks (adding instar_sid param)
+   * but never added them from scratch. Agents initialized before HTTP hooks were
+   * introduced have no HTTP hooks at all, causing claudeSessionId to never be
+   * populated — which breaks session resume (falls back to mtime cross-contamination).
+   */
+  private ensureHttpHooksExist(
+    hooks: Record<string, unknown[]>,
+    result: MigrationResult,
+  ): boolean {
+    const serverUrl = `http://localhost:${this.config.port}`;
+
+    // Check if ANY event reporter hook already exists (HTTP or command-based)
+    const hasEventReporterHook = Object.values(hooks).some(entries => {
+      if (!Array.isArray(entries)) return false;
+      return entries.some(entry => {
+        if (typeof entry !== 'object' || entry === null) return false;
+        const e = entry as Record<string, unknown>;
+        if (Array.isArray(e.hooks)) {
+          return (e.hooks as Array<Record<string, unknown>>).some(h => {
+            // Check for command hook (new style)
+            if (h.type === 'command' && typeof h.command === 'string' && (h.command as string).includes('hook-event-reporter')) return true;
+            // Check for HTTP hook (old style, with valid URL)
+            if (h.type === 'http' && typeof h.url === 'string' && !(h.url as string).includes('${INSTAR_SERVER_URL}')) return true;
+            return false;
+          });
+        }
+        // Check direct entry
+        if (e.type === 'command' && typeof e.command === 'string' && (e.command as string).includes('hook-event-reporter')) return true;
+        if (e.type === 'http' && typeof e.url === 'string' && !(e.url as string).includes('${INSTAR_SERVER_URL}')) return true;
+        return false;
+      });
+    });
+
+    if (hasEventReporterHook) return false;
+
+    // Remove any existing broken HTTP hooks (with unresolved template vars)
+    for (const [event, entries] of Object.entries(hooks)) {
+      if (!Array.isArray(entries)) continue;
+      hooks[event] = entries.filter(entry => {
+        if (typeof entry !== 'object' || entry === null) return true;
+        const e = entry as Record<string, unknown>;
+        if (Array.isArray(e.hooks)) {
+          const hooksArr = e.hooks as Array<Record<string, unknown>>;
+          return !hooksArr.some(h =>
+            h.type === 'http' && typeof h.url === 'string' && (h.url as string).includes('${INSTAR_SERVER_URL}'),
+          );
+        }
+        return !(e.type === 'http' && typeof e.url === 'string' && (e.url as string).includes('${INSTAR_SERVER_URL}'));
+      });
+      // Clean up empty arrays
+      if ((hooks[event] as unknown[]).length === 0) {
+        delete hooks[event];
+      }
+    }
+
+    // Add HTTP hooks using the resolved localhost URL
+    const httpHookSettings = buildHttpHookSettings(serverUrl);
+    for (const [event, entries] of Object.entries(httpHookSettings)) {
+      if (!hooks[event]) {
+        hooks[event] = [];
+      }
+      (hooks[event] as unknown[]).push(...entries);
+    }
+
+    result.upgraded.push(
+      `.claude/settings.json: added ${HTTP_HOOK_TEMPLATES.length} HTTP hooks for observability (url: ${serverUrl}/hooks/events)`,
+    );
+    return true;
+  }
+
+  /**
+   * Ensure PermissionRequest auto-approve hook exists in settings.json.
+   * Subagents spawned via the Agent tool don't inherit --dangerously-skip-permissions,
+   * so without this catch-all hook they prompt for every tool use and block jobs.
+   * Real safety is in PreToolUse hooks — permission prompts are duplicative friction.
+   */
+  private ensurePermissionAutoApprove(
+    hooks: Record<string, unknown[]>,
+    result: MigrationResult,
+  ): boolean {
+    // Check if PermissionRequest hook already exists
+    if (hooks.PermissionRequest) {
+      const entries = hooks.PermissionRequest as Array<{ hooks?: Array<{ command?: string }> }>;
+      const hasAutoApprove = entries.some(e =>
+        e.hooks?.some(h => h.command?.includes('auto-approve-permissions')),
+      );
+      if (hasAutoApprove) return false;
+    }
+
+    if (!hooks.PermissionRequest) {
+      hooks.PermissionRequest = [];
+    }
+
+    (hooks.PermissionRequest as unknown[]).push({
+      matcher: '',
+      hooks: [{
+        type: 'command',
+        command: 'node .instar/hooks/instar/auto-approve-permissions.js',
+        timeout: 5000,
+      }],
+    });
+
+    result.upgraded.push('.claude/settings.json: added PermissionRequest auto-approve (subagent unblocking)');
+    return true;
+  }
+
+  /**
+   * Ensure autonomous stop hook is registered and the skill files are deployed.
+   * This is the structural enforcement for /autonomous mode — without it,
+   * sessions exit normally after each response instead of looping on the task list.
+   */
+  private ensureAutonomousStopHook(
+    hooks: Record<string, unknown[]>,
+    result: MigrationResult,
+  ): boolean {
+    let patched = false;
+
+    // 1. Deploy full autonomous skill directory (skill.md, hooks/, scripts/) if missing
+    const skillDir = path.join(this.config.projectDir, '.claude', 'skills', 'autonomous');
+    const skillHooksDir = path.join(skillDir, 'hooks');
+    const hookScript = path.join(skillHooksDir, 'autonomous-stop-hook.sh');
+    const hooksJson = path.join(skillHooksDir, 'hooks.json');
+    const skillMd = path.join(skillDir, 'skill.md');
+
+    const bundledSkillDir = path.join(path.dirname(path.dirname(__dirname)), '.claude', 'skills', 'autonomous');
+    if (fs.existsSync(bundledSkillDir)) {
+      // Deploy skill.md if missing
+      const bundledSkillMd = path.join(bundledSkillDir, 'skill.md');
+      if (!fs.existsSync(skillMd) && fs.existsSync(bundledSkillMd)) {
+        fs.mkdirSync(skillDir, { recursive: true });
+        fs.copyFileSync(bundledSkillMd, skillMd);
+        result.upgraded.push('.claude/skills/autonomous/skill.md: deployed skill prompt');
+        patched = true;
+      }
+
+      // Deploy scripts/ if missing
+      const bundledScriptsDir = path.join(bundledSkillDir, 'scripts');
+      const skillScriptsDir = path.join(skillDir, 'scripts');
+      if (!fs.existsSync(skillScriptsDir) && fs.existsSync(bundledScriptsDir)) {
+        fs.mkdirSync(skillScriptsDir, { recursive: true });
+        for (const f of fs.readdirSync(bundledScriptsDir)) {
+          fs.copyFileSync(path.join(bundledScriptsDir, f), path.join(skillScriptsDir, f));
+          fs.chmodSync(path.join(skillScriptsDir, f), 0o755);
+        }
+        result.upgraded.push('.claude/skills/autonomous/scripts: deployed skill scripts');
+        patched = true;
+      }
+
+      // Deploy hooks/ if missing
+      if (!fs.existsSync(hookScript)) {
+        fs.mkdirSync(skillHooksDir, { recursive: true });
+        const bundledHook = path.join(bundledSkillDir, 'hooks', 'autonomous-stop-hook.sh');
+        const bundledJson = path.join(bundledSkillDir, 'hooks', 'hooks.json');
+        if (fs.existsSync(bundledHook)) {
+          fs.copyFileSync(bundledHook, hookScript);
+          fs.chmodSync(hookScript, 0o755);
+        }
+        if (fs.existsSync(bundledJson) && !fs.existsSync(hooksJson)) {
+          fs.copyFileSync(bundledJson, hooksJson);
+        }
+        result.upgraded.push('.claude/skills/autonomous/hooks: deployed stop hook files');
+        patched = true;
+      }
+
+      // Force-update autonomous skill files that reference old .claude/ state path.
+      // The state file was moved from .claude/autonomous-state.local.md to
+      // .instar/autonomous-state.local.md because Claude Code's settings
+      // self-modification prompt blocks writes to .claude/ even with
+      // --dangerously-skip-permissions. Also adds UUID validation for session_id.
+      const filesToUpdate = [
+        { src: 'hooks/autonomous-stop-hook.sh', dst: hookScript, executable: true },
+        { src: 'scripts/setup-autonomous.sh', dst: path.join(skillDir, 'scripts', 'setup-autonomous.sh'), executable: true },
+        { src: 'skill.md', dst: skillMd, executable: false },
+      ];
+      for (const { src, dst, executable } of filesToUpdate) {
+        if (fs.existsSync(dst)) {
+          const content = fs.readFileSync(dst, 'utf-8');
+          if (content.includes('.claude/autonomous-state') || content.includes('.claude/autonomous-emergency-stop')) {
+            const bundledSrc = path.join(bundledSkillDir, src);
+            if (fs.existsSync(bundledSrc)) {
+              fs.copyFileSync(bundledSrc, dst);
+              if (executable) fs.chmodSync(dst, 0o755);
+              result.upgraded.push(`${dst}: migrated autonomous state path from .claude/ to .instar/`);
+              patched = true;
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Register in settings.json Stop hooks if missing
+    if (!hooks.Stop) {
+      hooks.Stop = [];
+    }
+    const stopEntries = hooks.Stop as Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>;
+    const hasAutonomousHook = stopEntries.some(e =>
+      e.hooks?.some(h => h.command?.includes('autonomous-stop-hook')),
+    );
+    if (!hasAutonomousHook) {
+      // Must be first in the Stop chain so it blocks before other hooks run
+      (hooks.Stop as unknown[]).unshift({
+        matcher: '',
+        hooks: [{
+          type: 'command',
+          command: 'bash .claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
+          timeout: 10000,
+        }],
+      });
+      result.upgraded.push('.claude/settings.json: registered autonomous stop hook (structural enforcement)');
+      patched = true;
+    }
+
+    return patched;
+  }
+
+  /**
+   * Replace HTTP hooks with command hooks that use hook-event-reporter.js.
+   * Claude Code HTTP hooks (type: "http") silently fail to fire as of v2.1.78.
+   * This migration converts them to command hooks which reliably fire.
+   * Also installs the hook-event-reporter.js script if missing.
+   */
+  private migrateHttpHooksToCommandHooks(
+    hooks: Record<string, unknown[]>,
+    result: MigrationResult,
+  ): boolean {
+    let patched = false;
+    const commandHook = {
+      type: 'command',
+      command: 'node .instar/hooks/instar/hook-event-reporter.js',
+      timeout: 3000,
+    };
+
+    for (const [event, entries] of Object.entries(hooks)) {
+      if (!Array.isArray(entries)) continue;
+
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        if (typeof entry !== 'object' || entry === null) continue;
+        const entryObj = entry as Record<string, unknown>;
+
+        // Check nested hooks arrays for HTTP hooks
+        if (Array.isArray(entryObj.hooks)) {
+          const hooksArr = entryObj.hooks as Array<Record<string, unknown>>;
+          const hasHttpHook = hooksArr.some(h =>
+            h.type === 'http' && typeof h.url === 'string' && (h.url as string).includes('/hooks/events'),
+          );
+          if (hasHttpHook) {
+            // Replace the entire entry with a command hook entry
+            entries[i] = {
+              matcher: (entryObj.matcher as string) ?? '',
+              hooks: [commandHook],
+            };
+            patched = true;
+          }
+        }
+
+        // Check direct HTTP hook entries
+        if (entryObj.type === 'http' && typeof entryObj.url === 'string' && (entryObj.url as string).includes('/hooks/events')) {
+          entries[i] = {
+            matcher: '',
+            hooks: [commandHook],
+          };
+          patched = true;
+        }
+      }
+    }
+
+    // Install the hook-event-reporter.js script if it doesn't exist
+    const hooksDir = path.join(this.config.stateDir, 'hooks', 'instar');
+    const reporterPath = path.join(hooksDir, 'hook-event-reporter.js');
+    if (!fs.existsSync(reporterPath)) {
+      try {
+        fs.mkdirSync(hooksDir, { recursive: true });
+        // Import the script content inline to avoid circular dependency
+        const script = this.getHookEventReporterScript();
+        fs.writeFileSync(reporterPath, script, { mode: 0o755 });
+        if (!patched) {
+          result.upgraded.push('.instar/hooks/instar/hook-event-reporter.js installed');
+        }
+      } catch (err) {
+        result.errors.push(`hook-event-reporter.js install: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (patched) {
+      result.upgraded.push('.claude/settings.json: replaced HTTP hooks with command hooks (HTTP hooks silently fail in Claude Code <=2.1.78)');
+    }
+
+    return patched;
+  }
+
+  private getHookEventReporterScript(): string {
+    return `#!/usr/bin/env node
+// Hook Event Reporter — command hook replacement for HTTP hooks.
+//
+// Claude Code HTTP hooks (type: "http") silently fail to fire as of v2.1.78.
+// This command hook achieves the same result: POST hook event data to the
+// Instar server, which populates claudeSessionId for session resumption.
+
+const http = require('http');
+
+const serverUrl = process.env.INSTAR_SERVER_URL || 'http://localhost:4042';
+const authToken = process.env.INSTAR_AUTH_TOKEN || '';
+const instarSid = process.env.INSTAR_SESSION_ID || '';
+
+if (!authToken || !instarSid) {
+  process.exit(0);
+}
+
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(data);
+    const payload = JSON.stringify({
+      event: input.hook_event || (input.tool_name ? 'PostToolUse' : 'Unknown'),
+      session_id: input.session_id || '',
+      tool_name: input.tool_name || '',
+    });
+
+    const url = new URL(serverUrl + '/hooks/events?instar_sid=' + instarSid);
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + authToken,
+      },
+      timeout: 3000,
+    }, (res) => {
+      res.resume();
+    });
+
+    req.on('error', () => {});
+    req.write(payload);
+    req.end();
+
+    setTimeout(() => process.exit(0), 50);
+  } catch (e) {
+    process.exit(0);
+  }
+});
+
+setTimeout(() => process.exit(0), 2000);
+`;
   }
 
   /**
@@ -960,6 +1320,33 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       patched = true;
     }
 
+    // Replace HTTP hooks with command hooks. Claude Code HTTP hooks (type: "http")
+    // silently fail to fire as of v2.1.78, which means claudeSessionId is never
+    // populated and session resume falls back to unreliable mtime heuristic.
+    // Command hooks reliably fire, so we use hook-event-reporter.js instead.
+    if (this.migrateHttpHooksToCommandHooks(hooks, result)) {
+      patched = true;
+    }
+
+    // Ensure event reporter hooks exist for observability events (session resume, telemetry).
+    if (this.ensureHttpHooksExist(hooks, result)) {
+      patched = true;
+    }
+
+    // Ensure PermissionRequest auto-approve hook exists — subagents don't inherit
+    // --dangerously-skip-permissions, so they'd prompt without this catch-all.
+    if (this.ensurePermissionAutoApprove(hooks, result)) {
+      patched = true;
+    }
+
+    // Ensure autonomous stop hook is registered — structural enforcement for /autonomous mode.
+    // Without this, autonomous sessions have no hook to block exit and feed tasks back,
+    // so they just stop after each response. This was a critical gap where the hook files
+    // existed but were never registered in settings.json.
+    if (this.ensureAutonomousStopHook(hooks, result)) {
+      patched = true;
+    }
+
     if (patched) {
       try {
         fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
@@ -1019,6 +1406,28 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       result.upgraded.push('config.json: added externalOperations defaults (supervised mode)');
     } else {
       result.skipped.push('config.json: externalOperations already configured');
+    }
+
+    // PromptGate — enable by default for all agents.
+    // Without this, permission prompts in sessions are invisible to users and
+    // cause sessions to hang indefinitely waiting for input that never comes.
+    const monitoring = (config.monitoring ?? {}) as Record<string, unknown>;
+    if (!monitoring.promptGate) {
+      monitoring.promptGate = {
+        enabled: true,
+        autoApprove: {
+          enabled: true,
+          fileCreation: true,
+          fileEdits: true,
+          planApproval: false,
+        },
+        dryRun: false,
+      };
+      config.monitoring = monitoring;
+      patched = true;
+      result.upgraded.push('config.json: enabled PromptGate with auto-approve (file edits auto-approved, plans relayed to user)');
+    } else {
+      result.skipped.push('config.json: promptGate already configured');
     }
 
     // Threadline relay — add config block so infrastructure is ready (opt-in).
@@ -1204,7 +1613,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
    * Get the content of a named hook template.
    * Used by init.ts to share canonical hook content without duplication.
    */
-  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review'): string {
+  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review' | 'auto-approve-permissions'): string {
     switch (name) {
       case 'session-start': return this.getSessionStartHook();
       case 'compaction-recovery': return this.getCompactionRecovery();
@@ -1218,6 +1627,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       case 'claim-intercept-response': return this.getClaimInterceptResponseHook();
       case 'telegram-topic-context': return this.getTelegramTopicContextHook();
       case 'response-review': return this.getResponseReviewHook();
+      case 'auto-approve-permissions': return this.getAutoApprovePermissionsHook();
     }
   }
 
@@ -3362,6 +3772,43 @@ process.stdin.on('end', () => {
   } catch {}
   process.exit(0);
 });
+`;
+  }
+
+  private getAutoApprovePermissionsHook(): string {
+    return `#!/usr/bin/env node
+// Auto-approve ALL PermissionRequest hooks.
+//
+// Subagents spawned via the Agent tool don't inherit --dangerously-skip-permissions
+// from the parent session. Without this hook, subagents prompt for every tool use,
+// blocking autonomous sessions and jobs.
+//
+// Real safety is enforced by PreToolUse hooks (dangerous-command-guard.sh,
+// external-communication-guard.js, external-operation-gate.js). Permission prompts
+// are duplicative friction, not protection.
+
+process.stdin.resume();
+let data = '';
+process.stdin.on('data', chunk => data += chunk);
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow' }
+    }
+  }));
+});
+
+// Timeout safety
+setTimeout(() => {
+  console.log(JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: 'PermissionRequest',
+      decision: { behavior: 'allow' }
+    }
+  }));
+  process.exit(0);
+}, 2000);
 `;
   }
 }

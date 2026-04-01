@@ -1,24 +1,18 @@
 /**
  * TelemetryHeartbeat — Opt-in anonymous usage telemetry for Instar.
  *
- * Sends periodic heartbeats with anonymous, aggregate usage data.
- * Default OFF. No PII. No conversation content. Agent owners opt in explicitly.
+ * Two telemetry channels:
+ *   1. Heartbeat (legacy) — Basic version/uptime/usage counts
+ *   2. Baseline — Rich job metrics for cross-agent intelligence
  *
- * What gets sent (basic level):
- *   - Instar version, Node version, OS/arch
- *   - Hashed installation ID (cannot be reversed)
- *   - Agent count, uptime
- *
- * What gets sent (usage level, in addition to basic):
- *   - Jobs run in last 24h (count only)
- *   - Sessions spawned in last 24h (count only)
- *   - Skills invoked in last 24h (count only)
+ * Both are default OFF. No PII. No conversation content. Agent owners opt in explicitly.
  *
  * What is NEVER sent:
  *   - Agent names, prompts, or configuration
  *   - Conversation content or memory data
  *   - File paths, environment variables, or secrets
  *   - IP addresses (not logged server-side)
+ *   - Security-posture feature flags
  */
 
 import { createHash } from 'node:crypto';
@@ -27,12 +21,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import type { TelemetryConfig, TelemetryLevel } from '../core/types.js';
+import type { TelemetryConfig, TelemetryLevel, BaselineSubmission } from '../core/types.js';
+import { TelemetryAuth } from './TelemetryAuth.js';
+import type { TelemetryCollector } from './TelemetryCollector.js';
 
 const DEFAULT_ENDPOINT = 'https://instar-telemetry.sagemind-ai.workers.dev/v1/heartbeat';
+const BASELINE_ENDPOINT = 'https://instar-telemetry.sagemind-ai.workers.dev/v1/telemetry';
 const DEFAULT_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const SEND_TIMEOUT_MS = 3000; // Fire-and-forget, never block agent operation
 const HEARTBEAT_VERSION = 1;
+const BASELINE_LOG_RETENTION_DAYS = 30;
 
 export interface TelemetryHeartbeatConfig {
   enabled: boolean;
@@ -70,10 +68,18 @@ interface UsageCounters {
 export class TelemetryHeartbeat extends EventEmitter {
   private config: TelemetryHeartbeatConfig;
   private interval: ReturnType<typeof setInterval> | null = null;
+  private baselineInterval: ReturnType<typeof setInterval> | null = null;
   private installId: string;
   private startTime: number;
   private counters: UsageCounters;
   private agentCountFn: (() => number) | null = null;
+
+  // Baseline telemetry
+  private auth: TelemetryAuth;
+  private collector: TelemetryCollector | null = null;
+  private lastBaselineSubmission: Date | null = null;
+  private lastBaselineError: string | null = null;
+  private consentChecker: (() => boolean) | null = null;
 
   constructor(telemetryConfig: TelemetryConfig, stateDir: string, projectDir: string, version: string) {
     super();
@@ -94,10 +100,28 @@ export class TelemetryHeartbeat extends EventEmitter {
       skillsInvoked: 0,
       lastReset: Date.now(),
     };
+    this.auth = new TelemetryAuth(stateDir);
   }
 
   /**
-   * Start the periodic heartbeat.
+   * Set the TelemetryCollector for Baseline submissions.
+   * Must be called after construction when scheduler/ledger are available.
+   */
+  setCollector(collector: TelemetryCollector): void {
+    this.collector = collector;
+  }
+
+  /**
+   * Set a consent checker for Baseline submissions.
+   * When set, Baseline submissions only proceed if the checker returns true.
+   * This integrates with the FeatureRegistry consent framework.
+   */
+  setConsentChecker(checker: () => boolean): void {
+    this.consentChecker = checker;
+  }
+
+  /**
+   * Start the periodic heartbeat and Baseline submission cycles.
    * Sends first heartbeat after a short delay (not immediately on boot).
    */
   start(): void {
@@ -114,12 +138,32 @@ export class TelemetryHeartbeat extends EventEmitter {
 
     // Don't prevent process exit
     if (this.interval.unref) this.interval.unref();
+
+    // Baseline: start with random jitter (0-6h) for first submission, then every 6h
+    if (this.auth.isProvisioned() && this.collector) {
+      const jitterMs = Math.floor(Math.random() * this.config.intervalMs);
+      const firstDelay = Math.max(120_000, jitterMs); // At least 2 min to stabilize
+
+      setTimeout(() => {
+        this.sendBaselineSubmission().catch(() => {}); // @silent-fallback-ok — telemetry failure must never affect agent operation
+
+        this.baselineInterval = setInterval(() => {
+          this.sendBaselineSubmission().catch(() => {}); // @silent-fallback-ok — telemetry failure must never affect agent operation
+        }, this.config.intervalMs);
+
+        if (this.baselineInterval?.unref) this.baselineInterval.unref();
+      }, firstDelay);
+    }
   }
 
   stop(): void {
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
+    }
+    if (this.baselineInterval) {
+      clearInterval(this.baselineInterval);
+      this.baselineInterval = null;
     }
   }
 
@@ -202,11 +246,230 @@ export class TelemetryHeartbeat extends EventEmitter {
       this.emit('heartbeat', { success: response.ok, payload });
       return response.ok;
     } catch {
-      // Fire-and-forget — telemetry failure NEVER affects agent operation
+      // @silent-fallback-ok — fire-and-forget; telemetry failure must never affect agent operation
       this.logHeartbeat(payload, false);
       this.emit('heartbeat', { success: false, payload });
       return false;
     }
+  }
+
+  // ── Baseline Telemetry ─────────────────────────────────────────────
+
+  /**
+   * Send a Baseline telemetry submission with HMAC signing.
+   * Fire-and-forget — failure never affects agent operation.
+   */
+  async sendBaselineSubmission(): Promise<boolean> {
+    if (!this.config.enabled || !this.collector || !this.auth.isProvisioned()) return false;
+
+    // Check FeatureRegistry consent if a checker is wired
+    if (this.consentChecker && !this.consentChecker()) {
+      this.lastBaselineError = 'consent_not_granted';
+      return false;
+    }
+
+    const installationId = this.auth.getInstallationId();
+    if (!installationId) return false;
+
+    const now = new Date();
+    const windowEnd = now;
+    const windowStart = new Date(now.getTime() - this.config.intervalMs);
+
+    try {
+      const payload = this.collector.collect(installationId, windowStart, windowEnd);
+      const payloadJson = JSON.stringify(payload);
+      const payloadBytes = Buffer.from(payloadJson, 'utf-8');
+
+      // Check 100KB payload limit
+      if (payloadBytes.length > 100_000) {
+        console.log(`[Baseline] Payload exceeds 100KB (${payloadBytes.length}), skipping`);
+        this.lastBaselineError = 'payload_too_large';
+        return false;
+      }
+
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const signature = this.auth.sign(installationId, timestamp, payloadBytes);
+      if (!signature) {
+        this.lastBaselineError = 'signing_failed';
+        return false;
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Instar-Signature': `hmac-sha256=${signature}`,
+        'X-Instar-Timestamp': timestamp,
+      };
+
+      // Include key fingerprint for server-side binding verification
+      const fingerprint = this.auth.getKeyFingerprint();
+      if (fingerprint) {
+        headers['X-Instar-Key-Fingerprint'] = fingerprint;
+      }
+
+      const response = await fetch(BASELINE_ENDPOINT, {
+        method: 'POST',
+        headers,
+        body: payloadJson,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      // Log full payload for transparency
+      this.logBaselineSubmission(payload, response.status);
+
+      if (response.ok) {
+        this.lastBaselineSubmission = now;
+        this.lastBaselineError = null;
+      } else {
+        try {
+          const body = await response.json() as { error?: string };
+          this.lastBaselineError = body.error ?? `http_${response.status}`;
+        } catch {
+          // @silent-fallback-ok — response body parse failure is non-critical; status code suffices
+          this.lastBaselineError = `http_${response.status}`;
+        }
+      }
+
+      this.emit('baseline', { success: response.ok, payload });
+      return response.ok;
+    } catch (err) {
+      // @silent-fallback-ok — telemetry failure must never affect agent operation
+      this.lastBaselineError = 'network_error';
+      this.emit('baseline', { success: false });
+      return false;
+    }
+  }
+
+  /**
+   * Log full Baseline submission payload for user transparency.
+   * 30-day rolling retention.
+   */
+  private logBaselineSubmission(payload: BaselineSubmission, responseStatus: number): void {
+    try {
+      const logDir = path.join(this.config.stateDir, 'telemetry');
+      if (!fs.existsSync(logDir)) {
+        fs.mkdirSync(logDir, { recursive: true });
+      }
+
+      const logFile = path.join(logDir, 'submissions.jsonl');
+      const entry = {
+        timestamp: new Date().toISOString(),
+        payload,
+        endpoint: 'v1/telemetry',
+        responseStatus,
+      };
+      fs.appendFileSync(logFile, JSON.stringify(entry) + '\n');
+
+      // Rotate entries older than 30 days
+      this.rotateBaselineLog(logFile);
+    } catch {
+      // Logging failure is not critical
+    }
+  }
+
+  /**
+   * Remove submission log entries older than 30 days.
+   */
+  private rotateBaselineLog(logFile: string): void {
+    try {
+      const content = fs.readFileSync(logFile, 'utf-8').trim();
+      if (!content) return;
+
+      const cutoff = new Date(Date.now() - BASELINE_LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+      const lines = content.split('\n');
+      const fresh = lines.filter(line => {
+        try {
+          const entry = JSON.parse(line) as { timestamp?: string };
+          return entry.timestamp && entry.timestamp >= cutoff;
+        } catch {
+          // @silent-fallback-ok — malformed log line is safely skipped during filtering
+          return false;
+        }
+      });
+
+      if (fresh.length < lines.length) {
+        fs.writeFileSync(logFile, fresh.join('\n') + (fresh.length > 0 ? '\n' : ''));
+      }
+    } catch {
+      // Rotation failure is not critical
+    }
+  }
+
+  /**
+   * Get Baseline-specific status for the /telemetry/status endpoint.
+   */
+  getBaselineStatus(): {
+    provisioned: boolean;
+    installationIdPrefix: string | null;
+    lastSubmission: string | null;
+    nextWindow: string | null;
+    lastErrorCode: string | null;
+    hasCollector: boolean;
+  } {
+    const nextWindow = this.lastBaselineSubmission
+      ? new Date(this.lastBaselineSubmission.getTime() + this.config.intervalMs).toISOString()
+      : null;
+
+    return {
+      provisioned: this.auth.isProvisioned(),
+      installationIdPrefix: this.auth.getInstallationIdPrefix(),
+      lastSubmission: this.lastBaselineSubmission?.toISOString() ?? null,
+      nextWindow,
+      lastErrorCode: this.lastBaselineError,
+      hasCollector: this.collector !== null,
+    };
+  }
+
+  /**
+   * Read the latest Baseline submission from the transparency log.
+   */
+  getLatestBaselineSubmission(): { timestamp: string; payload: BaselineSubmission; endpoint: string; responseStatus: number } | null {
+    try {
+      const logFile = path.join(this.config.stateDir, 'telemetry', 'submissions.jsonl');
+      if (!fs.existsSync(logFile)) return null;
+
+      const content = fs.readFileSync(logFile, 'utf-8').trim();
+      if (!content) return null;
+
+      const lines = content.split('\n');
+      const lastLine = lines[lines.length - 1];
+      return JSON.parse(lastLine);
+    } catch {
+      // @silent-fallback-ok — missing or corrupt log file returns null gracefully
+      return null;
+    }
+  }
+
+  /**
+   * Read all Baseline submissions from the transparency log.
+   */
+  getBaselineSubmissions(limit: number = 50, offset: number = 0): Array<{ timestamp: string; payload: BaselineSubmission; endpoint: string; responseStatus: number }> {
+    try {
+      const logFile = path.join(this.config.stateDir, 'telemetry', 'submissions.jsonl');
+      if (!fs.existsSync(logFile)) return [];
+
+      const content = fs.readFileSync(logFile, 'utf-8').trim();
+      if (!content) return [];
+
+      const lines = content.split('\n');
+      // Most recent first
+      const reversed = lines.reverse();
+      return reversed.slice(offset, offset + limit).map(line => JSON.parse(line));
+    } catch {
+      // @silent-fallback-ok — missing or corrupt log file returns empty array gracefully
+      return [];
+    }
+  }
+
+  /**
+   * Get the TelemetryAuth instance (for enable/disable operations).
+   */
+  getAuth(): TelemetryAuth {
+    return this.auth;
   }
 
   // ── Internal Helpers ─────────────────────────────────────────────
@@ -229,14 +492,14 @@ export class TelemetryHeartbeat extends EventEmitter {
     // Try reading machine-id (Linux)
     try {
       return fs.readFileSync('/etc/machine-id', 'utf-8').trim();
-    } catch {}
+    } catch {} // @silent-fallback-ok — /etc/machine-id absent on non-Linux; falls through to macOS method
 
     // macOS: use hardware UUID
     try {
       const output = execFileSync('ioreg', ['-rd1', '-c', 'IOPlatformExpertDevice'], { encoding: 'utf-8' });
       const match = output.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
       if (match) return match[1];
-    } catch {}
+    } catch {} // @silent-fallback-ok — ioreg unavailable on non-macOS; falls through to hostname fallback
 
     // Fallback: hostname + homedir (less unique but still useful)
     return `${os.hostname()}-${os.homedir()}`;
@@ -269,6 +532,7 @@ export class TelemetryHeartbeat extends EventEmitter {
     intervalMs: number;
     endpoint: string;
     counters: UsageCounters;
+    baseline: ReturnType<TelemetryHeartbeat['getBaselineStatus']>;
   } {
     return {
       enabled: this.config.enabled,
@@ -277,6 +541,7 @@ export class TelemetryHeartbeat extends EventEmitter {
       intervalMs: this.config.intervalMs,
       endpoint: this.config.endpoint,
       counters: { ...this.counters },
+      baseline: this.getBaselineStatus(),
     };
   }
 }

@@ -5,12 +5,12 @@
  * This test catches the class of bug where a feature works for new agents
  * (via init) but silently fails for existing agents (no migration).
  *
- * Triggered by: zombie-cleanup-kills-active-sessions bug (2026-03-20)
- * where HTTP hook URL changes weren't migrated to existing agents.
+ * Updated 2026-03-24: HTTP hooks replaced with command hooks due to
+ * Claude Code HTTP hooks silently failing to fire (v2.1.78).
  */
 
 import { describe, it, expect } from 'vitest';
-import { HTTP_HOOK_TEMPLATES, buildHttpHookSettings } from '../../src/data/http-hook-templates.js';
+import { HOOK_EVENT_TEMPLATES, buildHttpHookSettings } from '../../src/data/http-hook-templates.js';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -18,73 +18,32 @@ const MIGRATOR_PATH = path.join(import.meta.dirname, '../../src/core/PostUpdateM
 const migratorSource = fs.readFileSync(MIGRATOR_PATH, 'utf-8');
 
 describe('Migration Parity', () => {
-  describe('HTTP hook templates ↔ PostUpdateMigrator', () => {
-    it('every env var in hook templates is handled by the migrator', () => {
-      // Collect all unique allowedEnvVars across templates
-      const allEnvVars = new Set<string>();
-      for (const template of HTTP_HOOK_TEMPLATES) {
-        for (const v of template.config.allowedEnvVars ?? []) {
-          allEnvVars.add(v);
-        }
-      }
-
-      // Env vars that are resolved at build time (by buildHttpHookSettings) don't need migrations —
-      // they're baked into the URL. Only RUNTIME env vars (expanded by Claude Code) need migration.
-      // INSTAR_SERVER_URL is resolved by buildHttpHookSettings at init time.
-      // INSTAR_AUTH_TOKEN is used in the Authorization header, present since first init.
-      const buildTimeVars = new Set(['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN']);
-
-      // The migrator must reference each runtime env var that appears in templates.
-      // If a new env var is added to templates but the migrator doesn't know
-      // about it, existing agents won't have it in their allowedEnvVars.
-      for (const envVar of allEnvVars) {
-        if (buildTimeVars.has(envVar)) continue;
-        expect(
-          migratorSource.includes(envVar),
-          `Env var "${envVar}" is used in HTTP hook templates but not referenced in PostUpdateMigrator. ` +
-          `Add a migration to patch existing agents' .claude/settings.json.`,
-        ).toBe(true);
+  describe('Hook event templates ↔ PostUpdateMigrator', () => {
+    it('all templates use command type (not HTTP)', () => {
+      for (const template of HOOK_EVENT_TEMPLATES) {
+        expect(template.config.type).toBe('command');
       }
     });
 
-    it('hook URL query params in templates are handled by the migrator', () => {
-      // Extract query params from hook URL templates
-      const sampleUrl = HTTP_HOOK_TEMPLATES[0]?.config.url ?? '';
-      const queryMatch = sampleUrl.match(/\?(.+)$/);
-      if (!queryMatch) return; // No query params — nothing to check
-
-      const params = queryMatch[1].split('&').map(p => p.split('=')[0]);
-      for (const param of params) {
-        expect(
-          migratorSource.includes(param),
-          `URL query param "${param}" is in HTTP hook templates but not referenced in PostUpdateMigrator. ` +
-          `Existing agents' hook URLs won't include this param without a migration.`,
-        ).toBe(true);
+    it('all templates reference hook-event-reporter.js', () => {
+      for (const template of HOOK_EVENT_TEMPLATES) {
+        expect(template.config.command).toContain('hook-event-reporter.js');
       }
     });
 
-    it('buildHttpHookSettings produces valid URLs with expected structure', () => {
+    it('buildHttpHookSettings produces command hooks (not HTTP)', () => {
       const settings = buildHttpHookSettings('http://localhost:4042');
 
-      for (const [event, entries] of Object.entries(settings)) {
+      for (const [_event, entries] of Object.entries(settings)) {
         for (const entry of entries) {
           for (const hook of entry.hooks) {
             const hookObj = hook as Record<string, unknown>;
-            if (hookObj.type !== 'http') continue;
-
-            const url = hookObj.url as string;
-
-            // Server URL must be resolved (no template vars for the base)
-            expect(url).not.toContain('${INSTAR_SERVER_URL}');
-            expect(url.startsWith('http://localhost:4042/hooks/events')).toBe(true);
-
-            // allowedEnvVars must include INSTAR_SESSION_ID for zombie cleanup
-            const envVars = hookObj.allowedEnvVars as string[] | undefined;
-            expect(
-              envVars?.includes('INSTAR_SESSION_ID'),
-              `Hook for "${event}" is missing INSTAR_SESSION_ID in allowedEnvVars. ` +
-              `Zombie cleanup cannot correlate sessions without this.`,
-            ).toBe(true);
+            expect(hookObj.type).toBe('command');
+            expect(hookObj.command).toContain('hook-event-reporter.js');
+            // Should NOT contain any HTTP-specific fields
+            expect(hookObj.url).toBeUndefined();
+            expect(hookObj.headers).toBeUndefined();
+            expect(hookObj.allowedEnvVars).toBeUndefined();
           }
         }
       }
@@ -93,23 +52,74 @@ describe('Migration Parity', () => {
 
   describe('PostUpdateMigrator completeness', () => {
     it('migrateSettings is called from migrate()', () => {
-      // Structural check: the migrate() method must call migrateSettings
       expect(migratorSource).toContain('this.migrateSettings(result)');
     });
 
-    it('migrateHttpHookSessionId is called from migrateSettings', () => {
-      // The session ID migration must be wired in
+    it('migrateHttpHooksToCommandHooks is called from migrateSettings', () => {
+      expect(migratorSource).toContain('this.migrateHttpHooksToCommandHooks(');
+    });
+
+    it('migrateHttpHookSessionId is still called (for agents not yet migrated to command hooks)', () => {
+      // Some agents might still have HTTP hooks from an intermediate version.
+      // The session ID migration should still run to patch those before
+      // migrateHttpHooksToCommandHooks converts them.
       expect(migratorSource).toContain('this.migrateHttpHookSessionId(');
     });
 
-    it('migration handles missing INSTAR_SESSION_ID in allowedEnvVars', () => {
-      // The migration method must check for and add INSTAR_SESSION_ID
-      expect(migratorSource).toContain("'INSTAR_SESSION_ID'");
+    it('ensureHttpHooksExist checks for BOTH command and HTTP hooks', () => {
+      // The guard that prevents duplicate hooks must recognize both formats
+      expect(migratorSource).toContain('hook-event-reporter');
+      expect(migratorSource).toContain("h.type === 'command'");
+      expect(migratorSource).toContain("h.type === 'http'");
     });
 
-    it('migration handles missing instar_sid in hook URLs', () => {
-      // The migration method must check for and add the query param
-      expect(migratorSource).toContain('instar_sid');
+    it('migration installs hook-event-reporter.js script', () => {
+      expect(migratorSource).toContain('hook-event-reporter.js');
+      expect(migratorSource).toContain('getHookEventReporterScript');
+    });
+
+    it('hook-event-reporter.js script includes required env vars', () => {
+      // The script content (embedded in PostUpdateMigrator) must reference
+      // the env vars needed for authentication and session mapping
+      expect(migratorSource).toContain('INSTAR_SERVER_URL');
+      expect(migratorSource).toContain('INSTAR_AUTH_TOKEN');
+      expect(migratorSource).toContain('INSTAR_SESSION_ID');
+    });
+
+    it('hook-event-reporter.js script posts to /hooks/events', () => {
+      expect(migratorSource).toContain('/hooks/events');
+      expect(migratorSource).toContain('session_id');
+    });
+  });
+
+  describe('Regression guards', () => {
+    it('no HTTP hook templates remain (Claude Code HTTP hooks are broken)', () => {
+      // If someone adds HTTP hooks back, this test fails.
+      // HTTP hooks silently fail in Claude Code <=2.1.78.
+      for (const template of HOOK_EVENT_TEMPLATES) {
+        expect(
+          template.config.type,
+          `Template for "${template.event}" uses HTTP type. ` +
+          `Claude Code HTTP hooks silently fail to fire — use command hooks with hook-event-reporter.js instead.`,
+        ).not.toBe('http');
+      }
+    });
+
+    it('migration handles HTTP hooks with unresolved template vars', () => {
+      // The migration must handle ${INSTAR_SERVER_URL} in hook URLs
+      // (a known bug from earlier migration attempts)
+      expect(migratorSource).toContain('${INSTAR_SERVER_URL}');
+    });
+
+    it('autonomous stop hook is deployed and registered during migration', () => {
+      // Without this, /autonomous mode has no structural enforcement.
+      // Sessions would enter "autonomous mode" in name only — the stop hook
+      // that blocks exit and feeds tasks back would never fire.
+      expect(migratorSource).toContain('ensureAutonomousStopHook');
+      expect(migratorSource).toContain('autonomous-stop-hook');
+      // Must both deploy files AND register in settings.json
+      expect(migratorSource).toContain('autonomous-stop-hook.sh');
+      expect(migratorSource).toContain('hooks.Stop');
     });
   });
 });

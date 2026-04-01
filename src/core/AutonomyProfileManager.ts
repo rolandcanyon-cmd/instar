@@ -26,6 +26,9 @@ import type { EvolutionManager } from './EvolutionManager.js';
 
 // ── Profile Defaults ─────────────────────────────────────────────────
 
+/** Discovery aggressiveness: how proactively the agent surfaces features */
+export type DiscoveryAggressiveness = 'passive' | 'contextual' | 'proactive';
+
 interface ProfileDefaults {
   evolutionApprovalMode: 'ai-assisted' | 'autonomous';
   safetyLevel: 1 | 2;
@@ -33,6 +36,8 @@ interface ProfileDefaults {
   autoApplyUpdates: boolean;
   autoRestart: boolean;
   trustAutoElevate: boolean;
+  /** How aggressively to surface undiscovered features */
+  discoveryAggressiveness: DiscoveryAggressiveness;
 }
 
 const PROFILE_DEFAULTS: Record<AutonomyProfileLevel, ProfileDefaults> = {
@@ -43,6 +48,7 @@ const PROFILE_DEFAULTS: Record<AutonomyProfileLevel, ProfileDefaults> = {
     autoApplyUpdates: false,
     autoRestart: false,
     trustAutoElevate: false,
+    discoveryAggressiveness: 'passive',      // Only on user request (pull-only)
   },
   supervised: {
     evolutionApprovalMode: 'ai-assisted',
@@ -51,6 +57,7 @@ const PROFILE_DEFAULTS: Record<AutonomyProfileLevel, ProfileDefaults> = {
     autoApplyUpdates: true,
     autoRestart: false,
     trustAutoElevate: true,
+    discoveryAggressiveness: 'contextual',   // Surface when problem matches
   },
   collaborative: {
     evolutionApprovalMode: 'ai-assisted',
@@ -59,6 +66,7 @@ const PROFILE_DEFAULTS: Record<AutonomyProfileLevel, ProfileDefaults> = {
     autoApplyUpdates: true,
     autoRestart: true,
     trustAutoElevate: true,
+    discoveryAggressiveness: 'proactive',    // Full evaluator triggers
   },
   autonomous: {
     evolutionApprovalMode: 'autonomous',
@@ -67,6 +75,7 @@ const PROFILE_DEFAULTS: Record<AutonomyProfileLevel, ProfileDefaults> = {
     autoApplyUpdates: true,
     autoRestart: true,
     trustAutoElevate: true,
+    discoveryAggressiveness: 'proactive',    // Full evaluator triggers
   },
 };
 
@@ -138,6 +147,9 @@ export class AutonomyProfileManager {
         ?? defaults.autoRestart,
       trustAutoElevate:
         this.config.externalOperations?.trust?.autoElevateEnabled ?? defaults.trustAutoElevate,
+      discoveryAggressiveness:
+        (this.config as unknown as Record<string, unknown>).discoveryAggressiveness as 'passive' | 'contextual' | 'proactive'
+        ?? defaults.discoveryAggressiveness,
     };
   }
 
@@ -198,6 +210,14 @@ export class AutonomyProfileManager {
     updateParts.push(resolved.autoApplyUpdates ? 'auto-apply on' : 'manual updates');
     updateParts.push(resolved.autoRestart ? 'auto-restart on' : 'manual restart');
     lines.push(`Updates: ${updateParts.join(', ')}`);
+
+    // Discovery
+    const discoveryLabel = resolved.discoveryAggressiveness === 'passive'
+      ? 'passive (only on user request)'
+      : resolved.discoveryAggressiveness === 'contextual'
+      ? 'contextual (surface when problem matches)'
+      : 'proactive (full evaluator triggers)';
+    lines.push(`Feature discovery: ${discoveryLabel}`);
 
     // Trust
     if (this.adaptiveTrust) {

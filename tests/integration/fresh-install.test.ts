@@ -111,20 +111,16 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(fs.existsSync(jobsPath)).toBe(true);
 
     const jobs = JSON.parse(fs.readFileSync(jobsPath, 'utf-8'));
-    expect(jobs.length).toBe(21);
+    expect(jobs.length).toBe(26);
 
     const slugs = jobs.map((j: any) => j.slug);
-    // Original 12 coherence jobs
+    // Core jobs
     expect(slugs).toContain('health-check');
     expect(slugs).toContain('reflection-trigger');
     expect(slugs).toContain('relationship-maintenance');
-    expect(slugs).toContain('update-check');
     expect(slugs).toContain('feedback-retry');
-    expect(slugs).toContain('dispatch-check');
-    expect(slugs).toContain('self-diagnosis');
-    expect(slugs).toContain('evolution-review');
     expect(slugs).toContain('insight-harvest');
-    expect(slugs).toContain('commitment-check');
+    expect(slugs).toContain('evolution-overdue-check');
     expect(slugs).toContain('project-map-refresh');
     expect(slugs).toContain('coherence-audit');
     // 5 guardian network jobs
@@ -141,6 +137,19 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(slugs).toContain('capability-audit');
     // Identity review
     expect(slugs).toContain('identity-review');
+    // Evolution jobs
+    expect(slugs).toContain('evolution-proposal-evaluate');
+    expect(slugs).toContain('evolution-proposal-implement');
+    // Commitment detection
+    expect(slugs).toContain('commitment-detection');
+    // Dashboard
+    expect(slugs).toContain('dashboard-link-refresh');
+    // Overseer jobs
+    expect(slugs).toContain('overseer-guardian');
+    expect(slugs).toContain('overseer-learning');
+    expect(slugs).toContain('overseer-maintenance');
+    expect(slugs).toContain('overseer-infrastructure');
+    expect(slugs).toContain('overseer-development');
   });
 
   it('installs behavioral hooks', () => {
@@ -171,6 +180,28 @@ describe('Fresh install: instar init <project-name>', () => {
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     expect(settings.hooks).toBeDefined();
     expect(settings.hooks.PreToolUse).toBeDefined();
+  });
+
+  it('registers autonomous stop hook in settings.json', () => {
+    const settingsPath = path.join(projectDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+
+    const stopHooks = settings.hooks?.Stop as Array<{ hooks?: Array<{ command?: string }> }>;
+    expect(stopHooks).toBeDefined();
+
+    const hasAutonomousHook = stopHooks.some(entry =>
+      entry.hooks?.some(h => h.command?.includes('autonomous-stop-hook')),
+    );
+    expect(hasAutonomousHook).toBe(true);
+  });
+
+  it('installs autonomous skill with hooks directory', () => {
+    const hookScript = path.join(projectDir, '.claude', 'skills', 'autonomous', 'hooks', 'autonomous-stop-hook.sh');
+    expect(fs.existsSync(hookScript)).toBe(true);
+
+    // Must be executable
+    const stats = fs.statSync(hookScript);
+    expect(stats.mode & 0o111).toBeGreaterThan(0);
   });
 
   it('creates .claude/scripts/health-watchdog.sh', () => {

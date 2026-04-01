@@ -103,6 +103,7 @@ describe('E2E: Adaptive Autonomy Lifecycle', () => {
       capabilityMapper: null,
       topicResumeMap: null,
       autonomyManager,
+      discoveryEvaluator: null,
       startTime: new Date(),
     });
 

@@ -117,25 +117,93 @@ export class SessionRecovery extends EventEmitter {
     if (processAlive) {
       const stall = detectToolCallStall(jsonlPath);
       if (stall) {
-        return this.recoverFromStall(topicId, sessionName, stall);
+        const result = await this.recoverFromStall(topicId, sessionName, stall);
+        this.logEvent(result, topicId, sessionName);
+        return result;
       }
     }
 
     // 3. Check for error loop (can happen with alive OR dead process)
     const errorLoop = detectErrorLoop(jsonlPath);
     if (errorLoop) {
-      return this.recoverFromErrorLoop(topicId, sessionName, jsonlPath, errorLoop);
+      const result = await this.recoverFromErrorLoop(topicId, sessionName, jsonlPath, errorLoop);
+      this.logEvent(result, topicId, sessionName);
+      return result;
     }
 
     // 4. Check for crash (process dead with incomplete state)
     if (!processAlive) {
       const crash = detectCrashedSession(jsonlPath, false);
       if (crash) {
-        return this.recoverFromCrash(topicId, sessionName, jsonlPath, crash);
+        const result = await this.recoverFromCrash(topicId, sessionName, jsonlPath, crash);
+        this.logEvent(result, topicId, sessionName);
+        return result;
       }
     }
 
     return { recovered: false, failureType: null, message: 'No mechanical failure detected' };
+  }
+
+  /**
+   * Log a recovery event to the JSONL event log for observability.
+   */
+  logEvent(result: RecoveryResult, topicId: number, sessionName: string): void {
+    const eventLogPath = path.join(this.config.projectDir, '.instar', 'recovery-events.jsonl');
+    const entry = {
+      timestamp: new Date().toISOString(),
+      failureType: result.failureType,
+      recovered: result.recovered,
+      topicId,
+      sessionName,
+      attempt: result.attemptNumber ?? 1,
+    };
+    try {
+      const dir = path.dirname(eventLogPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.appendFileSync(eventLogPath, JSON.stringify(entry) + '\n');
+    } catch { // @silent-fallback-ok — event logging is best-effort observability
+      // Can't write — skip
+    }
+  }
+
+  /**
+   * Aggregate recovery stats from the event log since a given timestamp.
+   */
+  getStats(sinceMs: number): {
+    attempts: { stall: number; crash: number; errorLoop: number };
+    successes: { stall: number; crash: number; errorLoop: number };
+  } {
+    const stats = {
+      attempts: { stall: 0, crash: 0, errorLoop: 0 },
+      successes: { stall: 0, crash: 0, errorLoop: 0 },
+    };
+
+    const eventLogPath = path.join(this.config.projectDir, '.instar', 'recovery-events.jsonl');
+    if (!fs.existsSync(eventLogPath)) return stats;
+
+    try {
+      const lines = fs.readFileSync(eventLogPath, 'utf-8').trim().split('\n').filter(Boolean);
+      for (const line of lines) {
+        const entry = JSON.parse(line);
+        const ts = new Date(entry.timestamp).getTime();
+        if (ts < sinceMs) continue;
+
+        const key = entry.failureType === 'error_loop' ? 'errorLoop'
+          : entry.failureType === 'stall' ? 'stall'
+          : entry.failureType === 'crash' ? 'crash'
+          : null;
+        if (!key) continue;
+
+        stats.attempts[key]++;
+        if (entry.recovered) stats.successes[key]++;
+      }
+    } catch { // @silent-fallback-ok — corrupt log returns empty stats
+      // Can't read — return zeros
+    }
+
+    return stats;
   }
 
   // ============================================================================

@@ -604,7 +604,7 @@ describe('TriageOrchestrator', () => {
 
       // Should have sent message to topic and respawned
       expect(deps.sendToTopic).toHaveBeenCalledWith(123, expect.stringContaining('🔍'));
-      expect(deps.respawnSession).toHaveBeenCalledWith('test-session', 123);
+      expect(deps.respawnSession).toHaveBeenCalledWith('test-session', 123, { silent: true });
     });
 
     it('handles heuristic fast-path (actively working) via runHeuristics', async () => {
@@ -819,7 +819,7 @@ describe('TriageOrchestrator', () => {
     it('respawns session on "auto_restart"', async () => {
       const deps = await exec('auto_restart');
       expect(deps.sendToTopic).toHaveBeenCalled();
-      expect(deps.respawnSession).toHaveBeenCalledWith('test-session', 123);
+      expect(deps.respawnSession).toHaveBeenCalledWith('test-session', 123, { silent: true });
     });
 
     it('sends message for suggest_interrupt without acting', async () => {

@@ -327,4 +327,67 @@ describe('SessionMonitor', () => {
       expect(monitor.getStatus().trackedSessions).toBe(0);
     });
   });
+
+  describe('mechanical recovery integration', () => {
+    it('skips triage when mechanical recovery succeeds', async () => {
+      const now = Date.now();
+      const mockRecovery = { checkAndRecover: vi.fn(async () => ({ recovered: true, failureType: 'stall' as const, message: 'Recovered from stall' })) };
+      deps = createMockDeps({
+        getActiveTopicSessions: vi.fn(() => new Map([[901, 'session-mr']])),
+        isSessionAlive: vi.fn(() => false),
+        getTopicHistory: vi.fn(() => [
+          { text: 'hello', fromUser: true, timestamp: new Date(now - 5 * 60_000).toISOString() },
+        ]),
+        triggerTriage: vi.fn(async () => ({ resolved: false })),
+        sessionRecovery: mockRecovery as any,
+      });
+      monitor = new SessionMonitor(deps);
+      await monitor.poll();
+      await monitor.poll();
+      expect(mockRecovery.checkAndRecover).toHaveBeenCalled();
+      expect(deps.triggerTriage).not.toHaveBeenCalled();
+    });
+
+    it('falls through to triage when mechanical recovery fails', async () => {
+      const now = Date.now();
+      const mockRecovery = { checkAndRecover: vi.fn(async () => ({ recovered: false, failureType: null, message: 'No failure detected' })) };
+      deps = createMockDeps({
+        getActiveTopicSessions: vi.fn(() => new Map([[902, 'session-mr2']])),
+        isSessionAlive: vi.fn(() => false),
+        getTopicHistory: vi.fn(() => [
+          { text: 'hello', fromUser: true, timestamp: new Date(now - 5 * 60_000).toISOString() },
+        ]),
+        triggerTriage: vi.fn(async () => ({ resolved: false })),
+        sessionRecovery: mockRecovery as any,
+      });
+      monitor = new SessionMonitor(deps);
+      await monitor.poll();
+      await monitor.poll();
+      expect(mockRecovery.checkAndRecover).toHaveBeenCalled();
+      expect(deps.triggerTriage).toHaveBeenCalled();
+    });
+
+    it('does not call recovery for idle sessions', async () => {
+      const mockRecovery = { checkAndRecover: vi.fn(async () => ({ recovered: false, failureType: null, message: '' })) };
+      deps = createMockDeps({
+        getActiveTopicSessions: vi.fn(() => new Map([[903, 'session-mr3']])),
+        isSessionAlive: vi.fn(() => true),
+        captureSessionOutput: vi.fn(() => 'stale output'),
+        getTopicHistory: vi.fn(() => {
+          const current = Date.now();
+          return [
+            { text: 'on it', fromUser: false, timestamp: new Date(current - 20 * 60_000).toISOString() },
+            { text: 'update?', fromUser: true, timestamp: new Date(current - 5 * 60_000).toISOString() },
+          ];
+        }),
+        sessionRecovery: mockRecovery as any,
+      });
+      monitor = new SessionMonitor(deps, { idleThresholdMinutes: 15 });
+      await monitor.poll();
+      vi.advanceTimersByTime(16 * 60_000);
+      await monitor.poll();
+      // Idle sessions should NOT trigger mechanical recovery
+      expect(mockRecovery.checkAndRecover).not.toHaveBeenCalled();
+    });
+  });
 });

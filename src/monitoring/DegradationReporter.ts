@@ -166,6 +166,37 @@ export class DegradationReporter {
   }
 
   /**
+   * Generate a human-readable narrative for a degradation event.
+   * Used for Telegram alerts and health endpoint summaries.
+   * No technical identifiers, no structured fields — just plain language.
+   */
+  static narrativeFor(event: DegradationEvent): string {
+    const impact = event.impact.replace(/\.$/, '');
+    const fallbackLower = event.fallback.toLowerCase();
+
+    // Detect failure-state fallbacks (no real alternative, just broken)
+    // These describe what ISN'T working, not what IS being used instead
+    const isFailureState = /^no |unavailable|never |lost|undiagnosed|unreachable|not running|not delivered|cannot|won't/i.test(fallbackLower)
+      || /goes undiagnosed|left halted|in memory only|only in memory|never delivered/i.test(fallbackLower);
+
+    if (isFailureState) {
+      return `${impact}. I'll keep trying, but this may need a restart to fully resolve.`;
+    }
+
+    // Positive fallback — describe the backup approach being used
+    // Strip prefixes like "Falling back to", "Message only in", etc.
+    let fallback = event.fallback
+      .replace(/^Falling back to /i, '')
+      .replace(/^Message only in /i, 'the ')
+      .replace(/\.$/, '');
+
+    // Strip parenthetical caveats — the user doesn't need "(no search, no summary updates)"
+    fallback = fallback.replace(/\s*\([^)]*\)\s*/g, ' ').trim();
+
+    return `${impact}. Using ${fallback} in the meantime — everything else is working fine.`;
+  }
+
+  /**
    * Get unreported events (for monitoring).
    */
   getUnreportedEvents(): DegradationEvent[] {
@@ -226,9 +257,7 @@ export class DegradationReporter {
         try {
           await this.telegramSender(
             this.alertTopicId,
-            `Heads up: ${event.impact} ` +
-            `Your agent is still running — this usually resolves on its own. ` +
-            `(${event.feature}: ${event.fallback})`,
+            DegradationReporter.narrativeFor(event),
           );
           event.alerted = true;
           this.lastAlertTime.set(event.feature, now);

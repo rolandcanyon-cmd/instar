@@ -1,45 +1,37 @@
 /**
- * HTTP Hook Templates — Configuration for Claude Code HTTP hooks.
+ * Hook Event Templates — Configuration for Claude Code event reporting hooks.
  *
  * These templates are merged into .claude/settings.json during init.
- * They configure HTTP hooks that POST event payloads to the Instar server
- * for session telemetry and observability.
+ * They configure command hooks that POST event payloads to the Instar server
+ * for session telemetry, observability, and session resumption (claudeSessionId).
  *
- * Part of the Claude Code Feature Integration Audit:
- * - Item 2 (HTTP Hooks): Ship HTTP hook templates for observability events
- * - Item 3 (New Hook Events): SubagentStart/Stop, Stop, SessionEnd, etc.
+ * IMPORTANT: Uses command hooks (type: "command"), NOT HTTP hooks (type: "http").
+ * HTTP hooks silently fail to fire in Claude Code <=2.1.78 (confirmed 2026-03-24).
+ * Command hooks reliably fire, so we use a small Node script that POSTs to the server.
  *
  * Design decisions:
- * - Safety-critical hooks (dangerous-command-guard, session-start) stay as shell commands
- * - HTTP hooks are for OBSERVABILITY only — they cannot reliably block actions
- * - All hooks POST to /hooks/events on the local Instar server
+ * - Safety-critical hooks (dangerous-command-guard, session-start) stay as separate scripts
+ * - Event reporter hooks are for OBSERVABILITY — they cannot reliably block actions
+ * - All hooks POST to /hooks/events on the local Instar server via the reporter script
  * - Auth via bearer token from INSTAR_AUTH_TOKEN env var
  */
 
-export interface HttpHookTemplate {
+export interface HookEventTemplate {
   event: string;
   matcher?: string;
   config: {
-    type: 'http';
-    url: string;
+    type: 'command';
+    command: string;
     timeout?: number;
-    headers?: Record<string, string>;
-    allowedEnvVars?: string[];
   };
 }
 
 /**
- * Base URL template — resolved at install time to the actual server port.
- * Uses INSTAR_SERVER_URL env var which is set in session-start.sh.
- */
-const BASE_URL = '${INSTAR_SERVER_URL}/hooks/events?instar_sid=${INSTAR_SESSION_ID}';
-
-/**
- * All HTTP hook templates for observability events.
+ * All hook event templates for observability events.
  *
  * These are added alongside (not replacing) existing shell command hooks.
  * Events covered:
- * - PostToolUse: what tools sessions are using
+ * - PostToolUse: what tools sessions are using + session_id for resume
  * - SubagentStart: when subagents spawn (with agent_id, agent_type)
  * - SubagentStop: when subagents finish (with last_assistant_message, transcript path)
  * - Stop: when main agent finishes (with last_assistant_message)
@@ -49,122 +41,38 @@ const BASE_URL = '${INSTAR_SERVER_URL}/hooks/events?instar_sid=${INSTAR_SESSION_
  * - SessionEnd: when sessions terminate (with exit reason)
  * - PreCompact: when context compaction is about to occur (with trigger reason)
  */
-export const HTTP_HOOK_TEMPLATES: HttpHookTemplate[] = [
-  {
-    event: 'PostToolUse',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'SubagentStart',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'SubagentStop',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'Stop',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'WorktreeCreate',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'WorktreeRemove',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'TaskCompleted',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'SessionEnd',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
-  {
-    event: 'PreCompact',
-    config: {
-      type: 'http',
-      url: BASE_URL,
-      timeout: 5,
-      headers: { Authorization: 'Bearer ${INSTAR_AUTH_TOKEN}' },
-      allowedEnvVars: ['INSTAR_SERVER_URL', 'INSTAR_AUTH_TOKEN', 'INSTAR_SESSION_ID'],
-    },
-  },
+export const HOOK_EVENT_TEMPLATES: HookEventTemplate[] = [
+  { event: 'PostToolUse', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'SubagentStart', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'SubagentStop', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'Stop', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'WorktreeCreate', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'WorktreeRemove', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'TaskCompleted', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'SessionEnd', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
+  { event: 'PreCompact', config: { type: 'command', command: 'node .instar/hooks/instar/hook-event-reporter.js', timeout: 3000 } },
 ];
+
+// Backwards-compat export — old name, new behavior
+export const HTTP_HOOK_TEMPLATES = HOOK_EVENT_TEMPLATES;
+export type HttpHookTemplate = HookEventTemplate;
 
 /**
  * Convert templates to the Claude Code settings.json hook format.
- * @param serverUrl The actual Instar server URL (e.g., "http://localhost:3030")
+ * @param _serverUrl Ignored (kept for API compat). Command hooks use env vars.
  */
-export function buildHttpHookSettings(serverUrl: string): Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>> {
+export function buildHttpHookSettings(_serverUrl: string): Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>> {
   const settings: Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>> = {};
 
-  for (const template of HTTP_HOOK_TEMPLATES) {
-    const hookConfig = {
-      ...template.config,
-      url: template.config.url.replace('${INSTAR_SERVER_URL}', serverUrl),
-    };
-
+  for (const template of HOOK_EVENT_TEMPLATES) {
     if (!settings[template.event]) {
       settings[template.event] = [];
     }
 
-    const entry: { matcher?: string; hooks: Array<Record<string, unknown>> } = {
-      hooks: [hookConfig as unknown as Record<string, unknown>],
+    const entry: { matcher: string; hooks: Array<Record<string, unknown>> } = {
+      matcher: template.matcher ?? '',
+      hooks: [template.config as unknown as Record<string, unknown>],
     };
-    if (template.matcher) {
-      entry.matcher = template.matcher;
-    }
 
     settings[template.event].push(entry);
   }

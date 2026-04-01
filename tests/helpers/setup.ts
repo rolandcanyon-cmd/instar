@@ -52,6 +52,7 @@ export interface MockSessionManager {
   }) => Promise<Session>;
   isSessionAlive: (tmuxSession: string) => boolean;
   listRunningSessions: () => Session[];
+  getCachedRunningSessions: () => { count: number; sessions: Session[] };
   killSession: (sessionId: string) => boolean;
   captureOutput: (tmuxSession: string, lines?: number) => string | null;
   sendInput: (tmuxSession: string, input: string) => boolean;
@@ -92,6 +93,11 @@ export function createMockSessionManager(): MockSessionManager {
     isSessionAlive: (tmuxSession: string) => mock._aliveSet.has(tmuxSession),
 
     listRunningSessions: () => mock._sessions.filter(s => s.status === 'running'),
+
+    getCachedRunningSessions: () => {
+      const running = mock._sessions.filter(s => s.status === 'running');
+      return { count: running.length, sessions: running };
+    },
 
     killSession: (sessionId: string) => {
       const session = mock._sessions.find(s => s.id === sessionId);

@@ -98,6 +98,7 @@ describe('E2E: Autonomous Evolution Lifecycle', () => {
       autonomyManager,
       trustElevationTracker,
       autonomousEvolution,
+      discoveryEvaluator: null,
       startTime: new Date(),
     });
 

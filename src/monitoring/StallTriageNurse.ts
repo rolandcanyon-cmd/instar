@@ -726,7 +726,7 @@ export class StallTriageNurse extends EventEmitter {
         await this.deps.sendToTopic(context.topicId, userMessage).catch(err => {
           console.warn(`[StallTriageNurse] sendToTopic failed:`, err);
         });
-        await this.deps.respawnSession(context.sessionName, context.topicId);
+        await this.deps.respawnSession(context.sessionName, context.topicId, { silent: true });
         break;
     }
   }

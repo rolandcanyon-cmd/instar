@@ -156,13 +156,15 @@ describe('TunnelManager', () => {
       expect(events).toContain('connected');
     });
 
-    it('rejects if already running', async () => {
+    it('returns existing URL if already running', async () => {
       const tm = createManager();
       const p = tm.start();
       setTimeout(() => mockTunnel.emit('url', 'https://a.trycloudflare.com'), 10);
       await p;
 
-      await expect(tm.start()).rejects.toThrow('already running');
+      // Second start() should return the existing URL (not throw)
+      const url = await tm.start();
+      expect(url).toBe('https://a.trycloudflare.com');
     });
 
     it('rejects on error event', async () => {

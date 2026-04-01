@@ -86,6 +86,7 @@ describe('Trust Elevation API Routes (integration)', () => {
       topicResumeMap: null,
       autonomyManager,
       trustElevationTracker,
+      discoveryEvaluator: null,
       startTime: new Date(),
     });
 

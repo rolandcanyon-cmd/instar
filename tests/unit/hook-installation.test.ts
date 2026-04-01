@@ -111,4 +111,60 @@ describe('Hook installation for external operation safety', () => {
 
     expect(mcpEntry!.hooks[0].timeout).toBe(5000);
   });
+
+  // ── Hook Event Reporter (session resume support) ──────────────
+
+  it('installs hook-event-reporter.js script', () => {
+    const hookPath = path.join(projectDir, '.instar', 'hooks', 'instar', 'hook-event-reporter.js');
+    expect(fs.existsSync(hookPath)).toBe(true);
+
+    const content = fs.readFileSync(hookPath, 'utf-8');
+    expect(content).toContain('/hooks/events');
+    expect(content).toContain('session_id');
+    expect(content).toContain('INSTAR_SESSION_ID');
+    expect(content).toContain('INSTAR_AUTH_TOKEN');
+  });
+
+  it('hook-event-reporter.js is executable', () => {
+    const hookPath = path.join(projectDir, '.instar', 'hooks', 'instar', 'hook-event-reporter.js');
+    const stats = fs.statSync(hookPath);
+    expect(stats.mode & 0o100).toBeTruthy();
+  });
+
+  it('settings.json has command hooks for event reporting (not HTTP hooks)', () => {
+    const settingsPath = path.join(projectDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+
+    // PostToolUse should have a catch-all command hook for event reporting
+    const postToolUse = settings.hooks.PostToolUse as Array<{ matcher: string; hooks: Array<{ type: string; command?: string }> }>;
+    const catchAll = postToolUse.find(e => e.matcher === '' && e.hooks.some(h => h.command?.includes('hook-event-reporter')));
+    expect(catchAll).toBeDefined();
+    expect(catchAll!.hooks[0].type).toBe('command');
+
+    // No HTTP hooks should exist in the settings
+    const json = JSON.stringify(settings);
+    expect(json).not.toContain('"type":"http"');
+    expect(json).not.toContain('"type": "http"');
+  });
+
+  it('event reporter hooks exist for all required events', () => {
+    const settingsPath = path.join(projectDir, '.claude', 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+
+    const requiredEvents = [
+      'PostToolUse', 'Stop', 'SubagentStart', 'SubagentStop',
+      'WorktreeCreate', 'WorktreeRemove', 'TaskCompleted',
+      'SessionEnd', 'PreCompact',
+    ];
+
+    for (const event of requiredEvents) {
+      const entries = settings.hooks[event] as Array<{ matcher: string; hooks: Array<{ command?: string }> }> | undefined;
+      expect(entries, `Missing hook entries for event "${event}"`).toBeDefined();
+
+      const hasReporter = entries!.some(e =>
+        e.hooks?.some(h => h.command?.includes('hook-event-reporter')),
+      );
+      expect(hasReporter, `No hook-event-reporter found for event "${event}"`).toBe(true);
+    }
+  });
 });

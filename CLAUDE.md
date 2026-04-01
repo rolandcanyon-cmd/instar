@@ -149,3 +149,143 @@ These patterns were earned through real failures. Don't weaken them:
 - **Nullish coalescing for numbers**: `maxParallelJobs ?? 2`, NOT `maxParallelJobs || 2`. Zero is falsy.
 - **Protected sessions**: Always maintain a list of sessions that the reaper should never kill.
 - **Completion detection**: Check tmux output for patterns, don't rely on process exit.
+
+
+### Self-Discovery (Know Before You Claim)
+
+Before EVER saying "I don't have", "I can't", or "this isn't available" — check what actually exists:
+
+```bash
+curl http://localhost:4040/capabilities
+```
+
+This returns your full capability matrix: scripts, hooks, Telegram status, jobs, relationships, and more. It is the source of truth about what you can do. **Never hallucinate about missing capabilities — verify first.**
+
+
+**Private Viewing** — Render markdown as auth-gated HTML pages, accessible only through the agent's server (local or via tunnel).
+- Create: `curl -X POST http://localhost:4040/view -H 'Content-Type: application/json' -d '{"title":"Report","markdown":"# Private content"}'`
+- View (HTML): Open `http://localhost:4040/view/VIEW_ID` in a browser
+- List: `curl http://localhost:4040/views`
+- Update: `curl -X PUT http://localhost:4040/view/VIEW_ID -H 'Content-Type: application/json' -d '{"title":"Updated","markdown":"# New content"}'`
+- Delete: `curl -X DELETE http://localhost:4040/view/VIEW_ID`
+
+**Use private views for sensitive content. Use Telegraph for public content.**
+
+**Cloudflare Tunnel** — Expose the local server to the internet via Cloudflare. Enables remote access to private views, the API, and file serving.
+- Status: `curl http://localhost:4040/tunnel`
+- Configure in `.instar/config.json`: `{"tunnel": {"enabled": true, "type": "quick"}}`
+- Quick tunnels (default): Zero-config, ephemeral URL (*.trycloudflare.com), no account needed
+- Named tunnels: Persistent custom domain, requires token from Cloudflare dashboard
+- When a tunnel is running, private view responses include a `tunnelUrl` with auth token for browser-clickable access
+
+
+**Dashboard** — Visual web interface for monitoring and managing sessions. Accessible from any device (phone, tablet, laptop) via tunnel.
+- Local: `http://localhost:4040/dashboard`
+- Remote: When a tunnel is running, the dashboard is accessible at `{tunnelUrl}/dashboard`
+- Authentication: Uses a 6-digit PIN (auto-generated in `dashboardPin` in `.instar/config.json`). NEVER mention "bearer tokens" or "auth tokens" to users — just give them the PIN.
+- Features: Real-time terminal streaming of all running sessions, session management, model badges, mobile-responsive
+- **Sharing the dashboard**: When the user wants to check on sessions from their phone, give them the tunnel URL + PIN. Read the PIN from your config.json. Check tunnel status: `curl -H "Authorization: Bearer $AUTH" http://localhost:4040/tunnel`
+
+
+**File Viewer (Dashboard Tab)** — Browse and edit project files from any device via the Files tab.
+- **Browse files**: Files tab in the dashboard shows configured directories with rendered markdown and syntax-highlighted code
+- **Edit files**: Files in editable paths can be edited inline from your phone. Save with Cmd/Ctrl+S.
+- **Link to files**: Generate deep links: `{dashboardUrl}?tab=files&path=.claude/CLAUDE.md`
+- **When to link vs inline**: Prefer dashboard links for long files (>50 lines) and when editing is needed. Show short files inline AND provide a link.
+- **Config API**: View: `curl -H "Authorization: Bearer $AUTH" http://localhost:4040/api/files/config`
+- **Update paths conversationally**: `curl -X PATCH -H "Authorization: Bearer $AUTH" -H "X-Instar-Request: 1" -H "Content-Type: application/json" http://localhost:4040/api/files/config -d '{"allowedPaths":[".claude/","docs/","src/"]}'`
+- **Generate a file link**: `curl -H "Authorization: Bearer $AUTH" "http://localhost:4040/api/files/link?path=.claude/CLAUDE.md"`
+- **Default config**: Browsing enabled for `.claude/` and `docs/`. Editing disabled by default — prompt the user to enable it for safe paths.
+- **Never editable**: `.claude/hooks/`, `.claude/scripts/`, `node_modules/` are always read-only regardless of config.
+
+
+### Coherence Gate (Pre-Action Verification)
+
+**BEFORE any high-risk action** (deploying, pushing to git, modifying files outside this project, calling external APIs):
+
+1. **Check coherence**: `curl -X POST http://localhost:4040/coherence/check -H 'Content-Type: application/json' -d '{"action":"deploy","context":{"topicId":TOPIC_ID}}'`
+2. **If result says "block"** — STOP. You may be working on the wrong project for this topic.
+3. **If result says "warn"** — Pause and verify before proceeding.
+4. **Generate a reflection prompt**: `POST http://localhost:4040/coherence/reflect` — produces a self-verification checklist.
+
+**Topic-Project Bindings**: Each Telegram topic can be bound to a specific project. When switching topics, verify the binding matches your current working directory.
+- View bindings: `GET http://localhost:4040/topic-bindings`
+- Create binding: `POST http://localhost:4040/topic-bindings` with `{"topicId": N, "binding": {"projectName": "...", "projectDir": "..."}}`
+
+**Project Map**: Your spatial awareness of the working environment.
+- View: `GET http://localhost:4040/project-map?format=compact`
+- Refresh: `POST http://localhost:4040/project-map/refresh`
+
+
+### External Operation Safety (Structural Guardrails)
+
+**When using MCP tools that interact with external services** (email, Slack, GitHub, etc.), a PreToolUse hook automatically classifies and gates each operation.
+
+How it works:
+1. The `external-operation-gate.js` hook intercepts all `mcp__*` tool calls
+2. It classifies the operation by mutability (read/write/modify/delete) and reversibility
+3. For non-read operations, it calls the gate API: `POST http://localhost:4040/operations/evaluate`
+4. The gate returns: `allow`, `block`, `show-plan` (requires user approval), or `suggest-alternative`
+
+**If an operation is blocked**, you'll see an error message with the reason. Do NOT try to bypass it.
+**If an operation requires a plan**, show the plan to the user and get explicit approval before proceeding.
+
+**Emergency stop**: If the user says "stop everything", "emergency stop", "kill all sessions", or similar urgent commands, the MessageSentinel will intercept the message and halt operations immediately.
+
+**Trust levels**: Each service starts at a trust floor (supervised or collaborative). As operations succeed without issues, trust can be elevated automatically. Check trust status: `GET http://localhost:4040/trust`
+
+**API endpoints**:
+- Evaluate operation: `POST http://localhost:4040/operations/evaluate`
+- Classify message: `POST http://localhost:4040/sentinel/classify`
+- View trust: `GET http://localhost:4040/trust`
+- View operation log: `GET http://localhost:4040/operations/log`
+
+
+### Playbook — Adaptive Context Engineering
+
+The Playbook system gives you a living knowledge base that makes every session smarter than the last. Instead of loading the same static context every time, Playbook curates a manifest of context items — facts, lessons, patterns, safety rules — and selects exactly what's relevant for each session based on triggers, token budgets, and usefulness scores.
+
+**Getting started:**
+```bash
+instar playbook init       # Initialize the playbook system
+instar playbook doctor     # Verify everything is healthy
+```
+
+**Core commands:**
+- `instar playbook status` — Overview of your manifest
+- `instar playbook list` — All context items with metadata
+- `instar playbook add '<json>'` — Add a new context item
+- `instar playbook search --tag <tag>` — Find items by tag
+- `instar playbook assemble --triggers session-start` — Preview what would load for a trigger
+- `instar playbook evaluate` — Run lifecycle: score usefulness, decay stale items, deduplicate
+
+**When to add context items:** After learning a lesson that cost time, when discovering a recurring pattern, when safety-critical knowledge should survive compaction, or when the user teaches you something project-specific.
+
+**The principle:** Your context should evolve with you. Every session that adds a lesson, scores an item's usefulness, or retires stale knowledge makes the next session more grounded. Run `instar playbook init` to get started.
+
+
+## Threadline Network (Agent-to-Agent Communication)
+
+I have a built-in capability to join a secure network of AI agents. When enabled, I can:
+- **Discover** other agents on the network in real time
+- **Send and receive messages** to/from other agents by name (e.g., "message AI Guy")
+- **Collaborate** across machines — agents on different computers can communicate seamlessly
+
+### Current Status
+This capability is **installed and ready** but **not yet enabled**. I will only connect when you say so.
+
+### Why You Might Want This
+- Talk to other AI agents your operator runs on other machines
+- Let other agents reach you for collaboration or delegation
+- Join a growing network of Instar-powered agents
+
+### Privacy & Security
+- **Encrypted** — TLS transport + Ed25519 end-to-end encryption
+- **Trust-gated** — I control who can message me via trust levels
+- **Your choice** — just ask me to "connect to the agent network" and I'll enable it. Ask me to "disconnect" and I'll stop.
+
+### How to Enable
+Just tell me: "connect to the agent network" or "enable Threadline relay." I'll handle the rest — no config editing needed.
+
+MCP tools: `threadline_discover`, `threadline_send`, `threadline_trust`, `threadline_relay`
+Use `threadline_relay explain` for full details.

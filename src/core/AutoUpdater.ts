@@ -41,6 +41,13 @@ export interface AutoUpdaterConfig {
   applyDelayMinutes?: number;
   /** Seconds to wait after sending pre-restart notification before actually restarting. Default: 60 */
   preRestartDelaySecs?: number;
+  /**
+   * Preferred restart window (24h format, local time). When set, restarts only
+   * happen during this window unless triggered manually via POST /updates/apply.
+   * Updates are still downloaded immediately — only the restart is deferred.
+   * Example: { start: "02:00", end: "05:00" }
+   */
+  restartWindow?: { start: string; end: string } | null;
 }
 
 export interface AutoUpdaterStatus {
@@ -130,6 +137,7 @@ export class AutoUpdater {
       notificationTopicId: config?.notificationTopicId ?? 0,
       applyDelayMinutes: config?.applyDelayMinutes ?? 5,
       preRestartDelaySecs: config?.preRestartDelaySecs ?? 60,
+      restartWindow: config?.restartWindow ?? null,
     };
 
     this.gate = new UpdateGate();
@@ -387,7 +395,7 @@ export class AutoUpdater {
    * Extracted from tick() so it can be called by the coalescing timer
    * and by manual trigger (POST /updates/apply).
    */
-  async applyPendingUpdate(): Promise<void> {
+  async applyPendingUpdate(options?: { bypassWindow?: boolean }): Promise<void> {
     if (this.isApplying) {
       console.log('[AutoUpdater] Skipping apply — already in progress');
       return;
@@ -454,7 +462,7 @@ export class AutoUpdater {
       // The loop breaker in tick() (checking lastAppliedVersion === latestVersion)
       // prevents this from becoming an infinite loop. After restart, the loop
       // breaker catches the next cycle and returns early.
-      await this.gatedRestart(targetVersion);
+      await this.gatedRestart(targetVersion, options?.bypassWindow ?? false);
     } catch (err) {
       this.isApplying = false;
       this.lastError = err instanceof Error ? err.message : String(err);
@@ -464,11 +472,57 @@ export class AutoUpdater {
   }
 
   /**
+   * Check if the current local time is within the configured restart window.
+   * Returns true if no window is configured (restart anytime).
+   */
+  private isInRestartWindow(): boolean {
+    const window = this.config.restartWindow;
+    if (!window) return true; // No window configured → always allowed
+
+    const now = new Date();
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+
+    const [startH, startM] = window.start.split(':').map(Number);
+    const [endH, endM] = window.end.split(':').map(Number);
+    const startMinutes = startH * 60 + (startM || 0);
+    const endMinutes = endH * 60 + (endM || 0);
+
+    if (startMinutes <= endMinutes) {
+      // Simple range: e.g., 02:00 - 05:00
+      return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+    } else {
+      // Wraps midnight: e.g., 23:00 - 05:00
+      return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+    }
+  }
+
+  /**
+   * Calculate milliseconds until the start of the next restart window.
+   */
+  private msUntilRestartWindow(): number {
+    const window = this.config.restartWindow;
+    if (!window) return 0;
+
+    const now = new Date();
+    const [startH, startM] = window.start.split(':').map(Number);
+
+    const target = new Date(now);
+    target.setHours(startH, startM || 0, 0, 0);
+
+    // If the window start is already past today, aim for tomorrow
+    if (target.getTime() <= now.getTime()) {
+      target.setDate(target.getDate() + 1);
+    }
+
+    return target.getTime() - now.getTime();
+  }
+
+  /**
    * Attempt restart with session-aware gating.
    * If sessions are active, defers and retries on a timer.
    * After max deferral, restarts regardless with warnings.
    */
-  private async gatedRestart(newVersion: string): Promise<void> {
+  private async gatedRestart(newVersion: string, bypassWindow = false): Promise<void> {
     // RESTART COOLDOWN: If we already requested a restart for this exact version
     // within the last 30 minutes, don't restart again. This is the safety net
     // for binary path mismatches (npx cache, etc.) where the loop breaker in
@@ -483,6 +537,24 @@ export class AutoUpdater {
         );
         return;
       }
+    }
+
+    // Restart window gate — defer restart until the configured window unless bypassed.
+    // Updates are already downloaded; only the restart is held.
+    if (!bypassWindow && !this.isInRestartWindow()) {
+      const waitMs = this.msUntilRestartWindow();
+      const waitH = Math.round(waitMs / 3600_000 * 10) / 10;
+      console.log(`[AutoUpdater] Outside restart window (${this.config.restartWindow!.start}-${this.config.restartWindow!.end}). Deferring restart for v${newVersion} (~${waitH}h)`);
+
+      // Schedule a retry at the window start
+      if (this.deferralTimer) clearTimeout(this.deferralTimer);
+      this.deferralTimer = setTimeout(() => {
+        this.deferralTimer = null;
+        console.log(`[AutoUpdater] Restart window reached — attempting restart for v${newVersion}`);
+        this.gatedRestart(newVersion, false);
+      }, waitMs);
+      this.deferralTimer.unref();
+      return;
     }
 
     // If no session manager is wired, skip gating — silent restart

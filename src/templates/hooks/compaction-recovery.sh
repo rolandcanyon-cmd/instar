@@ -170,6 +170,49 @@ echo "5. DISMISSAL WITHOUT INVESTIGATION: Never resolve a bug report or feedback
 echo "--- END PRINCIPLES ---"
 echo ""
 
+# Phase F.5: Discovery state (prevents re-surfacing features already mentioned this session)
+# Resolves Open Question #5 from the Consent & Discovery Framework spec:
+# lastSurfacedAt timestamps persist in SQLite regardless of context state.
+if [ -f "$CONFIG_FILE" ]; then
+  PORT=$(grep -o '"port":[0-9]*' "$CONFIG_FILE" | head -1 | cut -d':' -f2)
+  if [ -n "$PORT" ]; then
+    AUTH_TOKEN=$(python3 -c "import json; print(json.load(open('$CONFIG_FILE')).get('authToken',''))" 2>/dev/null)
+    FEATURES_JSON=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
+      "http://localhost:${PORT}/features/summary" 2>/dev/null)
+    if [ -n "$FEATURES_JSON" ]; then
+      DISCOVERY_STATE=$(echo "$FEATURES_JSON" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    features = data.get('features', [])
+    if not features:
+        sys.exit(0)
+    enabled = [f['name'] for f in features if f.get('discoveryState') == 'enabled']
+    undiscovered = [f['name'] for f in features if f.get('discoveryState') == 'undiscovered']
+    aware = [f['name'] for f in features if f.get('discoveryState') in ('aware', 'interested', 'deferred')]
+    if enabled:
+        print(f'Enabled features: {\", \".join(enabled)}')
+    if undiscovered:
+        print(f'Undiscovered (available to surface): {\", \".join(undiscovered)}')
+    if aware:
+        print(f'User is aware of: {\", \".join(aware)}')
+    print()
+    print('IMPORTANT: Do NOT re-surface features already mentioned this session.')
+    print('Check POST /features/:id/surface timestamps before surfacing.')
+    print('Max 1 feature per conversation turn. Never during user frustration.')
+except Exception:
+    pass
+" 2>/dev/null)
+      if [ -n "$DISCOVERY_STATE" ]; then
+        echo "--- FEATURE DISCOVERY STATE (compaction-safe) ---"
+        echo "$DISCOVERY_STATE"
+        echo "--- END DISCOVERY STATE ---"
+        echo ""
+      fi
+    fi
+  fi
+fi
+
 # Relationships summary
 if [ -d "$INSTAR_DIR/relationships" ]; then
   REL_COUNT=$(ls -1 "$INSTAR_DIR/relationships"/*.json 2>/dev/null | wc -l | tr -d ' ')

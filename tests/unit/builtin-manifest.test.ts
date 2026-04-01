@@ -56,7 +56,7 @@ describe('INSTAR_BUILTIN_MANIFEST', () => {
     expect(normalize(after)).toBe(normalize(before));
   });
 
-  it('covers all 13 built-in hooks', () => {
+  it('covers all 14 built-in hooks', () => {
     const manifest = JSON.parse(fs.readFileSync(MANIFEST_PATH, 'utf-8'));
 
     const expectedHooks = [
@@ -73,6 +73,7 @@ describe('INSTAR_BUILTIN_MANIFEST', () => {
       'hook:free-text-guard',
       'hook:claim-intercept',
       'hook:claim-intercept-response',
+      'hook:auto-approve-permissions',
     ];
 
     for (const hookId of expectedHooks) {

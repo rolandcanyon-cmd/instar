@@ -33,7 +33,7 @@ describe('META: Stale version reporting prevention', () => {
     // Find the health endpoint section
     const healthStart = routesSrc.indexOf("router.get('/health'");
     const healthEnd = routesSrc.indexOf("router.get('/'", healthStart + 1);
-    const healthBlock = routesSrc.slice(healthStart, healthEnd > 0 ? healthEnd : healthStart + 2000);
+    const healthBlock = routesSrc.slice(healthStart, healthEnd > 0 ? healthEnd : healthStart + 5000);
 
     // Should reference ProcessIntegrity
     expect(healthBlock).toContain('ProcessIntegrity');

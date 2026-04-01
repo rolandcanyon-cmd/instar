@@ -56,6 +56,7 @@ function createMinimalContext(stateDir: string): RouteContext {
     watchdog: null,
     triageNurse: null,
     topicMemory: null,
+    discoveryEvaluator: null,
     startTime: new Date(),
   };
 }

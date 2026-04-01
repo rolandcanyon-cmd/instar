@@ -91,6 +91,7 @@ describe('E2E: Dispatch + Update + Feedback lifecycle', () => {
       config,
       sessionManager: {
         listRunningSessions: () => [],
+        getCachedRunningSessions: () => ({ count: 0, sessions: [], stale: false }),
         spawnSession: async () => ({ id: 'mock', name: 'mock', status: 'running', tmuxSession: 'mock', startedAt: new Date().toISOString(), prompt: '' }),
         isSessionAlive: () => false,
         killSession: () => false,

@@ -80,6 +80,12 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Architecture',
+          items: [
+            { label: 'Under the Hood', slug: 'architecture/under-the-hood' },
+          ],
+        },
+        {
           label: 'Reference',
           items: [
             { label: 'CLI Commands', slug: 'reference/cli' },

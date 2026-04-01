@@ -381,6 +381,21 @@ export class TreeGenerator {
       description: 'Secure secret collection — generate one-time, time-limited URLs for users to submit passwords, API keys, or tokens without exposing them in chat. Use POST /secrets/request to create a link, then share the tunnelUrl with the user. Never ask users to paste secrets in Telegram or chat.',
     });
 
+    // Discovery framework — feature surfacing guidance
+    children.push({
+      id: 'capabilities.discovery',
+      name: 'Feature Discovery',
+      alwaysInclude: false,
+      managed: true,
+      depth: 'medium',
+      maxTokens: 600,
+      sensitivity: 'public',
+      sources: [
+        { type: 'probe', name: 'feature-discovery' },
+      ],
+      description: 'Opt-in feature discovery framework — what features exist, their discovery state, surfacing rules, and behavioral contract. Query when the user asks about capabilities or when contextually relevant features should be surfaced.',
+    });
+
     if (options.hasDecisionJournal) {
       children.push({
         id: 'capabilities.edges',

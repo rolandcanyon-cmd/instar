@@ -45,6 +45,11 @@ curl -s -X POST "http://localhost:${PORT}/reflection/session-start" \
   -H "Authorization: Bearer ${AUTH_TOKEN}" \
   -H "Content-Type: application/json" -o /dev/null 2>/dev/null || true
 
+# Reset homeostasis state for new session (work-velocity awareness)
+curl -s -X POST "http://localhost:${PORT}/homeostasis/reset" \
+  -H "Authorization: Bearer ${AUTH_TOKEN}" \
+  -H "Content-Type: application/json" -o /dev/null 2>/dev/null || true
+
 # Check reflection metrics — usage-based reflection suggestion
 REFLECTION_CHECK=$(curl -s -H "Authorization: Bearer ${AUTH_TOKEN}" \
   "http://localhost:${PORT}/reflection/metrics" 2>/dev/null)
@@ -274,6 +279,61 @@ try:
 except Exception:
     sys.exit(0)
 " 2>/dev/null
+fi
+
+# Feature Discovery — evaluate context for feature surfacing recommendation
+# Only runs when: server is alive, evaluator is initialized, autonomy profile is not passive.
+# Fail-open: errors/timeouts produce no output, session continues normally.
+if [ -n "$PORT" ] && [ -n "$AUTH_TOKEN" ]; then
+  # Derive topic category from prompt (first 100 chars, sanitized)
+  TOPIC_LABEL=$(echo "${PROMPT:-unknown}" | head -c 100 | tr -cd '[:alnum:] [:space:]' | tr '[:upper:]' '[:lower:]')
+
+  # Classify intent from prompt keywords
+  INTENT="unknown"
+  case "$PROMPT" in
+    *debug*|*error*|*fix*|*bug*|*broken*) INTENT="debugging" ;;
+    *config*|*enable*|*disable*|*setup*|*setting*) INTENT="configuring" ;;
+    *what*|*how*|*why*|*explain*) INTENT="asking" ;;
+    *build*|*create*|*implement*|*add*) INTENT="building" ;;
+    *monitor*|*check*|*status*|*health*) INTENT="monitoring" ;;
+  esac
+
+  EVAL_RESULT=$(curl -s --max-time 6 -X POST \
+    -H "Authorization: Bearer ${AUTH_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "http://localhost:${PORT}/features/evaluate-context" \
+    -d "{\"topicCategory\":\"${TOPIC_LABEL}\",\"conversationIntent\":\"${INTENT}\",\"problemCategories\":[],\"autonomyProfile\":\"collaborative\",\"enabledFeatures\":[]}" \
+    2>/dev/null)
+
+  if [ -n "$EVAL_RESULT" ]; then
+    DISCOVERY_MSG=$(echo "$EVAL_RESULT" | python3 -c "
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    rec = data.get('recommendation')
+    if not rec:
+        sys.exit(0)
+    fid = rec.get('featureId', '')
+    surface_as = rec.get('surfaceAs', 'awareness')
+    msg = rec.get('messageForAgent', '')
+    if not msg:
+        sys.exit(0)
+    print('--- FEATURE DISCOVERY SUGGESTION ---')
+    print(f'Feature: {fid} (surface as: {surface_as})')
+    print(f'Suggested mention: {msg}')
+    print()
+    print('IMPORTANT: Use this naturally in conversation. Do NOT lead with it.')
+    print(f'Record the surfacing: POST /features/{fid}/surface')
+    print('--- END DISCOVERY SUGGESTION ---')
+except Exception:
+    pass
+" 2>/dev/null)
+    if [ -n "$DISCOVERY_MSG" ]; then
+      echo ""
+      echo "$DISCOVERY_MSG"
+      echo ""
+    fi
+  fi
 fi
 
 exit 0

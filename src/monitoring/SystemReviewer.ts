@@ -191,28 +191,28 @@ function formatDoctorAlert(result: ProbeResult): string {
   const remediations = result.remediation;
 
   // Map probe names to friendly descriptions
-  const friendlyDescriptions: Record<string, (error: string) => string> = {
-    'Lifeline Supervisor': (err) =>
-      `Your agent's automatic restart system (lifeline) has stopped working. If your agent crashes, it won't restart on its own.\n\nCause: ${err}\nReply "fix lifeline" to restart it.`,
-    'Lifeline Process': (err) =>
-      `Your agent's crash-recovery process isn't running. If your agent stops unexpectedly, it won't come back automatically.\n\nCause: ${err}\nReply "fix lifeline" to restart it.`,
-    'Session Health': (err) =>
-      `One or more of your agent's sessions may be stuck or unresponsive.\n\nCause: ${err}\nReply "restart sessions" to check and fix them.`,
-    'Scheduler': (err) =>
-      `Your agent's job scheduler isn't working properly, so scheduled tasks may not run.\n\nCause: ${err}\nReply "fix scheduler" to investigate.`,
-    'Telegram Messaging': (err) =>
-      `Your agent's Telegram connection has an issue. Messages may not be sending or receiving correctly.\n\nCause: ${err}\nReply "fix telegram" to reconnect.`,
+  const friendlyDescriptions: Record<string, string> = {
+    'Lifeline Supervisor':
+      `My auto-restart safety net stopped working — if I crash, I won't come back on my own. Reply "fix lifeline" to get it running again.`,
+    'Lifeline Process':
+      `My crash-recovery process isn't running. If I stop unexpectedly, I won't restart automatically. Reply "fix lifeline" to fix this.`,
+    'Session Health':
+      `One of my sessions might be stuck. Reply "restart sessions" and I'll check and fix them.`,
+    'Scheduler':
+      `The job scheduler isn't working properly, so scheduled tasks might not run. Reply "fix scheduler" to investigate.`,
+    'Telegram Messaging':
+      `Having trouble with the Telegram connection — messages might not be going through. Reply "fix telegram" to reconnect.`,
   };
 
-  const formatter = friendlyDescriptions[result.name];
-  if (formatter) {
-    return formatter(error);
+  const description = friendlyDescriptions[result.name];
+  if (description) {
+    return description;
   }
 
-  // Fallback for unknown probes — still narrative
-  let msg = `Your agent's "${result.name}" check failed.\n\nCause: ${error}`;
+  // Fallback for unknown probes — still include the error for context
+  let msg = `Something went wrong with the "${result.name}" check: ${error}`;
   if (remediations && remediations.length > 0) {
-    msg += `\n\nSuggested fix: ${remediations[0]}`;
+    msg += ` ${remediations[0]}`;
   }
   return msg;
 }

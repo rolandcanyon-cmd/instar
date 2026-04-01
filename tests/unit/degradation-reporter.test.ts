@@ -142,7 +142,7 @@ describe('DegradationReporter', () => {
 
     // Verify the Telegram alert
     expect(telegramSender.mock.calls[0][0]).toBe(42); // topicId
-    expect(telegramSender.mock.calls[0][1]).toContain('Heads up:');
+    expect(telegramSender.mock.calls[0][1]).toContain('Delayed reporting');
 
     // Event should now be marked as reported and alerted
     const event = reporter.getEvents()[0];

@@ -190,6 +190,7 @@ export class TriageOrchestrator extends EventEmitter {
   private activeTriages = new Map<number, TriageState>();
   private cooldowns = new Map<number, number>();
   private autoActionCounts: number[] = []; // timestamps of auto-actions in last hour
+  private decisionLogPath = '/tmp/triage-decisions.jsonl';
 
   constructor(
     deps: TriageOrchestratorDeps,
@@ -322,6 +323,7 @@ export class TriageOrchestrator extends EventEmitter {
           }
 
           this.resolveTriageForTopic(topicId, 'heuristic_resolved');
+          this.logDecision(topicId, trigger, 'heuristic', true, heuristic.classification, heuristic.action, heuristic.confidence);
           return {
             resolved: true,
             classification: heuristic.classification,
@@ -346,6 +348,7 @@ export class TriageOrchestrator extends EventEmitter {
         console.warn(`[TriageOrchestrator] Failed to parse triage output for topic ${topicId}`);
         this.emit('triage:failed', { topicId, reason: 'parse_failure' });
         this.resolveTriageForTopic(topicId, 'parse_failure');
+        this.logDecision(topicId, trigger, 'failed', false);
         return { resolved: false, checkCount: triageState.checkCount, followUpScheduled: false };
       }
 
@@ -374,8 +377,10 @@ export class TriageOrchestrator extends EventEmitter {
         this.resolveTriageForTopic(topicId, 'action_taken');
       }
 
+      const resolved = validatedAction === 'auto_restart' || validatedAction === 'auto_interrupt' || validatedAction === 'reinject_message';
+      this.logDecision(topicId, trigger, 'llm', resolved, decision.classification, validatedAction, decision.confidence);
       return {
-        resolved: validatedAction === 'auto_restart' || validatedAction === 'auto_interrupt' || validatedAction === 'reinject_message',
+        resolved,
         classification: decision.classification,
         action: validatedAction,
         checkCount: triageState.checkCount,
@@ -387,6 +392,7 @@ export class TriageOrchestrator extends EventEmitter {
       console.error(`[TriageOrchestrator] Triage failed for topic ${topicId}:`, errMsg);
       this.emit('triage:failed', { topicId, reason: errMsg });
       this.resolveTriageForTopic(topicId, `error: ${errMsg}`);
+      this.logDecision(topicId, trigger, 'failed', false);
       return { resolved: false, checkCount: triageState.checkCount, followUpScheduled: false };
     }
   }
@@ -967,7 +973,7 @@ export class TriageOrchestrator extends EventEmitter {
 
       case 'auto_restart':
         await this.deps.sendToTopic(topicId, prefixedMessage).catch(() => {});
-        await this.deps.respawnSession(sessionName, topicId);
+        await this.deps.respawnSession(sessionName, topicId, { silent: true });
         break;
     }
   }
@@ -1054,5 +1060,36 @@ export class TriageOrchestrator extends EventEmitter {
     } catch {
       // Best-effort
     }
+  }
+
+  // ─── Telemetry ──────────────────────────────────────────
+
+  private logDecision(topicId: number, trigger: TriageTrigger, resolvedBy: 'heuristic' | 'llm' | 'failed', resolved: boolean, classification?: string, action?: string, confidence?: number): void {
+    try {
+      const entry = { timestamp: new Date().toISOString(), topicId, trigger, resolvedBy, classification, action, confidence, resolved };
+      fs.appendFileSync(this.decisionLogPath, JSON.stringify(entry) + '\n');
+    } catch { /* best-effort */ }
+  }
+
+  getStats(sinceMs?: number): { activations: number; heuristicResolutions: number; llmResolutions: number; failures: number; actionCounts: Record<string, number> } {
+    const since = sinceMs ?? (Date.now() - 24 * 60 * 60 * 1000);
+    const stats = { activations: 0, heuristicResolutions: 0, llmResolutions: 0, failures: 0, actionCounts: {} as Record<string, number> };
+    try {
+      if (!fs.existsSync(this.decisionLogPath)) return stats;
+      const content = fs.readFileSync(this.decisionLogPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line);
+          if (new Date(e.timestamp).getTime() < since) continue;
+          stats.activations++;
+          if (e.resolvedBy === 'heuristic') stats.heuristicResolutions++;
+          else if (e.resolvedBy === 'llm') stats.llmResolutions++;
+          else if (e.resolvedBy === 'failed') stats.failures++;
+          if (e.action) stats.actionCounts[e.action] = (stats.actionCounts[e.action] || 0) + 1;
+        } catch { /* skip corrupt lines */ }
+      }
+    } catch { /* can't read log */ }
+    return stats;
   }
 }

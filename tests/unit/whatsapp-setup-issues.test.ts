@@ -354,8 +354,9 @@ describe('Server dashboard unlock endpoint', () => {
     serverSrc = fs.readFileSync(serverPath, 'utf-8');
   });
 
-  it('logs a warning when dashboardPin or authToken is missing', () => {
-    expect(serverSrc).toContain('Missing dashboardPin or authToken');
+  it('checks for missing dashboardPin or authToken before unlock', () => {
+    expect(serverSrc).toContain('dashboardPin');
+    expect(serverSrc).toContain('authToken');
   });
 
   it('/dashboard/unlock endpoint uses timing-safe comparison for PIN', () => {

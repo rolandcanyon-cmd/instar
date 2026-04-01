@@ -116,6 +116,19 @@ export class StateManager {
     return sessions;
   }
 
+  removeSession(sessionId: string): boolean {
+    this.guardWrite('removeSession');
+    this.validateKey(sessionId, 'sessionId');
+    const filePath = path.join(this.stateDir, 'state', 'sessions', `${sessionId}.json`);
+    if (!fs.existsSync(filePath)) return false;
+    try {
+      fs.unlinkSync(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // ── Job State ─────────────────────────────────────────────────
 
   getJobState(slug: string): JobState | null {

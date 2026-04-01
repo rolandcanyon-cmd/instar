@@ -194,8 +194,8 @@ describe('TopicResumeMap — Heartbeat', () => {
 
     // Simulate: topic 42 is linked to an alive session
     // We can't easily mock tmux here, so test the map file operations directly
-    const topicSessions = new Map<number, string>();
-    topicSessions.set(42, 'dawn-test-session');
+    const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+    topicSessions.set(42, { sessionName: 'dawn-test-session' });
 
     // Since we can't mock tmux has-session in unit tests, verify the method
     // handles the case where tmux check fails gracefully
@@ -207,15 +207,15 @@ describe('TopicResumeMap — Heartbeat', () => {
   });
 
   it('handles empty topic sessions gracefully', () => {
-    const topicSessions = new Map<number, string>();
+    const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
     // Should not throw
     resumeMap.refreshResumeMappings(topicSessions);
   });
 
   it('handles missing JSONL directory gracefully', () => {
     fs.rmSync(projectJsonlDir, { recursive: true, force: true });
-    const topicSessions = new Map<number, string>();
-    topicSessions.set(42, 'dawn-test');
+    const topicSessions = new Map<number, { sessionName: string; claudeSessionId?: string }>();
+    topicSessions.set(42, { sessionName: 'dawn-test' });
     // Should not throw
     resumeMap.refreshResumeMappings(topicSessions);
   });

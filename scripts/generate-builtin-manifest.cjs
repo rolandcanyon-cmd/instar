@@ -42,7 +42,7 @@ function fileExists(filePath) {
 
 /**
  * Scan hooks from PostUpdateMigrator's migrateHooks method.
- * These are the 13 hook files Instar writes to .instar/hooks/instar/.
+ * These are the 14 hook files Instar writes to .instar/hooks/instar/.
  */
 function scanHooks() {
   const entries = [];
@@ -62,6 +62,7 @@ function scanHooks() {
     { file: 'free-text-guard.sh', domain: 'safety' },
     { file: 'claim-intercept.js', domain: 'coherence' },
     { file: 'claim-intercept-response.js', domain: 'coherence' },
+    { file: 'auto-approve-permissions.js', domain: 'safety' },
   ];
 
   for (const hook of builtinHooks) {

@@ -88,6 +88,7 @@ describe('Autonomy API Routes (integration)', () => {
       capabilityMapper: null,
       topicResumeMap: null,
       autonomyManager,
+      discoveryEvaluator: null,
       startTime: new Date(),
     });
 

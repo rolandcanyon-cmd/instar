@@ -64,6 +64,24 @@ const IDLE_PROMPT_PATTERNS = [
 ];
 
 /**
+ * Patterns in terminal output that indicate an API or tool error caused the session to stop.
+ * When detected at the idle prompt, we nudge the session to continue instead of killing it.
+ */
+const TERMINAL_ERROR_PATTERNS = [
+  'API Error:',
+  'invalid_request_error',
+  'Could not process',
+  'overloaded_error',
+  'rate_limit_error',
+  'Request timed out',
+  'Internal server error',
+  'ServiceUnavailable',
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'fetch failed',
+];
+
+/**
  * Process names that are always running in a Claude Code session (MCP servers, etc.)
  * These do NOT indicate activity — they're background infrastructure.
  */
@@ -97,6 +115,9 @@ export class SessionManager extends EventEmitter {
   /** Track when each session was first seen idle at the Claude prompt. Key = session ID */
   private idlePromptSince = new Map<string, number>();
 
+  /** Throttle stale session cleanup to every 5 minutes */
+  private lastCleanupAt = 0;
+
   /** Optional callback to check if a session has active subagents (prevents false zombie kills) */
   private subagentChecker?: (session: Session) => boolean;
 
@@ -105,6 +126,24 @@ export class SessionManager extends EventEmitter {
 
   /** Sessions with active relay leases (prompt relayed, waiting for response) — extends idle timeout */
   private relayLeases = new Map<string, number>(); // session ID → lease expiry timestamp
+
+  /** Track pending Telegram injections awaiting agent response.
+   *  Key = tmuxSession name. Cleared when agent replies via /telegram/reply/:topicId. */
+  private pendingInjections = new Map<string, { topicId: number; injectedAt: number; text: string }>();
+
+  /** Track sessions that have been nudged after an API error.
+   *  Key = session ID. Prevents infinite nudge loops — each session gets ONE nudge.
+   *  If it goes idle again after the nudge, the zombie detector kills it normally. */
+  private errorNudgedSessions = new Set<string>();
+
+  /** Sessions where we've already retried Enter for stuck pasted text.
+   *  Key = session ID. Prevents infinite retry loops — one retry per session. */
+  private pasteRetried = new Set<string>();
+
+  /** Cached count of running sessions, updated asynchronously by the monitor tick.
+   *  Used by the health endpoint to avoid synchronous tmux polling. */
+  private _cachedRunningCount = 0;
+  private _cachedRunningSessions: Session[] = [];
 
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
@@ -140,6 +179,8 @@ export class SessionManager extends EventEmitter {
     this.on('sessionComplete', (session: Session) => {
       detector.cleanup(session.tmuxSession);
       this.relayLeases.delete(session.id);
+      this.errorNudgedSessions.delete(session.id);
+      this.pasteRetried.delete(session.id);
     });
   }
 
@@ -237,6 +278,18 @@ export class SessionManager extends EventEmitter {
       for (const session of running) {
         const alive = await this.isSessionAliveAsync(session.tmuxSession);
         if (!alive) {
+          // Check if this session had a pending Telegram injection that never got a response
+          const pendingInjection = this.pendingInjections.get(session.tmuxSession);
+          if (pendingInjection) {
+            console.warn(`[SessionManager] Session "${session.name}" died with unanswered Telegram injection for topic ${pendingInjection.topicId} (injected ${Math.round((Date.now() - pendingInjection.injectedAt) / 1000)}s ago)`);
+            this.pendingInjections.delete(session.tmuxSession);
+            this.emit('injectionDropped', {
+              topicId: pendingInjection.topicId,
+              sessionName: session.tmuxSession,
+              text: pendingInjection.text,
+              injectedAt: pendingInjection.injectedAt,
+            });
+          }
           session.status = 'completed';
           session.endedAt = new Date().toISOString();
           this.state.saveSession(session);
@@ -249,6 +302,8 @@ export class SessionManager extends EventEmitter {
         if (!this.config.protectedSessions.includes(session.tmuxSession) &&
             this.detectCompletion(session.tmuxSession)) {
           console.log(`[SessionManager] Session "${session.name}" completed (pattern detected). Cleaning up.`);
+          // Emit beforeSessionKill so listeners (TopicResumeMap, SlackAdapter) can save resume UUIDs
+          this.emit('beforeSessionKill', session);
           try {
             await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
           } catch { /* ignore */ }
@@ -268,6 +323,18 @@ export class SessionManager extends EventEmitter {
           const buffer = Math.min(maxMinutes * 0.2, 60); // 20% buffer, max 60 min
           const limit = maxMinutes + buffer;
           if (elapsed > limit && !this.config.protectedSessions.includes(session.tmuxSession)) {
+            // Check for unanswered injection before timeout kill
+            const pendingInjection = this.pendingInjections.get(session.tmuxSession);
+            if (pendingInjection) {
+              console.warn(`[SessionManager] Timed-out session "${session.name}" had unanswered injection for topic ${pendingInjection.topicId}`);
+              this.pendingInjections.delete(session.tmuxSession);
+              this.emit('injectionDropped', {
+                topicId: pendingInjection.topicId,
+                sessionName: session.tmuxSession,
+                text: pendingInjection.text,
+                injectedAt: pendingInjection.injectedAt,
+              });
+            }
             console.warn(`[SessionManager] Session "${session.name}" exceeded timeout (${Math.round(elapsed)}m > ${maxMinutes}m). Killing.`);
             // Emit beforeSessionKill BEFORE destroying the tmux session so
             // listeners (e.g. TopicResumeMap) can discover the Claude UUID.
@@ -309,9 +376,54 @@ export class SessionManager extends EventEmitter {
             const now = Date.now();
             if (!this.idlePromptSince.has(session.id)) {
               this.idlePromptSince.set(session.id, now);
+
+              // ── Pasted text stuck: detect unsubmitted paste and retry Enter ──
+              // Claude Code shows "[Pasted text #N]" when bracketed paste content
+              // sits in the input buffer without being submitted. This happens when
+              // the Enter key sent after the paste end sequence doesn't register.
+              // Re-send Enter to unstick it. Only try once per session to avoid loops.
+              if (!this.pasteRetried.has(session.id)) {
+                const recentForPaste = this.captureOutput(session.tmuxSession, 15);
+                if (recentForPaste && /\[Pasted text #\d+\]/.test(recentForPaste)) {
+                  this.pasteRetried.add(session.id);
+                  console.log(`[SessionManager] Session "${session.name}" has unsubmitted pasted text — resending Enter.`);
+                  this.sendKey(session.tmuxSession, 'Enter');
+                  this.idlePromptSince.delete(session.id); // Reset idle timer
+                  continue; // Skip to next session
+                }
+              }
+
+              // ── Error nudge: on first idle detection, check terminal for API errors ──
+              // If the session went idle because of an API error (not a natural stop),
+              // inject a nudge to get it working again instead of waiting 15m to kill.
+              if (!this.errorNudgedSessions.has(session.id)) {
+                const recentOutput = this.captureOutput(session.tmuxSession, 30);
+                if (recentOutput) {
+                  const hasError = TERMINAL_ERROR_PATTERNS.some(p => recentOutput.includes(p));
+                  if (hasError) {
+                    this.errorNudgedSessions.add(session.id);
+                    console.log(`[SessionManager] Session "${session.name}" idle after API error — nudging to continue.`);
+                    this.sendInput(session.tmuxSession, 'You hit an API error. Please continue your work — skip or work around the action that failed.');
+                    this.idlePromptSince.delete(session.id); // Reset idle timer
+                    continue; // Skip to next session
+                  }
+                }
+              }
             } else {
               const idleMs = now - this.idlePromptSince.get(session.id)!;
               if (idleMs > IDLE_PROMPT_KILL_MINUTES * 60_000) {
+                // Check for unanswered injection before killing
+                const pendingInjection = this.pendingInjections.get(session.tmuxSession);
+                if (pendingInjection) {
+                  console.warn(`[SessionManager] Zombie session "${session.name}" had unanswered injection for topic ${pendingInjection.topicId}`);
+                  this.pendingInjections.delete(session.tmuxSession);
+                  this.emit('injectionDropped', {
+                    topicId: pendingInjection.topicId,
+                    sessionName: session.tmuxSession,
+                    text: pendingInjection.text,
+                    injectedAt: pendingInjection.injectedAt,
+                  });
+                }
                 console.warn(`[SessionManager] Session "${session.name}" idle at prompt for ${Math.round(idleMs / 60_000)}m with no active processes. Killing zombie.`);
                 this.emit('beforeSessionKill', session);
                 try {
@@ -331,6 +443,18 @@ export class SessionManager extends EventEmitter {
           }
         }
       }
+
+      // Periodically clean up stale killed/completed session state files (every 5 min)
+      const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+      if (Date.now() - this.lastCleanupAt > CLEANUP_INTERVAL_MS) {
+        this.lastCleanupAt = Date.now();
+        this.cleanupStaleSessions();
+      }
+
+      // Update cached session list (non-blocking) for health endpoint
+      const stillRunning = this.state.listSessions({ status: 'running' });
+      this._cachedRunningSessions = stillRunning;
+      this._cachedRunningCount = stillRunning.length;
     } finally {
       this.monitoringInProgress = false;
     }
@@ -392,6 +516,8 @@ export class SessionManager extends EventEmitter {
         '-c', this.config.projectDir,
         '-e', 'CLAUDECODE=', // Prevent nested Claude Code detection
         '-e', `INSTAR_SESSION_ID=${sessionId}`, // Expose instar session ID to hook events
+        '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
+        '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
         '-e', 'ANTHROPIC_API_KEY=', // Clear stale/invalid API keys — agents use Claude subscription
         // Isolate database credentials — spawned sessions must never inherit production
         // database URLs from the parent shell. This prevents accidental schema changes
@@ -684,10 +810,56 @@ export class SessionManager extends EventEmitter {
   /**
    * List all sessions that are currently running.
    * Pure filter — does not mutate state. The monitor tick handles lifecycle transitions.
+   * WARNING: This calls synchronous tmux has-session for each session.
+   * For health checks and non-critical callers, prefer getCachedRunningSessions().
    */
   listRunningSessions(): Session[] {
     const sessions = this.state.listSessions({ status: 'running' });
-    return sessions.filter(s => this.isSessionAlive(s.tmuxSession));
+    const alive = sessions.filter(s => this.isSessionAlive(s.tmuxSession));
+    // Update cache as a side effect
+    this._cachedRunningCount = alive.length;
+    this._cachedRunningSessions = alive;
+    return alive;
+  }
+
+  /**
+   * Get cached running session info (count + list) without blocking the event loop.
+   * Updated asynchronously by the monitor tick every 5 seconds.
+   * Safe to call from the health endpoint and other latency-sensitive paths.
+   */
+  getCachedRunningSessions(): { count: number; sessions: Session[] } {
+    return { count: this._cachedRunningCount, sessions: this._cachedRunningSessions };
+  }
+
+  /**
+   * Fast startup purge — immediately remove session records for dead tmux sessions.
+   * Called once at server boot BEFORE monitoring starts, to prevent the death spiral
+   * where stale sessions overwhelm startup and block health checks.
+   * Uses a short timeout (1s) per session to fail fast.
+   */
+  async purgeDeadSessions(): Promise<number> {
+    const running = this.state.listSessions({ status: 'running' });
+    if (running.length === 0) return 0;
+
+    let purged = 0;
+    for (const session of running) {
+      try {
+        execFileSync(this.config.tmuxPath, ['has-session', '-t', `=${session.tmuxSession}`], {
+          stdio: 'ignore', timeout: 1000,
+        });
+      } catch {
+        // tmux session doesn't exist — purge the record
+        session.status = 'completed';
+        session.endedAt = new Date().toISOString();
+        this.state.saveSession(session);
+        purged++;
+      }
+    }
+
+    if (purged > 0) {
+      console.log(`[SessionManager] Startup purge: removed ${purged} dead session(s) of ${running.length} tracked`);
+    }
+    return purged;
   }
 
   /**
@@ -819,6 +991,40 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Remove stale session state files for sessions that have been
+   * killed or completed beyond the retention period.
+   * Killed sessions: removed after 1 hour.
+   * Completed sessions: removed after 24 hours.
+   */
+  cleanupStaleSessions(): string[] {
+    const allSessions = this.state.listSessions();
+    const now = Date.now();
+    const KILLED_TTL_MS = 60 * 60 * 1000;        // 1 hour
+    const COMPLETED_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+    const cleaned: string[] = [];
+
+    for (const session of allSessions) {
+      if (session.status !== 'killed' && session.status !== 'completed') continue;
+      const endedAt = session.endedAt ? new Date(session.endedAt).getTime() : 0;
+      if (!endedAt) continue;
+
+      const age = now - endedAt;
+      const ttl = session.status === 'killed' ? KILLED_TTL_MS : COMPLETED_TTL_MS;
+
+      if (age > ttl) {
+        if (this.state.removeSession(session.id)) {
+          cleaned.push(session.id);
+        }
+      }
+    }
+
+    if (cleaned.length > 0) {
+      console.log(`[SessionManager] Cleaned up ${cleaned.length} stale session(s): ${cleaned.join(', ')}`);
+    }
+    return cleaned;
+  }
+
+  /**
    * Spawn an interactive Claude Code session (no -p prompt — opens at the REPL).
    * Used for Telegram-driven conversational sessions.
    * Optionally sends an initial message after Claude is ready.
@@ -871,6 +1077,8 @@ export class SessionManager extends EventEmitter {
         '-x', '200', '-y', '50',
         '-e', 'CLAUDECODE=', // Prevent nested Claude Code detection
         '-e', `INSTAR_SESSION_ID=${interactiveSessionId}`, // Expose instar session ID to hook events
+        '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
+        '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
         '-e', 'ANTHROPIC_API_KEY=', // Clear stale/invalid API keys — agents use Claude subscription
         // Isolate database credentials — spawned sessions must never inherit production
         // database URLs from the parent shell. (Learned from Portal incident 2026-02-22)
@@ -988,6 +1196,8 @@ export class SessionManager extends EventEmitter {
         '-x', '200', '-y', '50',
         '-e', 'CLAUDECODE=',
         '-e', `INSTAR_SESSION_ID=${triageSessionId}`,
+        '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
+        '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
         '-e', 'ANTHROPIC_API_KEY=',
         '-e', 'DATABASE_URL=',
         '-e', 'DIRECT_DATABASE_URL=',
@@ -1074,6 +1284,10 @@ export class SessionManager extends EventEmitter {
   }
 
   injectTelegramMessage(tmuxSession: string, topicId: number, text: string, topicName?: string, senderName?: string, telegramUserId?: number): void {
+    // Track this injection for response verification.
+    // If the session dies before the agent replies, the monitor loop will detect it.
+    this.pendingInjections.set(tmuxSession, { topicId, injectedAt: Date.now(), text: text.slice(0, 200) });
+
     const FILE_THRESHOLD = 500;
 
     // Transform [image:path] tags into explicit read instructions.
@@ -1085,7 +1299,7 @@ export class SessionManager extends EventEmitter {
         if (imagePath === 'download-failed') {
           return '[User sent a photo but the download failed]';
         }
-        return `[User sent a photo — read the image file at ${imagePath} to view it]`;
+        return `[User sent a photo — read the image file at ${imagePath} to view it. If the image cannot be processed, acknowledge you received it and let the user know the image format may not be supported.]`;
       }
     );
 
@@ -1124,6 +1338,25 @@ export class SessionManager extends EventEmitter {
 
     const ref = `[telegram:${topicId}] [Long message saved to ${filepath} — read it to see the full message]`;
     this.injectMessage(tmuxSession, ref);
+  }
+
+  /**
+   * Clear the injection tracker for a topic when the agent sends a reply.
+   * Called from the /telegram/reply/:topicId route.
+   */
+  clearInjectionTracker(topicId: number): void {
+    for (const [session, info] of this.pendingInjections) {
+      if (info.topicId === topicId) {
+        this.pendingInjections.delete(session);
+      }
+    }
+  }
+
+  /**
+   * Get all pending injections (for diagnostics / event emission on session death).
+   */
+  getPendingInjection(tmuxSession: string): { topicId: number; injectedAt: number; text: string } | undefined {
+    return this.pendingInjections.get(tmuxSession);
   }
 
   /**
@@ -1166,7 +1399,7 @@ export class SessionManager extends EventEmitter {
    * This avoids tmux load-buffer/paste-buffer which trigger macOS TCC
    * "access data from other apps" permission prompts.
    */
-  private injectMessage(tmuxSession: string, text: string): void {
+  injectMessage(tmuxSession: string, text: string): void {
     // ── Input Guard: Layer 1 + 1.5 (deterministic, synchronous) ──
     if (this.inputGuard) {
       const binding = this.getTopicBinding(tmuxSession);
@@ -1287,8 +1520,11 @@ export class SessionManager extends EventEmitter {
         execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, '\x1b[201~'], {
           encoding: 'utf-8', timeout: 5000,
         });
-        // Brief delay to let the terminal process the bracketed paste
-        execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 });
+        // Delay to let the terminal fully process the bracketed paste.
+        // 100ms was too short — Claude Code needs time to parse the paste end
+        // sequence and buffer the content before Enter can submit it.
+        // 500ms is conservative but prevents the "[Pasted text #1]" stuck state.
+        execFileSync('/bin/sleep', ['0.5'], { timeout: 2000 });
         // Send Enter to submit
         execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
           encoding: 'utf-8', timeout: 5000,
@@ -1319,7 +1555,7 @@ export class SessionManager extends EventEmitter {
    * Wait for Claude to be ready in a tmux session by polling output.
    * Looks for Claude Code's prompt character (❯) which appears when ready for input.
    */
-  private async waitForClaudeReady(tmuxSession: string, timeoutMs: number = 30000): Promise<boolean> {
+  async waitForClaudeReady(tmuxSession: string, timeoutMs: number = 30000): Promise<boolean> {
     const start = Date.now();
     // Wait a minimum startup delay before checking (Claude needs time to load)
     await new Promise(r => setTimeout(r, 3000));

@@ -21,6 +21,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { detectTmuxPath } from '../core/Config.js';
+import { SleepWakeDetector } from '../core/SleepWakeDetector.js';
 
 /** Execute a shell command safely, returning stdout. */
 function shellExec(cmd: string, timeout = 5000): string {
@@ -34,6 +35,9 @@ export interface SupervisorEvents {
   circuitBroken: [totalFailures: number, lastCrashOutput: string];
   debugRestartRequested: [request: { fixDescription: string; requestedBy: string }];
   debugRestartSkipped: [info: { fixDescription: string; reason: string }];
+  /** Emitted when the server recovers after a planned update restart.
+   *  The lifeline should self-restart to pick up new code from the shadow install. */
+  updateApplied: [targetVersion: string];
 }
 
 export class ServerSupervisor extends EventEmitter {
@@ -61,6 +65,7 @@ export class ServerSupervisor extends EventEmitter {
   // Planned restart / maintenance wait — suppress alerts during expected downtime
   private maintenanceWaitStartedAt = 0;
   private maintenanceWaitMs = 5 * 60_000; // 5 minutes default (configurable via maintenanceWaitMinutes)
+  private pendingUpdateVersion: string | null = null; // Version being applied — triggers lifeline self-restart on recovery
 
   // Circuit breaker — give up after too many total failures, but retry periodically
   private totalFailures = 0;
@@ -76,6 +81,9 @@ export class ServerSupervisor extends EventEmitter {
   private slowRetryStartedAt = 0; // When slow retry mode started
   private lastCrashOutput = ''; // Last captured crash output for diagnostics
   private doctorSessionSecret: string | null = null; // HMAC secret for doctor restart requests
+  private sleepWakeDetector: SleepWakeDetector | null = null; // Detects short sleeps that gap-based detection misses
+  private wakeTransitionUntil = 0; // Timestamp until which we're in a wake transition (lenient health checks)
+  private readonly wakeTransitionMs = 60_000; // 60 seconds of lenient health checking after wake
 
   constructor(options: {
     projectDir: string;
@@ -117,6 +125,35 @@ export class ServerSupervisor extends EventEmitter {
       console.log(`[Supervisor] Server already running in tmux session: ${this.serverSessionName}`);
       this.isRunning = true;
       this.lastHealthy = Date.now();
+      // Set spawnedAt so the startup grace period applies. Without this, a fresh
+      // Supervisor (e.g., after Lifeline self-restart for an update) has spawnedAt=0,
+      // which disables the grace check and can cause false serverDown alerts if the
+      // server responds slowly during the transition window.
+      this.spawnedAt = Date.now();
+      // Check for planned-exit-marker or restart-requested flag — if present,
+      // pre-set maintenance wait so handleUnhealthy() suppresses alerts.
+      if (this.stateDir) {
+        const markerPath = path.join(this.stateDir, 'state', 'planned-exit-marker.json');
+        const restartPath = path.join(this.stateDir, 'state', 'restart-requested.json');
+        try {
+          if (fs.existsSync(markerPath)) {
+            const data = JSON.parse(fs.readFileSync(markerPath, 'utf-8'));
+            const markerAge = Date.now() - (new Date(data.exitedAt).getTime() || Date.now());
+            if (markerAge < 10 * 60_000) {
+              console.log(`[Supervisor] Found planned-exit marker on start — entering maintenance wait`);
+              this.maintenanceWaitStartedAt = new Date(data.exitedAt).getTime() || Date.now();
+              this.pendingUpdateVersion = data.targetVersion ?? null;
+            }
+          } else if (fs.existsSync(restartPath)) {
+            const data = JSON.parse(fs.readFileSync(restartPath, 'utf-8'));
+            if (data.plannedRestart && (!data.expiresAt || new Date(data.expiresAt).getTime() > Date.now())) {
+              console.log(`[Supervisor] Found restart-requested flag on start — entering maintenance wait`);
+              this.maintenanceWaitStartedAt = Date.now();
+              this.pendingUpdateVersion = data.targetVersion ?? null;
+            }
+          }
+        } catch { /* best-effort marker check */ }
+      }
       this.startHealthChecks();
       return true;
     }
@@ -177,12 +214,15 @@ export class ServerSupervisor extends EventEmitter {
     maxCircuitBreakerRetries: number;
     inMaintenanceWait: boolean;
     maintenanceWaitElapsedMs: number;
+    inWakeTransition: boolean;
+    wakeTransitionRemainingMs: number;
   } {
     const coolingDown = this.maxRetriesExhaustedAt > 0;
     const cooldownRemainingMs = coolingDown
       ? Math.max(0, this.retryCooldownMs - (Date.now() - this.maxRetriesExhaustedAt))
       : 0;
     const inMaintenanceWait = this.maintenanceWaitStartedAt > 0;
+    const inWakeTransition = Date.now() < this.wakeTransitionUntil;
     return {
       running: this.isRunning,
       healthy: this.healthy,
@@ -198,6 +238,8 @@ export class ServerSupervisor extends EventEmitter {
       maxCircuitBreakerRetries: this.maxCircuitBreakerRetries,
       inMaintenanceWait,
       maintenanceWaitElapsedMs: inMaintenanceWait ? Date.now() - this.maintenanceWaitStartedAt : 0,
+      inWakeTransition,
+      wakeTransitionRemainingMs: inWakeTransition ? this.wakeTransitionUntil - Date.now() : 0,
     };
   }
 
@@ -214,6 +256,7 @@ export class ServerSupervisor extends EventEmitter {
     this.restartAttempts = 0;
     this.maxRetriesExhaustedAt = 0;
     this.slowRetryStartedAt = 0;
+    this.wakeTransitionUntil = 0;
     console.log('[Supervisor] Circuit breaker reset');
   }
 
@@ -263,8 +306,137 @@ export class ServerSupervisor extends EventEmitter {
     return this.spawnServer();
   }
 
+  // ── Pre-spawn self-healing ──────────────────────────────────────
+  //
+  // Before starting the server, check prerequisites and fix common issues
+  // that would otherwise cause the server to crash immediately. This makes
+  // `/lifeline restart` actually useful for recovery — not just a blind retry.
+
+  /**
+   * Run preflight checks and attempt to fix broken prerequisites.
+   * Returns a summary of what was healed (empty string if nothing needed fixing).
+   */
+  private preflightSelfHeal(): string {
+    if (!this.stateDir) return '';
+
+    const healed: string[] = [];
+
+    // 1. Shadow install — the most common failure mode.
+    //    If the shadow install is missing or corrupt, the server can't start at all.
+    const shadowDir = path.join(this.stateDir, 'shadow-install');
+    const shadowCli = path.join(shadowDir, 'node_modules', 'instar', 'dist', 'cli.js');
+
+    if (!fs.existsSync(shadowCli)) {
+      console.log('[Supervisor] Preflight: shadow install missing — attempting reinstall');
+      try {
+        // Find a working npm binary
+        const npmPath = this.findNpmPath();
+        if (npmPath) {
+          const result = spawnSync(npmPath, ['install', 'instar', '--prefix', shadowDir], {
+            encoding: 'utf-8',
+            timeout: 60_000,
+            cwd: this.projectDir,
+          });
+          if (result.status === 0 && fs.existsSync(shadowCli)) {
+            healed.push('shadow install restored');
+            console.log('[Supervisor] Preflight: shadow install restored successfully');
+          } else {
+            console.error(`[Supervisor] Preflight: npm install failed (exit ${result.status}): ${(result.stderr || '').slice(-200)}`);
+          }
+        } else {
+          console.error('[Supervisor] Preflight: no npm binary found — cannot restore shadow install');
+        }
+      } catch (err) {
+        console.error(`[Supervisor] Preflight: shadow install repair failed: ${err}`);
+      }
+    }
+
+    // 2. Node symlink — if broken, the launchd boot wrapper will fail on next restart.
+    const nodeSymlink = path.join(this.stateDir, 'bin', 'node');
+    try {
+      if (!fs.existsSync(nodeSymlink) || spawnSync(nodeSymlink, ['--version'], { timeout: 5000 }).status !== 0) {
+        console.log('[Supervisor] Preflight: node symlink missing or broken — attempting fix');
+        const nodePath = this.findNodePath();
+        if (nodePath) {
+          fs.mkdirSync(path.dirname(nodeSymlink), { recursive: true });
+          try { fs.unlinkSync(nodeSymlink); } catch { /* may not exist */ }
+          fs.symlinkSync(nodePath, nodeSymlink);
+          healed.push('node symlink repaired');
+          console.log(`[Supervisor] Preflight: node symlink → ${nodePath}`);
+        }
+      }
+    } catch (err) {
+      console.error(`[Supervisor] Preflight: node symlink check failed: ${err}`);
+    }
+
+    // 3. Stale lifeline lock — can prevent the lifeline from restarting properly.
+    const lockFile = path.join(this.stateDir, 'state', 'lifeline.lock');
+    try {
+      if (fs.existsSync(lockFile)) {
+        const lockAge = Date.now() - fs.statSync(lockFile).mtimeMs;
+        if (lockAge > 10 * 60_000) { // 10 minutes
+          fs.unlinkSync(lockFile);
+          healed.push('stale lifeline lock removed');
+          console.log(`[Supervisor] Preflight: removed stale lifeline lock (${Math.round(lockAge / 60_000)}m old)`);
+        }
+      }
+    } catch { /* ignore */ }
+
+    if (healed.length > 0) {
+      const summary = healed.join(', ');
+      console.log(`[Supervisor] Preflight self-heal: ${summary}`);
+      return summary;
+    }
+    return '';
+  }
+
+  /**
+   * Find a working npm binary. Checks common locations.
+   */
+  private findNpmPath(): string | null {
+    // Try the node that's running us — npm is usually a sibling
+    const currentNodeDir = path.dirname(process.execPath);
+    const siblingNpm = path.join(currentNodeDir, 'npm');
+    if (fs.existsSync(siblingNpm)) return siblingNpm;
+
+    // Common paths
+    for (const candidate of ['/opt/homebrew/bin/npm', '/usr/local/bin/npm']) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+
+    // Fall back to PATH lookup
+    try {
+      const which = spawnSync('which', ['npm'], { encoding: 'utf-8', timeout: 5000 });
+      if (which.status === 0 && which.stdout.trim()) return which.stdout.trim();
+    } catch { /* ignore */ }
+
+    return null;
+  }
+
+  /**
+   * Find a working node binary. Checks common locations.
+   */
+  private findNodePath(): string | null {
+    // Current process is always valid
+    if (process.execPath) return process.execPath;
+
+    for (const candidate of ['/opt/homebrew/bin/node', '/usr/local/bin/node']) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+
+    try {
+      const which = spawnSync('which', ['node'], { encoding: 'utf-8', timeout: 5000 });
+      if (which.status === 0 && which.stdout.trim()) return which.stdout.trim();
+    } catch { /* ignore */ }
+
+    return null;
+  }
+
   private spawnServer(): boolean {
     if (!this.tmuxPath) return false;
+
+    // Run preflight self-heal before every spawn attempt
+    this.preflightSelfHeal();
 
     try {
       // Get the instar CLI path — resolution order:
@@ -327,6 +499,27 @@ export class ServerSupervisor extends EventEmitter {
   private startHealthChecks(): void {
     if (this.healthCheckInterval) return;
 
+    // Start SleepWakeDetector to catch short sleeps (10-30s) that the gap-based
+    // detection below misses (its 2-minute threshold is too high for brief suspends).
+    // On wake, reset failure counters so stale pre-sleep failures don't cascade.
+    if (!this.sleepWakeDetector) {
+      // Use 15s drift threshold — low enough to catch real sleeps but high enough
+      // to avoid false positives from normal OS scheduling jitter (~5-10s on loaded systems)
+      // that still cause health check failures during the transition.
+      this.sleepWakeDetector = new SleepWakeDetector({ driftThresholdMs: 15_000 });
+      this.sleepWakeDetector.on('wake', (event: { sleepDurationSeconds: number }) => {
+        console.log(`[Supervisor] SleepWakeDetector: wake after ~${event.sleepDurationSeconds}s. Resetting failure counters.`);
+        this.restartAttempts = 0;
+        this.maxRetriesExhaustedAt = 0;
+        this.consecutiveFailures = 0;
+        this.totalFailures = 0;
+        this.totalFailureWindowStart = 0;
+        this.spawnedAt = Date.now();
+        this.wakeTransitionUntil = Date.now() + this.wakeTransitionMs;
+      });
+      this.sleepWakeDetector.start();
+    }
+
     this.healthCheckInterval = setInterval(async () => {
       const now = Date.now();
 
@@ -344,13 +537,27 @@ export class ServerSupervisor extends EventEmitter {
         this.totalFailureWindowStart = 0;
         // Give the server the full startup grace period from wake time
         this.spawnedAt = now;
+        this.wakeTransitionUntil = now + this.wakeTransitionMs;
       }
       this.lastHealthCheckAt = now;
 
-      // Skip health checks during startup grace period — server needs time to boot
+      // During startup grace period: probe health optimistically but don't act on failures.
+      // This allows `lastHealthy` to update as soon as the server is responsive, so
+      // TelegramLifeline can forward messages immediately instead of queuing them for
+      // the entire grace period. Failures are ignored — the server is still booting.
       if (this.spawnedAt > 0 && (now - this.spawnedAt) < this.startupGraceMs) {
-        // But still check for restart requests during grace period
         this.checkRestartRequest();
+        // Optimistic health probe — update lastHealthy on success, ignore failures
+        try {
+          const alive = await this.checkHealth();
+          if (alive) {
+            this.lastHealthy = Date.now();
+            if (!this.isRunning) {
+              this.isRunning = true;
+              this.emit('serverUp');
+            }
+          }
+        } catch { /* expected during boot — ignore */ }
         return;
       }
 
@@ -366,6 +573,12 @@ export class ServerSupervisor extends EventEmitter {
               this.clearPlannedExitMarker();
               // Still replay queued messages (important!) but skip serverDown notification
               this.emit('serverUp');
+              // Signal the lifeline to self-restart so it picks up new code
+              if (this.pendingUpdateVersion) {
+                console.log(`[Supervisor] Update to v${this.pendingUpdateVersion} applied — signaling lifeline self-restart`);
+                this.emit('updateApplied', this.pendingUpdateVersion);
+                this.pendingUpdateVersion = null;
+              }
             } else {
               this.emit('serverUp');
             }
@@ -383,13 +596,26 @@ export class ServerSupervisor extends EventEmitter {
         } else {
           this.consecutiveFailures++;
           if (this.consecutiveFailures >= this.unhealthyThreshold) {
-            this.handleUnhealthy();
+            // During wake transitions, don't kill a server that's still alive — it's
+            // likely just slow to respond while the system recovers (disk I/O, network
+            // reconfig, SQLite WAL replay). Only act if the server process is actually dead.
+            if (Date.now() < this.wakeTransitionUntil && this.isServerSessionAlive()) {
+              console.log(`[Supervisor] Health check failed during wake transition but server session is alive — waiting (${Math.round((this.wakeTransitionUntil - Date.now()) / 1000)}s remaining)`);
+              this.consecutiveFailures = 0; // Reset so we don't immediately re-trigger
+            } else {
+              this.handleUnhealthy();
+            }
           }
         }
       } catch {
         this.consecutiveFailures++;
         if (this.consecutiveFailures >= this.unhealthyThreshold) {
-          this.handleUnhealthy();
+          if (Date.now() < this.wakeTransitionUntil && this.isServerSessionAlive()) {
+            console.log(`[Supervisor] Health check failed during wake transition but server session is alive — waiting (${Math.round((this.wakeTransitionUntil - Date.now()) / 1000)}s remaining)`);
+            this.consecutiveFailures = 0;
+          } else {
+            this.handleUnhealthy();
+          }
         }
       }
 
@@ -404,6 +630,10 @@ export class ServerSupervisor extends EventEmitter {
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
+    }
+    if (this.sleepWakeDetector) {
+      this.sleepWakeDetector.stop();
+      this.sleepWakeDetector = null;
     }
   }
 
@@ -483,6 +713,7 @@ export class ServerSupervisor extends EventEmitter {
       // Enter maintenance wait if this is a planned restart (suppress serverDown alerts)
       if (data.plannedRestart) {
         this.maintenanceWaitStartedAt = Date.now();
+        this.pendingUpdateVersion = data.targetVersion ?? null;
         console.log(`[Supervisor] Planned restart — entering maintenance wait (${Math.round(this.maintenanceWaitMs / 60_000)}m window)`);
       }
 
@@ -890,6 +1121,7 @@ export class ServerSupervisor extends EventEmitter {
       // Marker exists and is fresh — enter maintenance wait mode
       console.log(`[Supervisor] Found planned-exit marker (target: v${data.targetVersion}) — entering maintenance wait`);
       this.maintenanceWaitStartedAt = new Date(data.exitedAt).getTime() || Date.now();
+      this.pendingUpdateVersion = data.targetVersion ?? null;
       return true;
     } catch {
       return false;

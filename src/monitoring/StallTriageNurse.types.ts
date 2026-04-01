@@ -90,7 +90,7 @@ export interface TriageDeps {
   sendInput: (sessionName: string, text: string) => boolean;
   getTopicHistory: (topicId: number, limit: number) => Array<{ text: string; fromUser: boolean; timestamp: string }>;
   sendToTopic: (topicId: number, text: string) => Promise<any>;
-  respawnSession: (sessionName: string, topicId: number) => Promise<void>;
+  respawnSession: (sessionName: string, topicId: number, options?: { silent?: boolean }) => Promise<void>;
   clearStallForTopic: (topicId: number) => void;
   /** Optional: Get stuck child processes for a session (process-tree fallback) */
   getStuckProcesses?: (sessionName: string) => Promise<ProcessInfo[]>;

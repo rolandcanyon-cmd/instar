@@ -112,12 +112,19 @@ export class GitSyncManager {
   }
 
   /**
-   * Check if the project directory is a git repository.
-   * Returns false if .git/ doesn't exist — prevents crashes when git sync
+   * Check if the project directory is a git repository with at least one commit.
+   * Returns false if .git/ doesn't exist or if git rev-parse HEAD fails
+   * (e.g., empty repo with no commits) — prevents crashes when git sync
    * is called on a standalone agent that hasn't opted into git backup.
    */
   isGitRepo(): boolean {
-    return fs.existsSync(path.join(this.projectDir, '.git'));
+    if (!fs.existsSync(path.join(this.projectDir, '.git'))) return false;
+    try {
+      this.gitExec(['rev-parse', '--verify', 'HEAD']);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -925,7 +932,12 @@ export class GitSyncManager {
   }
 
   private gitHead(): string {
-    return this.gitExec(['rev-parse', 'HEAD']);
+    try {
+      return this.gitExec(['rev-parse', 'HEAD']);
+    } catch {
+      // @silent-fallback-ok — HEAD lookup may fail in empty repos; 'unknown' is safe fallback
+      return 'unknown';
+    }
   }
 }
 

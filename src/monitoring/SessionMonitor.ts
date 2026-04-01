@@ -17,6 +17,7 @@
  */
 
 import { EventEmitter } from 'events';
+import type { SessionRecovery, RecoveryResult } from './SessionRecovery.js';
 
 export interface SessionMonitorConfig {
   /** Enable the session monitor (default: true) */
@@ -44,6 +45,7 @@ export interface SessionMonitorEvents {
   'monitor:idle-detected': { topicId: number; sessionName: string; idleMinutes: number };
   'monitor:unresponsive': { topicId: number; sessionName: string; waitMinutes: number };
   'monitor:recovery-triggered': { topicId: number; sessionName: string; reason: string };
+  'monitor:mechanical-recovery': { topicId: number; sessionName: string; result: RecoveryResult };
   'monitor:user-notified': { topicId: number; message: string };
 }
 
@@ -60,6 +62,8 @@ export interface SessionMonitorDeps {
   sendToTopic: (topicId: number, text: string) => Promise<any>;
   /** Trigger triage recovery for a session */
   triggerTriage?: (topicId: number, sessionName: string, reason: string) => Promise<{ resolved: boolean }>;
+  /** Optional mechanical recovery layer — runs before LLM triage */
+  sessionRecovery?: SessionRecovery;
 }
 
 const DEFAULT_CONFIG: Required<SessionMonitorConfig> = {
@@ -229,6 +233,22 @@ export class SessionMonitor extends EventEmitter {
     const recentlyActive = now - snap.lastAgentMessageAt < 30 * 60 * 1000; // Agent was active within 30 min
 
     if (!userExpectsResponse && !recentlyActive) return; // Session idle but no user waiting — don't bother
+
+    // Try mechanical recovery first (fast, no LLM) before escalating to triage
+    if (this.deps.sessionRecovery && (snap.status === 'dead' || snap.status === 'unresponsive')) {
+      try {
+        const recoveryResult = await this.deps.sessionRecovery.checkAndRecover(topicId, sessionName);
+        this.emit('monitor:mechanical-recovery', { topicId, sessionName, result: recoveryResult });
+        if (recoveryResult.recovered) {
+          console.log(`[SessionMonitor] Mechanical recovery succeeded for topic ${topicId}: ${recoveryResult.message}`);
+          snap.status = 'healthy';
+          snap.notifiedAt = now;
+          return;
+        }
+      } catch (err) {
+        console.error(`[SessionMonitor] Mechanical recovery error for topic ${topicId}:`, err);
+      }
+    }
 
     switch (snap.status) {
       case 'dead': {

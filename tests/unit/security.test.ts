@@ -149,7 +149,10 @@ describe('Security', () => {
     // AgentConnector.ts: uses execSync for git clone and git --version with validated/constant args
     // commands/server.ts: uses execSync for `npm root -g` and `npm rebuild better-sqlite3` with constant args
     // monitoring/probes/PlatformProbe.ts: uses execSync for system diagnostics (tmux, process checks) with constant args
-    const EXEC_SYNC_EXEMPTIONS = new Set(['core/GitStateManager.ts', 'core/AgentConnector.ts', 'commands/server.ts', 'monitoring/probes/PlatformProbe.ts']);
+    // commands/init.ts: uses execSync for port-in-use check with constant port number
+    // commands/setup.ts: uses execSync for system checks with constant args
+    // core/AgentRegistry.ts: uses execSync for agent discovery with constant args
+    const EXEC_SYNC_EXEMPTIONS = new Set(['core/GitStateManager.ts', 'core/AgentConnector.ts', 'commands/server.ts', 'commands/init.ts', 'commands/setup.ts', 'core/AgentRegistry.ts', 'monitoring/probes/PlatformProbe.ts']);
 
     it('zero execSync calls across all source files (except exempted)', () => {
       const srcDir = path.join(process.cwd(), 'src');

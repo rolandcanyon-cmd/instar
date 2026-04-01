@@ -391,6 +391,12 @@ export class TelegramAdapter implements MessagingAdapter {
   }
 
   constructor(config: TelegramConfig, stateDir: string) {
+    if (config.chatId && !/^-?\d+$/.test(String(config.chatId))) {
+      throw new Error(
+        `Invalid Telegram chatId "${config.chatId}". Chat IDs must be numeric (e.g., -1001234567890). ` +
+        `Update messaging.config.chatId in your instar.config.json with a valid numeric ID.`,
+      );
+    }
     this.config = config;
     this.stateDir = stateDir;
     this.registryPath = path.join(stateDir, 'topic-session-registry.json');
@@ -720,10 +726,38 @@ export class TelegramAdapter implements MessagingAdapter {
   }
 
   /**
+   * Log an inbound user message that arrived via an external path (e.g. Lifeline
+   * forwarding through /internal/telegram-forward). This ensures the message
+   * appears in both JSONL and TopicMemory even when the normal polling handler
+   * didn't receive it.
+   */
+  logInboundMessage(entry: {
+    messageId: number;
+    topicId: number;
+    text: string;
+    timestamp: string;
+    senderName?: string;
+    senderUsername?: string;
+    telegramUserId?: number;
+  }): void {
+    this.appendToLog({
+      messageId: entry.messageId,
+      topicId: entry.topicId,
+      text: entry.text,
+      fromUser: true,
+      timestamp: entry.timestamp,
+      sessionName: this.topicToSession.get(entry.topicId) ?? null,
+      senderName: entry.senderName,
+      senderUsername: entry.senderUsername,
+      telegramUserId: entry.telegramUserId,
+    });
+  }
+
+  /**
    * Send a message to a specific forum topic.
    * Returns the Telegram message ID for delivery confirmation.
    */
-  async sendToTopic(topicId: number, text: string, options?: { silent?: boolean }): Promise<SendResult> {
+  async sendToTopic(topicId: number, text: string, options?: { silent?: boolean; skipStallClear?: boolean }): Promise<SendResult> {
     const params: Record<string, unknown> = {
       chat_id: this.config.chatId,
       text,
@@ -753,7 +787,10 @@ export class TelegramAdapter implements MessagingAdapter {
     });
 
     // Clear stall tracking for this topic (agent responded)
-    this.clearStallForTopic(topicId);
+    // Skip for proxy messages — PresenceProxy messages should NOT reset stall timers
+    if (!options?.skipStallClear) {
+      this.clearStallForTopic(topicId);
+    }
 
     // Promise tracking — detect agent "working on it" messages that need follow-through
     const sessionName = this.topicToSession.get(topicId);
@@ -3069,8 +3106,10 @@ export class TelegramAdapter implements MessagingAdapter {
 
     // Auto-capture topic name from reply_to_message
     if (msg.reply_to_message?.forum_topic_created?.name) {
-      if (!this.topicToName.has(numericTopicId)) {
-        this.topicToName.set(numericTopicId, msg.reply_to_message.forum_topic_created.name);
+      const currentName = this.topicToName.get(numericTopicId);
+      const realName = msg.reply_to_message.forum_topic_created.name;
+      if (!currentName || /^topic-\d+$/.test(currentName)) {
+        this.topicToName.set(numericTopicId, realName);
         this.saveRegistry();
       }
     }
@@ -3450,30 +3489,29 @@ export class TelegramAdapter implements MessagingAdapter {
     let result: { message_id: number };
 
     if (prompt.options && prompt.options.length > 0) {
-      // Build inline keyboard buttons
-      const keyboard = prompt.options.map(opt => {
+      // Add numbered options to the message body so full text is visible
+      const optionLines = prompt.options.map((opt, i) => `${i + 1}. ${opt.label}`).join('\n');
+      const fullText = `${text}\n\n${optionLines}`;
+
+      // Build inline keyboard buttons with just the number/key (compact)
+      const keyboard = prompt.options.map((opt, i) => {
         const token = this.callbackRegistry.register({
           sessionName: prompt.sessionName,
           promptId: prompt.id,
           key: opt.key,
         });
         return {
-          text: opt.label,
+          text: String(i + 1),
           callback_data: JSON.stringify({ id: token }),
         };
       });
 
-      // Group into rows of max 3 buttons
-      const rows: Array<typeof keyboard> = [];
-      for (let i = 0; i < keyboard.length; i += 3) {
-        rows.push(keyboard.slice(i, i + 3));
-      }
-
+      // All buttons in a single row (they're just numbers now)
       result = await this.apiCall('sendMessage', {
         chat_id: this.config.chatId,
         message_thread_id: isGeneralTopic(topicId) ? undefined : topicId,
-        text,
-        reply_markup: { inline_keyboard: rows },
+        text: fullText,
+        reply_markup: { inline_keyboard: [keyboard] },
         parse_mode: 'Markdown',
       }) as { message_id: number };
     } else {
@@ -3535,6 +3573,15 @@ export class TelegramAdapter implements MessagingAdapter {
       .replace(/_/g, '\\_')
       .replace(/`/g, '\\`')
       .replace(/\[/g, '\\[');
+  }
+
+  /**
+   * Handle a forwarded callback query from the Lifeline process.
+   * In send-only mode the server doesn't poll for callbacks, so the
+   * Lifeline forwards them via /internal/telegram-callback.
+   */
+  async handleForwardedCallback(query: any): Promise<void> {
+    await this.processCallbackQuery(query);
   }
 
   /**
@@ -3660,6 +3707,11 @@ export class TelegramAdapter implements MessagingAdapter {
         this.onRelayLeaseEnd(pending.prompt.sessionName);
       }
       return false; // Expired — fall through to normal routing
+    }
+
+    // Reject forwarded messages — prevents forwarding attack
+    if ((msg as any).forward_origin || (msg as any).forward_from || (msg as any).forward_date) {
+      return false; // Forwarded message — reject silently
     }
 
     // Verify sender is the authorized owner

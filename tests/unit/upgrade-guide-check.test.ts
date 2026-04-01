@@ -52,7 +52,7 @@ describe('Upgrade Guide Infrastructure', () => {
         });
 
         it('filename matches semver pattern', () => {
-          expect(file).toMatch(/^\d+\.\d+\.\d+\.md$/);
+          expect(file).toMatch(/^\d+\.\d+\.\d+(-[a-zA-Z0-9.]+)?\.md$/);
         });
       });
     }

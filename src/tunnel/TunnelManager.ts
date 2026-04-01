@@ -72,6 +72,7 @@ export class TunnelManager extends EventEmitter {
   private _autoReconnect = false;
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _reconnectAttempt = 0;
+  private _startPromise: Promise<string> | null = null; // Mutex: prevents concurrent start()
   private static readonly MAX_RECONNECT_ATTEMPTS = 10;
   private static readonly BASE_RECONNECT_DELAY_MS = 5_000;
   private static readonly MAX_RECONNECT_DELAY_MS = 5 * 60_000;
@@ -107,27 +108,44 @@ export class TunnelManager extends EventEmitter {
    * then starts the appropriate tunnel type.
    */
   async start(): Promise<string> {
-    if (this.tunnel) {
-      throw new Error('Tunnel is already running');
+    // Mutex: if a start is already in progress, return the same promise
+    // This prevents concurrent start() calls from the SleepWake handler
+    // and auto-reconnect racing each other.
+    if (this._startPromise) {
+      return this._startPromise;
+    }
+
+    // If tunnel is already running, return the current URL
+    if (this.tunnel && this._state.url) {
+      return this._state.url;
     }
 
     this._stopped = false;
 
-    // Ensure cloudflared binary is installed
-    await this.ensureBinary();
+    const doStart = async (): Promise<string> => {
+      try {
+        // Ensure cloudflared binary is installed
+        await this.ensureBinary();
 
-    // Start the appropriate tunnel type
-    if (this.config.type === 'named') {
-      if (!this.config.token && !this.config.configFile) {
-        throw new Error('Named tunnel requires either a token or a configFile. Set tunnel.token or tunnel.configFile in config.');
+        // Start the appropriate tunnel type
+        if (this.config.type === 'named') {
+          if (!this.config.token && !this.config.configFile) {
+            throw new Error('Named tunnel requires either a token or a configFile. Set tunnel.token or tunnel.configFile in config.');
+          }
+          if (this.config.configFile) {
+            return await this.startConfigFileTunnel();
+          }
+          return await this.startNamedTunnel();
+        } else {
+          return await this.startQuickTunnel();
+        }
+      } finally {
+        this._startPromise = null;
       }
-      if (this.config.configFile) {
-        return this.startConfigFileTunnel();
-      }
-      return this.startNamedTunnel();
-    } else {
-      return this.startQuickTunnel();
-    }
+    };
+
+    this._startPromise = doStart();
+    return this._startPromise;
   }
 
   /**
@@ -135,6 +153,7 @@ export class TunnelManager extends EventEmitter {
    */
   async stop(): Promise<void> {
     this._stopped = true;
+    this._startPromise = null; // Cancel any in-flight start
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -157,6 +176,7 @@ export class TunnelManager extends EventEmitter {
    */
   async forceStop(timeoutMs = 5000): Promise<void> {
     this._stopped = true;
+    this._startPromise = null; // Cancel any in-flight start
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -217,11 +237,22 @@ export class TunnelManager extends EventEmitter {
     this._autoReconnect = true;
   }
 
+  disableAutoReconnect(): void {
+    this._autoReconnect = false;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._reconnectAttempt = 0;
+  }
+
   /**
    * Attempt to reconnect the tunnel with exponential backoff.
    */
   private attemptReconnect(): void {
     if (!this._autoReconnect || this._stopped) return;
+    // Skip if a start is already in progress (e.g., SleepWake handler is restarting)
+    if (this._startPromise) return;
     if (this._reconnectAttempt >= TunnelManager.MAX_RECONNECT_ATTEMPTS) {
       console.error(`[Tunnel] Auto-reconnect gave up after ${this._reconnectAttempt} attempts`);
       this.emit('error', new Error(`Tunnel auto-reconnect failed after ${this._reconnectAttempt} attempts`));

@@ -199,6 +199,19 @@ function createTestMachine(machineId: string, opts?: {
   if (opts?.jobs) {
     const jobsFile = createJobsFile(dir, opts.jobs);
     const sessionManager = mockSessionManager();
+
+    // Pre-seed lastRun so checkMissedJobs doesn't trigger jobs at startup.
+    // These tests test claim coordination, not missed-job detection.
+    for (const job of opts.jobs) {
+      state.saveJobState({
+        slug: job.slug,
+        lastRun: new Date().toISOString(),
+        lastResult: 'success',
+        runCount: 1,
+        consecutiveFailures: 0,
+      });
+    }
+
     const scheduler = new JobScheduler(
       createSchedulerConfig(jobsFile),
       sessionManager,
@@ -281,6 +294,8 @@ describe('two-machine job coordination (4A + 4C)', () => {
     relayMessages(machineA.bus, machineB.bus);
 
     // Machine B tries to trigger the same job — should be skipped
+    // Clear spy to isolate from any background cron triggers that may have fired
+    vi.mocked(machineB.sessionManager!.spawnSession).mockClear();
     const resultB = machineB.scheduler!.triggerJob('daily-sync', 'manual');
     expect(resultB).toBe('skipped');
     expect(machineB.sessionManager!.spawnSession).not.toHaveBeenCalled();
@@ -317,6 +332,8 @@ describe('two-machine job coordination (4A + 4C)', () => {
     relayMessages(machineA.bus, machineB.bus);
 
     // B claims health-check (different job)
+    // Clear spy to isolate from any background cron triggers that may have fired
+    vi.mocked(machineB.sessionManager!.spawnSession).mockClear();
     const resultB = machineB.scheduler!.triggerJob('health-check', 'manual');
     expect(resultB).toBe('triggered');
     expect(machineB.sessionManager!.spawnSession).toHaveBeenCalledTimes(1);

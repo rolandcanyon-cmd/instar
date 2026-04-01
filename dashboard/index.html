@@ -205,6 +205,11 @@
     .type-badge.job { background: #1b2e1b; color: #86efac; }
     .type-badge.interactive { background: #2e2e1b; color: #fde047; }
 
+    .platform-badge {
+      font-size: 12px;
+      cursor: default;
+    }
+
     .session-telemetry {
       display: flex;
       align-items: center;
@@ -1915,6 +1920,370 @@
     .spark.s-pending { background: var(--blue); }
     .spark.s-skipped { background: #333; }
 
+    /* ── Discovery Tab ──────────────────────────────────────── */
+    /* ── Systems Tab ──────────────────────────────────────────── */
+    .systems-container { grid-column: 1 / -1; overflow-y: auto; background: var(--bg); padding: 20px; }
+    .systems-main { max-width: 960px; margin: 0 auto; }
+    .systems-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .systems-header h2 { font-size: 16px; font-weight: 600; color: var(--text-bright); }
+    .systems-refresh { font-size: 11px; padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); cursor: pointer; }
+    .systems-refresh:hover { border-color: var(--text-dim); color: var(--text); }
+
+    /* Health Banner */
+    .health-banner { display: flex; align-items: center; gap: 16px; padding: 18px 22px; border-radius: 10px; margin-bottom: 24px; border: 1px solid var(--border); }
+    .health-banner.healthy { background: rgba(76,175,80,0.08); border-color: rgba(76,175,80,0.25); }
+    .health-banner.error { background: rgba(244,67,54,0.08); border-color: rgba(244,67,54,0.25); }
+    .health-banner.degraded { background: rgba(255,152,0,0.08); border-color: rgba(255,152,0,0.25); }
+    .health-icon { font-size: 26px; line-height: 1; flex-shrink: 0; }
+    .health-banner.healthy .health-icon { color: var(--accent); }
+    .health-banner.error .health-icon { color: var(--red); }
+    .health-banner.degraded .health-icon { color: var(--orange); }
+    .health-text { flex: 1; }
+    .health-title { font-size: 15px; font-weight: 600; color: var(--text-bright); margin-bottom: 3px; }
+    .health-meta { font-size: 12px; color: var(--text-dim); }
+
+    /* Issues */
+    .issues-panel { margin-bottom: 24px; }
+    .issue-card { display: flex; align-items: flex-start; gap: 12px; padding: 12px 16px; background: var(--bg-panel); border: 1px solid var(--border); border-left: 3px solid var(--red); border-radius: 6px; margin-bottom: 8px; }
+    .issue-card.warning { border-left-color: var(--orange); }
+    .issue-card-icon { font-size: 14px; margin-top: 1px; flex-shrink: 0; }
+    .issue-card-content { flex: 1; }
+    .issue-card-label { font-size: 13px; font-weight: 500; color: var(--text-bright); margin-bottom: 2px; }
+    .issue-card-desc { font-size: 12px; color: var(--text-dim); }
+
+    /* Card Grid */
+    .cap-section-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+    .cap-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; margin-bottom: 24px; }
+    .cap-card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; cursor: pointer; transition: border-color 0.15s, transform 0.1s; display: flex; flex-direction: column; gap: 8px; }
+    .cap-card:hover { border-color: rgba(255,255,255,0.15); transform: translateY(-1px); }
+    .cap-card-top { display: flex; align-items: center; gap: 10px; }
+    .cap-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .cap-dot.active { background: var(--accent); }
+    .cap-dot.error { background: var(--red); }
+    .cap-card-name { font-size: 14px; font-weight: 600; color: var(--text-bright); flex: 1; }
+    .cap-card-arrow { font-size: 11px; color: var(--text-dim); }
+    .cap-card-desc { font-size: 12px; color: var(--text-dim); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+    .cap-card-metric { font-size: 12px; color: var(--accent); font-weight: 500; padding-top: 4px; border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .cap-card.error .cap-card-metric { color: var(--red); }
+    .cap-card-stats { display: flex; gap: 12px; flex-wrap: wrap; }
+    .cap-stat { font-size: 11px; color: var(--text-dim); }
+    .cap-stat-value { font-weight: 600; color: var(--text); margin-right: 3px; }
+
+    /* Detail View */
+    .cap-detail-view { display: none; }
+    .cap-detail-view.active { display: block; }
+    .cap-detail-back { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); cursor: pointer; border: none; background: none; padding: 0; margin-bottom: 16px; }
+    .cap-detail-back:hover { color: var(--text); }
+    .cap-detail-header { margin-bottom: 20px; }
+    .cap-detail-title { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .cap-detail-title h3 { font-size: 18px; font-weight: 600; color: var(--text-bright); margin: 0; }
+    .cap-detail-description { font-size: 13px; color: var(--text-dim); line-height: 1.6; max-width: 700px; }
+    .cap-stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 24px; }
+    .cap-stat-card { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; text-align: center; }
+    .cap-stat-card-value { font-size: 20px; font-weight: 700; color: var(--text-bright); }
+    .cap-stat-card-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; margin-top: 4px; }
+    .cap-detail-section { margin-bottom: 20px; }
+    .cap-detail-section-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .cap-process-list { display: flex; flex-direction: column; gap: 6px; }
+    .cap-process-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; }
+    .cap-process-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .cap-process-name { font-size: 13px; color: var(--text-bright); font-weight: 500; flex: 1; }
+    .cap-process-status { font-size: 11px; color: var(--text-dim); }
+    .cap-last-activity { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+
+    /* Events */
+    .events-disclosure { margin-top: 8px; }
+    .events-disclosure-toggle { display: flex; align-items: center; gap: 8px; padding: 10px 0; cursor: pointer; user-select: none; font-size: 12px; color: var(--text-dim); border: none; background: none; width: 100%; text-align: left; }
+    .events-disclosure-toggle:hover { color: var(--text); }
+    .events-disclosure-arrow { font-size: 10px; transition: transform 0.2s; }
+    .events-disclosure.expanded .events-disclosure-arrow { transform: rotate(90deg); }
+    .events-disclosure-body { display: none; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; max-height: 300px; overflow-y: auto; }
+    .events-disclosure.expanded .events-disclosure-body { display: block; }
+    .systems-event-row { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--border); font-size: 12px; }
+    .systems-event-row:last-child { border-bottom: none; }
+    .systems-event-time { color: var(--text-dim); white-space: nowrap; font-size: 11px; min-width: 60px; }
+    .systems-event-text { color: var(--text); flex: 1; }
+
+    /* Content Browser (browsable stats) */
+    .cap-content-panel { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; margin-top: 12px; overflow: hidden; }
+    .cap-content-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 600; color: var(--text-bright); }
+    .cap-content-body { max-height: 400px; overflow-y: auto; padding: 8px; }
+    .cap-content-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; background: var(--bg-panel); }
+    .cap-content-item-title { font-size: 13px; font-weight: 500; color: var(--text-bright); margin-bottom: 4px; }
+    .cap-content-item-body { font-size: 12px; color: var(--text-dim); line-height: 1.5; word-break: break-word; }
+    .cap-content-item-time { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+    .cap-content-tag { display: inline-block; font-size: 10px; padding: 2px 8px; border-radius: 3px; background: rgba(255,255,255,0.06); color: var(--text-dim); margin-right: 4px; margin-top: 4px; }
+    .cap-content-tag.applied { background: rgba(76,175,80,0.15); color: var(--accent); }
+    .cap-content-empty { padding: 16px; text-align: center; color: var(--text-dim); font-size: 12px; }
+    .cap-stat-card:hover { border-color: var(--accent); transition: border-color 0.15s; }
+
+    .discovery-container {
+      grid-column: 1 / -1;
+      overflow-y: auto;
+      background: var(--bg);
+      padding: 20px;
+    }
+
+    .discovery-main {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .discovery-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+
+    .discovery-header h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .discovery-refresh {
+      font-size: 11px;
+      padding: 4px 12px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+
+    .discovery-refresh:hover {
+      border-color: var(--text-dim);
+      color: var(--text);
+    }
+
+    .discovery-section {
+      margin-bottom: 24px;
+    }
+
+    .discovery-section h3 {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-bright);
+      margin-bottom: 12px;
+    }
+
+    .funnel-chart {
+      display: flex;
+      gap: 4px;
+      align-items: flex-end;
+      height: 120px;
+      padding: 12px 16px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+
+    .funnel-bar {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .funnel-bar-fill {
+      width: 100%;
+      border-radius: 3px 3px 0 0;
+      min-height: 2px;
+      transition: height 0.3s;
+    }
+
+    .funnel-bar-label {
+      font-size: 10px;
+      color: var(--text-dim);
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .funnel-bar-count {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .discovery-filter-bar {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+
+    .discovery-filter {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .discovery-filter:hover {
+      border-color: var(--text-dim);
+      color: var(--text);
+    }
+
+    .discovery-filter.active {
+      background: var(--accent-dim);
+      border-color: var(--accent-dim);
+      color: #000;
+    }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 10px;
+    }
+
+    .feature-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 12px;
+    }
+
+    .feature-card-top {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 6px;
+    }
+
+    .feature-card-name {
+      font-weight: 500;
+      color: var(--text-bright);
+      flex: 1;
+    }
+
+    .feature-state-badge {
+      font-size: 10px;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+
+    .feature-state-badge.enabled { background: #0f2f0f; color: var(--accent); }
+    .feature-state-badge.undiscovered { background: #1a1a1a; color: #666; }
+    .feature-state-badge.aware { background: #0f1f2f; color: var(--blue); }
+    .feature-state-badge.interested { background: #1f1f0f; color: #eab308; }
+    .feature-state-badge.deferred { background: #1a1a1a; color: #888; }
+    .feature-state-badge.declined { background: #2f0f0f; color: var(--red); }
+    .feature-state-badge.disabled { background: #1a1a1a; color: #555; }
+
+    .feature-card-desc {
+      color: var(--text-dim);
+      font-size: 11px;
+      line-height: 1.4;
+      margin-bottom: 4px;
+    }
+
+    .feature-card-meta {
+      display: flex;
+      gap: 8px;
+      color: var(--text-dim);
+      font-size: 10px;
+    }
+
+    .feature-card-meta .tier { text-transform: uppercase; letter-spacing: 0.5px; }
+    .feature-card-meta .cooldown { color: var(--orange); }
+
+    .event-log {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .event-row {
+      display: flex;
+      gap: 10px;
+      padding: 8px 14px;
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      align-items: center;
+    }
+
+    .event-row:last-child { border-bottom: none; }
+
+    .event-time {
+      color: var(--text-dim);
+      flex-shrink: 0;
+      width: 70px;
+    }
+
+    .event-feature {
+      color: var(--text-bright);
+      font-weight: 500;
+      flex-shrink: 0;
+      width: 140px;
+    }
+
+    .event-transition {
+      color: var(--text);
+      flex: 1;
+    }
+
+    .event-arrow { color: var(--text-dim); }
+
+    .digest-item {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+
+    .digest-item-title {
+      color: var(--text-bright);
+      font-weight: 500;
+      margin-bottom: 2px;
+    }
+
+    .digest-item-desc {
+      color: var(--text-dim);
+      font-size: 11px;
+    }
+
+    /* Discovery metrics summary */
+    .discovery-metrics {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .metric-card {
+      flex: 1;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      text-align: center;
+    }
+
+    .metric-value {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .metric-label {
+      font-size: 10px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-top: 2px;
+    }
+
     /* ── Mobile responsive ─────────────────────────────────── */
     @media (max-width: 768px) {
       .app {
@@ -2164,6 +2533,8 @@
           <button class="tab" data-tab="files" onclick="switchTab('files')">Files</button>
           <button class="tab" data-tab="dropzone" onclick="switchTab('dropzone')">Drop Zone</button>
           <button class="tab" data-tab="jobs" onclick="switchTab('jobs')">Jobs <span class="tab-count" id="tabJobCount">0</span></button>
+          <button class="tab" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
+          <button class="tab" data-tab="systems" onclick="switchTab('systems')">Systems</button>
         </nav>
       </div>
       <div class="vital-signs" id="vitalSigns">
@@ -2300,12 +2671,17 @@
                onkeydown="if(event.key==='Enter')createNewSession()" autofocus>
       </div>
       <div class="modal-field">
-        <label class="modal-toggle">
-          <input type="checkbox" id="newSessionHeadless">
-          <span>Headless (no Telegram topic)</span>
-        </label>
-        <div class="modal-hint">Headless sessions still appear in the dashboard but won't create a Telegram topic.</div>
+        <label for="newSessionPlatform">Platform</label>
+        <select id="newSessionPlatform" style="width:100%;padding:8px 12px;background:var(--bg-panel);color:var(--text-bright);border:1px solid var(--border);border-radius:6px;font-size:14px;">
+          <option value="auto">Auto (best available)</option>
+          <option value="telegram">✈️ Telegram</option>
+          <option value="slack">💬 Slack</option>
+          <option value="headless">🖥️ Headless (no messaging)</option>
+        </select>
+        <div class="modal-hint">Choose which messaging platform to link this session to.</div>
       </div>
+      <!-- Keep hidden checkbox for backward compat -->
+      <input type="hidden" id="newSessionHeadless">
       <div class="modal-actions">
         <button class="modal-btn-cancel" onclick="closeNewSessionModal()">Cancel</button>
         <button class="modal-btn-create" id="createSessionBtn" onclick="createNewSession()">Create Session</button>
@@ -2383,6 +2759,76 @@
         <div class="jobs-detail-content" id="jobsDetailContent" style="display:none"></div>
       </div>
     </div>
+
+    <!-- Systems Tab -->
+    <div class="systems-container" id="systemsTab" style="display:none">
+      <div class="systems-main">
+        <!-- Overview (card grid) -->
+        <div id="systemsOverview">
+          <div class="systems-header">
+            <h2>Systems</h2>
+            <button class="systems-refresh" onclick="loadSystems()">Refresh</button>
+          </div>
+          <div id="systemsBanner">
+            <div style="padding:20px;color:var(--text-dim);text-align:center">Loading...</div>
+          </div>
+          <div id="systemsIssues"></div>
+          <div id="systemsCapabilities"></div>
+          <div id="systemsEvents"></div>
+        </div>
+        <!-- Detail view (single capability) -->
+        <div class="cap-detail-view" id="systemsDetailView">
+          <button class="cap-detail-back" onclick="showSystemsOverview()">&#9664; Back to overview</button>
+          <div id="systemsDetailContent"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Discovery Tab -->
+    <div class="discovery-container" id="discoveryTab" style="display:none">
+      <div class="discovery-main">
+        <div class="discovery-header">
+          <h2>Feature Discovery</h2>
+          <button class="discovery-refresh" onclick="loadDiscovery()">Refresh</button>
+        </div>
+
+        <!-- Funnel Visualization -->
+        <div class="discovery-section">
+          <h3>Discovery Funnel</h3>
+          <div class="funnel-chart" id="funnelChart">
+            <div style="padding:20px;color:var(--text-dim);text-align:center">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Feature States Grid -->
+        <div class="discovery-section">
+          <h3>Feature States</h3>
+          <div class="discovery-filter-bar">
+            <button class="discovery-filter active" data-filter="all" onclick="setDiscoveryFilter('all')">All</button>
+            <button class="discovery-filter" data-filter="enabled" onclick="setDiscoveryFilter('enabled')">Enabled</button>
+            <button class="discovery-filter" data-filter="undiscovered" onclick="setDiscoveryFilter('undiscovered')">Undiscovered</button>
+            <button class="discovery-filter" data-filter="aware" onclick="setDiscoveryFilter('aware')">Aware</button>
+            <button class="discovery-filter" data-filter="cooldown" onclick="setDiscoveryFilter('cooldown')">In Cooldown</button>
+          </div>
+          <div class="feature-grid" id="featureGrid"></div>
+        </div>
+
+        <!-- Digest Section -->
+        <div class="discovery-section" id="digestSection" style="display:none">
+          <h3>Digest</h3>
+          <div id="digestContent"></div>
+        </div>
+
+        <!-- Event Log -->
+        <div class="discovery-section">
+          <h3>Recent Events</h3>
+          <div class="event-log" id="eventLog">
+            <div style="padding:12px;color:var(--text-dim);text-align:center">No events yet</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <!-- WhatsApp QR panel (hidden by default) -->
@@ -2694,14 +3140,19 @@
           }
         }
 
+        const platform = session.platform || 'headless';
+        const platformIcon = platform === 'telegram' ? '✈️' : platform === 'slack' ? '💬' : platform === 'whatsapp' ? '📱' : '🖥️';
+        const platformLabel = platform.charAt(0).toUpperCase() + platform.slice(1);
+
         el.innerHTML = `
           <div class="session-name-row">
-            <div class="session-name">${escapeHtml(session.name)}</div>
+            <div class="session-name">${escapeHtml(session.platformName || session.name)}</div>
             <button class="session-close-btn" data-tmux="${escapeHtml(session.tmuxSession)}" data-name="${escapeHtml(session.name)}" onclick="event.stopPropagation();closeSession(this.dataset.tmux,this.dataset.name)" title="Close session">&times;</button>
           </div>
           <div class="session-meta">
             <span class="type-badge ${sType}">${sType}</span>
             <span class="model-badge ${model}">${model}</span>
+            <span class="platform-badge ${platform}" title="${platformLabel}">${platformIcon}</span>
             <span>${elapsed}</span>
           </div>
           ${telemetryHtml}
@@ -3014,7 +3465,9 @@
 
     async function createNewSession() {
       const nameInput = document.getElementById('newSessionName');
-      const headless = document.getElementById('newSessionHeadless').checked;
+      const platformSelect = document.getElementById('newSessionPlatform');
+      const platform = platformSelect ? platformSelect.value : 'auto';
+      const headless = platform === 'headless';
       const name = nameInput.value.trim();
       const btn = document.getElementById('createSessionBtn');
 
@@ -3035,7 +3488,7 @@
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ name, headless }),
+          body: JSON.stringify({ name, headless, platform: platform === 'auto' ? undefined : platform }),
         });
         const data = await resp.json();
 
@@ -3292,6 +3745,18 @@
           connectJobsSSE();
         },
         onDeactivate: () => { disconnectJobsSSE(); },
+      },
+      {
+        id: 'discovery',
+        panels: ['discoveryTab'],
+        display: ['flex'],
+        onActivate: () => { if (!discoveryLoaded) loadDiscovery(); },
+      },
+      {
+        id: 'systems',
+        panels: ['systemsTab'],
+        display: ['flex'],
+        onActivate: () => { loadSystems(); },
       },
     ];
 
@@ -4718,6 +5183,530 @@
         jobsSSE.close();
         jobsSSE = null;
       }
+    }
+
+    // ── Discovery Tab ──────────────────────────────────────
+    let discoveryLoaded = false;
+    let discoveryData = null;
+    let discoveryFilter = 'all';
+
+    const FUNNEL_COLORS = {
+      undiscovered: '#444',
+      aware: 'var(--blue)',
+      interested: '#eab308',
+      deferred: '#888',
+      declined: 'var(--red)',
+      enabled: 'var(--accent)',
+      disabled: '#555',
+    };
+
+    const FUNNEL_ORDER = ['undiscovered', 'aware', 'interested', 'deferred', 'declined', 'enabled', 'disabled'];
+
+    async function loadDiscovery() {
+      discoveryLoaded = true;
+      try {
+        discoveryData = await apiFetch('/features/analytics');
+        renderDiscoveryMetrics();
+        renderFunnel();
+        renderFeatureGrid();
+        renderDigest();
+        renderEventLog();
+      } catch (e) {
+        document.getElementById('funnelChart').innerHTML =
+          '<div style="padding:20px;color:var(--red);text-align:center">Failed to load discovery data</div>';
+      }
+    }
+
+    function renderDiscoveryMetrics() {
+      if (!discoveryData) return;
+      const d = discoveryData;
+      const metricsHtml = `
+        <div class="discovery-metrics">
+          <div class="metric-card">
+            <div class="metric-value">${d.totalFeatures}</div>
+            <div class="metric-label">Total Features</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${d.enabledCount}</div>
+            <div class="metric-label">Enabled</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${Math.round(d.discoveryRate * 100)}%</div>
+            <div class="metric-label">Discovery Rate</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-value">${d.cooldowns.filter(c => c.cooldownExpiresAt).length}</div>
+            <div class="metric-label">In Cooldown</div>
+          </div>
+        </div>`;
+      // Insert before funnel
+      const section = document.querySelector('.discovery-section');
+      if (section && !document.getElementById('discoveryMetrics')) {
+        const div = document.createElement('div');
+        div.id = 'discoveryMetrics';
+        div.innerHTML = metricsHtml;
+        section.parentNode.insertBefore(div, section);
+      }
+    }
+
+    function renderFunnel() {
+      if (!discoveryData) return;
+      const funnel = discoveryData.funnel;
+      const maxVal = Math.max(1, ...Object.values(funnel));
+      const chart = document.getElementById('funnelChart');
+
+      chart.innerHTML = FUNNEL_ORDER.map(state => {
+        const count = funnel[state] || 0;
+        const height = Math.max(2, (count / maxVal) * 80);
+        const color = FUNNEL_COLORS[state] || '#444';
+        return `<div class="funnel-bar">
+          <div class="funnel-bar-count">${count}</div>
+          <div class="funnel-bar-fill" style="height:${height}px;background:${color}"></div>
+          <div class="funnel-bar-label">${state}</div>
+        </div>`;
+      }).join('');
+    }
+
+    function setDiscoveryFilter(filter) {
+      discoveryFilter = filter;
+      document.querySelectorAll('.discovery-filter').forEach(c => {
+        c.classList.toggle('active', c.dataset.filter === filter);
+      });
+      renderFeatureGrid();
+    }
+
+    function renderFeatureGrid() {
+      if (!discoveryData) return;
+      const grid = document.getElementById('featureGrid');
+      const cooldowns = discoveryData.cooldowns || [];
+
+      let filtered = cooldowns;
+      if (discoveryFilter === 'enabled') {
+        filtered = cooldowns.filter(c => c.discoveryState === 'enabled');
+      } else if (discoveryFilter === 'undiscovered') {
+        filtered = cooldowns.filter(c => c.discoveryState === 'undiscovered');
+      } else if (discoveryFilter === 'aware') {
+        filtered = cooldowns.filter(c => ['aware', 'interested', 'deferred'].includes(c.discoveryState));
+      } else if (discoveryFilter === 'cooldown') {
+        filtered = cooldowns.filter(c => c.cooldownExpiresAt || c.quieted);
+      }
+
+      if (filtered.length === 0) {
+        grid.innerHTML = '<div style="padding:16px;color:var(--text-dim);text-align:center">No features match filter</div>';
+        return;
+      }
+
+      grid.innerHTML = filtered.map(c => {
+        const cooldownNote = c.cooldownExpiresAt
+          ? '<span class="cooldown">cooldown until ' + new Date(c.cooldownExpiresAt).toLocaleTimeString() + '</span>'
+          : c.quieted ? '<span class="cooldown">quieted (' + c.surfaceCount + '/' + c.maxSurfaces + ')</span>' : '';
+
+        return `<div class="feature-card">
+          <div class="feature-card-top">
+            <span class="feature-card-name">${esc(c.featureName)}</span>
+            <span class="feature-state-badge ${esc(c.discoveryState)}">${esc(c.discoveryState)}</span>
+          </div>
+          <div class="feature-card-meta">
+            <span>surfaced ${c.surfaceCount}/${c.maxSurfaces}</span>
+            ${cooldownNote}
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    function renderDigest() {
+      if (!discoveryData) return;
+      const section = document.getElementById('digestSection');
+      const content = document.getElementById('digestContent');
+      const changed = discoveryData.changedDisabled || [];
+      const unused = discoveryData.unusedEnabled || [];
+
+      if (changed.length === 0 && unused.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+
+      section.style.display = '';
+      let html = '';
+
+      if (changed.length > 0) {
+        html += '<h4 style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Disabled features with updates</h4>';
+        html += changed.map(f =>
+          `<div class="digest-item">
+            <div class="digest-item-title">${esc(f.featureName)}</div>
+            <div class="digest-item-desc">Version ${esc(f.currentVersion)} available</div>
+          </div>`
+        ).join('');
+      }
+
+      if (unused.length > 0) {
+        html += '<h4 style="font-size:12px;color:var(--text-dim);margin:12px 0 8px">Enabled but unused (&gt;15 days)</h4>';
+        html += unused.map(f =>
+          `<div class="digest-item">
+            <div class="digest-item-title">${esc(f.featureName)}</div>
+            <div class="digest-item-desc">${f.daysSinceActivity} days since last activity</div>
+          </div>`
+        ).join('');
+      }
+
+      content.innerHTML = html;
+    }
+
+    function renderEventLog() {
+      if (!discoveryData) return;
+      const log = document.getElementById('eventLog');
+      const events = discoveryData.recentEvents || [];
+
+      if (events.length === 0) {
+        log.innerHTML = '<div style="padding:12px;color:var(--text-dim);text-align:center">No events yet</div>';
+        return;
+      }
+
+      log.innerHTML = events.slice(0, 30).map(e => {
+        const time = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const date = new Date(e.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
+        const surfaceLabel = e.surfacedAs ? ` (${e.surfacedAs})` : '';
+        return `<div class="event-row">
+          <span class="event-time">${esc(date)} ${esc(time)}</span>
+          <span class="event-feature">${esc(e.featureId)}</span>
+          <span class="event-transition">
+            <span class="feature-state-badge ${esc(e.previousState)}">${esc(e.previousState)}</span>
+            <span class="event-arrow">&rarr;</span>
+            <span class="feature-state-badge ${esc(e.newState)}">${esc(e.newState)}</span>
+            ${surfaceLabel}
+          </span>
+        </div>`;
+      }).join('');
+    }
+
+    // ── Systems Tab ──────────────────────────────────────────────
+    let systemsData = null;
+
+    async function loadSystems() {
+      try {
+        systemsData = await apiFetch('/systems/status');
+        showSystemsOverview();
+        renderSystemsOverview();
+      } catch (e) {
+        document.getElementById('systemsBanner').innerHTML =
+          '<div style="padding:20px;color:var(--red);text-align:center">Failed to load systems status</div>';
+      }
+    }
+
+    function renderSystemsOverview() {
+      if (!systemsData) return;
+      const { uptime, health, healthSummary, activeCapabilities, issues, recentEvents } = systemsData;
+      const uptimeStr = formatUptimeClient(uptime);
+
+      // Health Banner
+      const bannerClass = health === 'healthy' ? 'healthy' : health === 'error' ? 'error' : 'degraded';
+      const bannerIcon = health === 'healthy' ? '&#10003;' : '&#9888;';
+      document.getElementById('systemsBanner').innerHTML = `
+        <div class="health-banner ${bannerClass}">
+          <span class="health-icon">${bannerIcon}</span>
+          <div class="health-text">
+            <div class="health-title">${esc(healthSummary)}</div>
+            <div class="health-meta">Uptime: ${esc(uptimeStr)}  &middot;  ${activeCapabilities.length} capabilities active${issues.length > 0 ? '  &middot;  ' + issues.length + ' issue' + (issues.length > 1 ? 's' : '') : ''}</div>
+          </div>
+        </div>`;
+
+      // Issues (only if any)
+      const issuesEl = document.getElementById('systemsIssues');
+      if (issues.length > 0) {
+        issuesEl.innerHTML = '<div class="issues-panel">' + issues.map(iss => {
+          const cls = iss.severity === 'warning' ? ' warning' : '';
+          const ic = iss.severity === 'warning' ? '&#9888;' : '&#10060;';
+          return `<div class="issue-card${cls}">
+            <span class="issue-card-icon">${ic}</span>
+            <div class="issue-card-content">
+              <div class="issue-card-label">${esc(iss.label)}</div>
+              <div class="issue-card-desc">${esc(iss.description)}</div>
+            </div>
+          </div>`;
+        }).join('') + '</div>';
+      } else {
+        issuesEl.innerHTML = '';
+      }
+
+      // Card Grid
+      const capsEl = document.getElementById('systemsCapabilities');
+      if (activeCapabilities.length > 0) {
+        const cards = activeCapabilities.map(cap => {
+          const dotClass = cap.status === 'error' ? 'error' : 'active';
+          const statusClass = cap.status === 'error' ? ' error' : '';
+          const previewStats = buildPreviewStats(cap.stats || {});
+          return `<div class="cap-card${statusClass}" onclick="showCapabilityDetail('${esc(cap.id)}')">
+            <div class="cap-card-top">
+              <span class="cap-dot ${dotClass}"></span>
+              <span class="cap-card-name">${esc(cap.label)}</span>
+              <span class="cap-card-arrow">&#9654;</span>
+            </div>
+            <div class="cap-card-desc">${esc(cap.description)}</div>
+            ${previewStats ? '<div class="cap-card-stats">' + previewStats + '</div>' : ''}
+            <div class="cap-card-metric">${esc(cap.metric)}</div>
+          </div>`;
+        }).join('');
+        capsEl.innerHTML = `<div class="cap-section-title">Active Capabilities</div><div class="cap-grid">${cards}</div>`;
+      } else {
+        capsEl.innerHTML = '';
+      }
+
+      // Events
+      const eventsEl = document.getElementById('systemsEvents');
+      if (recentEvents.length > 0) {
+        const rows = recentEvents.map(e => {
+          const time = e.timestamp ? new Date(e.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+          return `<div class="systems-event-row"><span class="systems-event-time">${esc(time)}</span><span class="systems-event-text">${esc(e.narrative || e.subsystem || '')}</span></div>`;
+        }).join('');
+        eventsEl.innerHTML = `<div class="events-disclosure" id="eventsDisclosure">
+          <button class="events-disclosure-toggle" onclick="document.getElementById('eventsDisclosure').classList.toggle('expanded')">
+            <span class="events-disclosure-arrow">&#9654;</span> Recent Events (${recentEvents.length})
+          </button>
+          <div class="events-disclosure-body">${rows}</div></div>`;
+      } else {
+        eventsEl.innerHTML = '';
+      }
+    }
+
+    function buildPreviewStats(stats) {
+      if (!stats || typeof stats !== 'object') return '';
+      const map = {
+        recoveries: 'Recoveries', interventions: 'Interventions', activeCases: 'Active',
+        coherencePassed: 'Passed', coherenceFailed: 'Failed', memoryPercent: 'Memory',
+        enabledJobs: 'Jobs', activeJobSessions: 'Running', queueLength: 'Queued',
+        weeklyUsage: 'Weekly', fiveHourRate: '5h Rate',
+        topicMappings: 'Topics', totalMessages: 'Messages',
+        proposals: 'Proposals', gaps: 'Gaps', learningsApplied: 'Applied',
+      };
+      const chips = [];
+      for (const [key, label] of Object.entries(map)) {
+        if (stats[key] != null && stats[key] !== 0 && stats[key] !== false) {
+          const suf = ['weeklyUsage','fiveHourRate','memoryPercent'].includes(key) ? '%' : '';
+          chips.push(`<span class="cap-stat"><span class="cap-stat-value">${esc(String(stats[key]))}${suf}</span>${esc(label)}</span>`);
+        }
+        if (chips.length >= 3) break;
+      }
+      return chips.join('');
+    }
+
+    function showCapabilityDetail(capId) {
+      if (!systemsData) return;
+      const cap = systemsData.activeCapabilities.find(c => c.id === capId);
+      if (!cap) return;
+      document.getElementById('systemsOverview').style.display = 'none';
+      document.getElementById('systemsDetailView').classList.add('active');
+      const content = document.getElementById('systemsDetailContent');
+
+      const statCards = buildStatCards(cap.stats || {}, capId);
+      const processRows = (cap.processes || []).map(p => {
+        const dotColor = p.status === 'running' ? 'var(--accent)' : 'var(--red)';
+        return `<div class="cap-process-row">
+          <span class="cap-process-dot" style="background:${dotColor}"></span>
+          <span class="cap-process-name">${esc(p.name)}</span>
+          <span class="cap-process-status">${esc(p.status === 'running' ? 'Running' : 'Error')}</span>
+        </div>`;
+      }).join('');
+
+      const lastAct = cap.lastActivity
+        ? '<div class="cap-last-activity">Last activity: ' + esc(timeAgo(cap.lastActivity)) + '</div>' : '';
+
+      content.innerHTML = `
+        <div class="cap-detail-header">
+          <div class="cap-detail-title">
+            <span class="cap-dot ${cap.status === 'error' ? 'error' : 'active'}"></span>
+            <h3>${esc(cap.label)}</h3>
+          </div>
+          <div class="cap-detail-description">${esc(cap.description)}</div>
+          ${lastAct}
+        </div>
+        ${statCards ? '<div class="cap-detail-section"><div class="cap-detail-section-title">Metrics</div><div class="cap-stats-grid">' + statCards + '</div><div id="capContentBrowser"></div></div>' : ''}
+        <div class="cap-detail-section">
+          <div class="cap-detail-section-title">Components (${(cap.processes || []).length})</div>
+          <div class="cap-process-list">${processRows}</div>
+        </div>
+        <div class="cap-detail-section">
+          <div class="cap-detail-section-title">Status</div>
+          <div style="font-size:13px;color:var(--accent);font-weight:500;padding:8px 0">${esc(cap.metric)}</div>
+        </div>`;
+    }
+
+    // Map stat keys to browsable content endpoints
+    const BROWSABLE_STATS = {
+      // Evolution
+      learnings: { endpoint: '/evolution/learnings', label: 'Learnings', renderer: 'renderLearnings' },
+      proposals: { endpoint: '/evolution/proposals', label: 'Proposals', renderer: 'renderProposals' },
+      gaps: { endpoint: '/evolution/gaps', label: 'Capability Gaps', renderer: 'renderGaps' },
+      actions: { endpoint: '/evolution/actions', label: 'Actions', renderer: 'renderActions' },
+      overdueActions: { endpoint: '/evolution/actions/overdue', label: 'Overdue Actions', renderer: 'renderActions' },
+      // Health
+      coherenceChecks: { endpoint: '/health/coherence', label: 'Coherence Report', renderer: 'renderCoherence' },
+      coherencePassed: { endpoint: '/health/coherence', label: 'Coherence Report', renderer: 'renderCoherence' },
+      coherenceFailed: { endpoint: '/health/coherence', label: 'Coherence Report', renderer: 'renderCoherence' },
+      // Recovery
+      totalTriages: { endpoint: '/triage/history?limit=20', label: 'Triage History', renderer: 'renderTriageHistory' },
+      interventions: { endpoint: '/watchdog/status', label: 'Watchdog Status', renderer: 'renderWatchdog' },
+      recoveries: { endpoint: '/watchdog/status', label: 'Watchdog Status', renderer: 'renderWatchdog' },
+      // Jobs
+      totalJobs: { endpoint: '/jobs', label: 'Jobs', renderer: 'renderJobs' },
+      enabledJobs: { endpoint: '/jobs', label: 'Jobs', renderer: 'renderJobs' },
+      // Telegram
+      totalMessages: { endpoint: '/telegram/log-stats', label: 'Message Stats', renderer: 'renderTelegramStats' },
+      topicMappings: { endpoint: '/telegram/log-stats', label: 'Message Stats', renderer: 'renderTelegramStats' },
+    };
+
+    function buildStatCards(stats, capId) {
+      if (!stats || typeof stats !== 'object') return '';
+      const map = {
+        interventions: 'Interventions', recoveries: 'Recoveries', sessionDeaths: 'Deaths',
+        llmOverrides: 'LLM Overrides', activeCases: 'Active Cases', totalTriages: 'Triages',
+        cooldowns: 'Cooldowns',
+        coherenceChecks: 'Checks', coherencePassed: 'Passed', coherenceFailed: 'Failed', coherenceCorrected: 'Corrected',
+        memoryPercent: 'Memory %', memoryFreeGB: 'Free GB', memoryTotalGB: 'Total GB',
+        trackedProcesses: 'Tracked', orphanProcesses: 'Orphans', totalMemoryMB: 'Memory MB',
+        totalJobs: 'Total Jobs', enabledJobs: 'Enabled', queueLength: 'Queued', activeJobSessions: 'Running',
+        weeklyUsage: 'Weekly %', fiveHourRate: '5h Rate %',
+        topicMappings: 'Topics', pendingStalls: 'Pending', totalMessages: 'Messages',
+        proposals: 'Proposals', learnings: 'Learnings', learningsApplied: 'Applied',
+        gaps: 'Gaps', actions: 'Actions', overdueActions: 'Overdue',
+      };
+      const cards = [];
+      for (const [key, label] of Object.entries(map)) {
+        if (stats[key] != null && typeof stats[key] === 'number') {
+          const browsable = BROWSABLE_STATS[key];
+          const clickAttr = browsable ? ` onclick="browseStatContent('${key}')" style="cursor:pointer"` : '';
+          const browseHint = browsable ? '<div style="font-size:9px;color:var(--accent);margin-top:2px">click to view</div>' : '';
+          cards.push(`<div class="cap-stat-card"${clickAttr}><div class="cap-stat-card-value">${stats[key]}</div><div class="cap-stat-card-label">${esc(label)}</div>${browseHint}</div>`);
+        }
+      }
+      return cards.join('');
+    }
+
+    async function browseStatContent(statKey) {
+      const info = BROWSABLE_STATS[statKey];
+      if (!info) return;
+      const panel = document.getElementById('capContentBrowser');
+      if (!panel) return;
+      panel.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:12px">Loading ' + esc(info.label) + '...</div>';
+      try {
+        const data = await apiFetch(info.endpoint);
+        panel.innerHTML = '<div class="cap-content-panel">' +
+          '<div class="cap-content-header"><span>' + esc(info.label) + '</span><button onclick="document.getElementById(\'capContentBrowser\').innerHTML=\'\'" style="border:none;background:none;color:var(--text-dim);cursor:pointer;font-size:14px">&times;</button></div>' +
+          '<div class="cap-content-body">' + renderBrowsableContent(info.renderer, data) + '</div></div>';
+      } catch (e) {
+        panel.innerHTML = '<div style="padding:12px;color:var(--red);font-size:12px">Failed to load: ' + esc(e.message) + '</div>';
+      }
+    }
+
+    function renderBrowsableContent(renderer, data) {
+      switch (renderer) {
+        case 'renderLearnings': {
+          const items = data.learnings || data || [];
+          if (!Array.isArray(items) || items.length === 0) return '<div class="cap-content-empty">No learnings recorded</div>';
+          return items.map(l => `<div class="cap-content-item">
+            <div class="cap-content-item-title">${esc(l.title || l.insight || l.id || 'Untitled')}</div>
+            ${l.description || l.context ? '<div class="cap-content-item-body">' + esc(l.description || l.context || '') + '</div>' : ''}
+            ${l.category ? '<span class="cap-content-tag">' + esc(l.category) + '</span>' : ''}
+            ${l.applied ? '<span class="cap-content-tag applied">Applied</span>' : ''}
+            ${l.createdAt ? '<div class="cap-content-item-time">' + esc(timeAgo(l.createdAt)) + '</div>' : ''}
+          </div>`).join('');
+        }
+        case 'renderProposals': {
+          const items = data.proposals || data || [];
+          if (!Array.isArray(items) || items.length === 0) return '<div class="cap-content-empty">No proposals</div>';
+          return items.map(p => `<div class="cap-content-item">
+            <div class="cap-content-item-title">${esc(p.title || p.id || 'Untitled')}</div>
+            ${p.description ? '<div class="cap-content-item-body">' + esc(p.description) + '</div>' : ''}
+            ${p.status ? '<span class="cap-content-tag">' + esc(p.status) + '</span>' : ''}
+            ${p.type ? '<span class="cap-content-tag">' + esc(p.type) + '</span>' : ''}
+          </div>`).join('');
+        }
+        case 'renderGaps': {
+          const items = data.gaps || data || [];
+          if (!Array.isArray(items) || items.length === 0) return '<div class="cap-content-empty">No gaps detected</div>';
+          return items.map(g => `<div class="cap-content-item">
+            <div class="cap-content-item-title">${esc(g.title || g.capability || g.id || 'Untitled')}</div>
+            ${g.description ? '<div class="cap-content-item-body">' + esc(g.description) + '</div>' : ''}
+            ${g.severity ? '<span class="cap-content-tag">' + esc(g.severity) + '</span>' : ''}
+          </div>`).join('');
+        }
+        case 'renderActions': {
+          const items = data.actions || data || [];
+          if (!Array.isArray(items) || items.length === 0) return '<div class="cap-content-empty">No actions</div>';
+          return items.map(a => `<div class="cap-content-item">
+            <div class="cap-content-item-title">${esc(a.title || a.action || a.id || 'Untitled')}</div>
+            ${a.status ? '<span class="cap-content-tag">' + esc(a.status) + '</span>' : ''}
+            ${a.dueAt ? '<div class="cap-content-item-time">Due: ' + esc(timeAgo(a.dueAt)) + '</div>' : ''}
+          </div>`).join('');
+        }
+        case 'renderCoherence': {
+          const report = data.lastReport || data;
+          if (!report || !report.checks) return '<div class="cap-content-empty">No coherence data</div>';
+          return report.checks.map(c => `<div class="cap-content-item" style="border-left:3px solid ${c.passed ? 'var(--accent)' : 'var(--red)'}">
+            <div class="cap-content-item-title">${c.passed ? '&check;' : '&cross;'} ${esc(c.name)}</div>
+            <div class="cap-content-item-body">${esc(c.message)}</div>
+          </div>`).join('');
+        }
+        case 'renderTriageHistory': {
+          const items = data.history || data || [];
+          if (!Array.isArray(items) || items.length === 0) return '<div class="cap-content-empty">No triage history</div>';
+          return items.map(t => `<div class="cap-content-item">
+            <div class="cap-content-item-title">Topic ${t.topicId} — ${esc(t.sessionName || 'unknown')}</div>
+            <div class="cap-content-item-body">${t.result ? esc(JSON.stringify(t.result.actionsTaken || t.result, null, 0).substring(0, 200)) : ''}</div>
+            ${t.timestamp ? '<div class="cap-content-item-time">' + esc(timeAgo(t.timestamp)) + '</div>' : ''}
+          </div>`).join('');
+        }
+        case 'renderWatchdog': {
+          const hist = data.interventionHistory || [];
+          if (hist.length === 0) return '<div class="cap-content-empty">No interventions recorded</div>';
+          return hist.map(h => `<div class="cap-content-item">
+            <div class="cap-content-item-title">PID ${h.stuckPid || '?'} — ${esc(h.level || h.outcome || 'intervention')}</div>
+            ${h.outcome ? '<span class="cap-content-tag">' + esc(h.outcome) + '</span>' : ''}
+            ${h.timestamp ? '<div class="cap-content-item-time">' + esc(timeAgo(h.timestamp)) + '</div>' : ''}
+          </div>`).join('');
+        }
+        case 'renderJobs': {
+          const jobs = data.jobs || data || [];
+          if (!Array.isArray(jobs) || jobs.length === 0) return '<div class="cap-content-empty">No jobs</div>';
+          return jobs.slice(0, 20).map(j => `<div class="cap-content-item">
+            <div class="cap-content-item-title">${esc(j.slug || j.name || 'unnamed')}</div>
+            <div class="cap-content-item-body">${esc(j.cron || '')} ${j.enabled === false ? '(disabled)' : ''}</div>
+          </div>`).join('');
+        }
+        case 'renderTelegramStats': {
+          return `<div class="cap-content-item">
+            <div class="cap-content-item-title">Message Log</div>
+            <div class="cap-content-item-body">Total messages: ${data.totalMessages || '?'}<br>Log size: ${data.logSizeBytes ? Math.round(data.logSizeBytes / 1024) + ' KB' : '?'}</div>
+          </div>`;
+        }
+        default:
+          return '<div class="cap-content-empty">No viewer for this content</div>';
+      }
+    }
+
+    function showSystemsOverview() {
+      document.getElementById('systemsOverview').style.display = '';
+      document.getElementById('systemsDetailView').classList.remove('active');
+    }
+
+    function timeAgo(isoStr) {
+      const ms = Date.now() - new Date(isoStr).getTime();
+      const s = Math.floor(ms / 1000);
+      if (s < 60) return 'just now';
+      const m = Math.floor(s / 60);
+      if (m < 60) return m + 'm ago';
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ago';
+      return Math.floor(h / 24) + 'd ago';
+    }
+
+    function formatUptimeClient(ms) {
+      const s = Math.floor(ms / 1000);
+      const d = Math.floor(s / 86400);
+      const h = Math.floor((s % 86400) / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      if (d > 0) return d + 'd ' + h + 'h';
+      if (h > 0) return h + 'h ' + m + 'm';
+      return m + 'm';
     }
 
     // Handle tab visibility — close SSE when tab is backgrounded
