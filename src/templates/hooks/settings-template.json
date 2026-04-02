@@ -39,6 +39,17 @@
         ]
       },
       {
+        "matcher": "mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node .instar/hooks/instar/external-operation-gate.js",
+            "blocking": true,
+            "timeout": 5000
+          }
+        ]
+      },
+      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {

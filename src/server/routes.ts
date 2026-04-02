@@ -5529,6 +5529,21 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ implicit, count: implicit.length });
   });
 
+  // ── Implementation Trace Verification ────────────────────────
+  // Checks whether "implemented" proposals left actual file traces.
+  // Inspired by Dawn's lesson-behavior-gap analyzer: detects phantom
+  // implementations where proposals were marked done without real changes.
+  router.get('/evolution/traces', (_req, res) => {
+    if (!ctx.evolution) {
+      res.json({ traces: [], count: 0, unverified: 0 });
+      return;
+    }
+    const traces = ctx.evolution.verifyImplementationTraces();
+    const unverified = traces.filter(t => t.verdict === 'unverified').length;
+    const weak = traces.filter(t => t.verdict === 'weak').length;
+    res.json({ traces, count: traces.length, unverified, weak });
+  });
+
   // ── Serendipity Protocol ─────────────────────────────────────
   router.get('/serendipity/stats', (_req, res) => {
     const serendipityDir = path.join(ctx.config.stateDir, 'state', 'serendipity');

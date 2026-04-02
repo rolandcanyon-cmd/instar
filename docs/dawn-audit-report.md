@@ -1,40 +1,63 @@
 # Dawn-to-Instar Audit Report
 
-**Date**: 2026-03-30 (Updated)
-**Previous Audit**: 2026-03-26 (v0.24.4, scored ~83%)
-**Current Version**: v0.25.4
+**Date**: 2026-04-02 (Updated)
+**Previous Audit**: 2026-03-30 (v0.25.4, scored ~88%)
+**Current Version**: v0.26.3
 **Purpose**: Map Dawn's battle-tested infrastructure against Instar's current state. Identify remaining gaps and cross-pollination opportunities.
 
 ---
 
 ## Executive Summary
 
-Instar has matured to **~88% coverage** of Dawn's proven patterns (up from ~83% in the March 26 audit). Three new capabilities added this cycle: research navigation context, smart-fetch web optimization, and implicit evolution detection. Cross-pollination continues flowing both directions — Instar's "Defensive Fabrication" and "Output Provenance" gravity wells were ported back to Dawn, and Dawn's PostCompact hook was enhanced with Instar's cognitive principles injection pattern.
+Instar has matured to **~89% coverage** of Dawn's proven patterns (up from ~88% in the March 30 audit). This cycle focused on verifying Dawn's new infrastructure patterns (auto-fixer, lesson-behavior-gap analyzer, PermissionDenied hooks) against Instar's existing capabilities. Finding: most "new Dawn patterns" are either already covered by Instar's different architecture or still at proposal stage in Dawn. One concrete improvement made: MCP tool identity grounding injection in the external-operation-gate hook, bringing Dawn's "grounding before public action" pattern to browser/API tool calls.
 
-**Key shift**: Cross-pollination is now bidirectional by design. Each audit cycle identifies patterns flowing in both directions.
+**Key shift**: Parity is approaching convergence. Most gaps are now architectural differences (both valid) rather than missing capabilities. Cross-pollination value increasingly comes from conceptual patterns rather than code porting.
 
 ---
 
 ## Coverage by Area
 
-| # | Area | Feb Score | Mar 26 | Mar 30 | Status |
-|---|------|-----------|--------|--------|--------|
-| 1 | Job Scheduling | 30% | 85% | 85% | Quota suite, claim manager, job reflector |
-| 2 | Session Management | 25% | 88% | 88% | Reaper, sleep/wake, lifecycle hooks, input guard |
-| 3 | Identity & Grounding | 20% | 82% | 82% | SoulManager, knowledge tree, integrity checks |
-| 4 | Hook System | 15% | 92% | 92% | 14 hooks shipped with `instar init` |
-| 5 | Reflection & Learning | 10% | 87% | 87% | ReflectionConsolidator, JobReflector, PatternAnalyzer |
-| 6 | Telegram Integration | 60% | 78% | 80% | +Slack parity (v0.25.x), platform-agnostic messaging |
-| 7 | Multi-Session Awareness | 15% | 72% | 72% | Activity registry, session sentinel, work ledger |
-| 8 | Quota & Resource | 5% | 91% | 91% | QuotaManager, multi-account, exhaustion detection |
-| 9 | Skills System | 5% | 68% | 68% | AutonomySkill, capability mapper, MCP interop |
-| 10 | Safety & Security | 40% | 89% | 89% | PEL, secret redaction, audit trail, manifest integrity |
-| 11 | Monitoring & Health | 20% | 85% | 85% | Watchdog, stall triage, memory pressure, sleep/wake |
-| 12 | Self-Evolution | 5% | 84% | 90% | +Implicit evolution detection, research navigation |
-| 13 | Research & Web | N/A | N/A | 92% | NEW: smart-fetch, research navigation context, canonical state hierarchy |
-| | **Aggregate** | **~25%** | **~83%** | **~88%** | **Production-ready, bidirectional cross-pollination** |
+| # | Area | Feb Score | Mar 26 | Mar 30 | Apr 2 | Status |
+|---|------|-----------|--------|--------|-------|--------|
+| 1 | Job Scheduling | 30% | 85% | 85% | 85% | Quota suite, claim manager, job reflector |
+| 2 | Session Management | 25% | 88% | 88% | 89% | +SessionMonitor escalation fix (v0.26.2) |
+| 3 | Identity & Grounding | 20% | 82% | 82% | 84% | +MCP identity grounding for external ops |
+| 4 | Hook System | 15% | 92% | 92% | 93% | +MCP matcher in settings template |
+| 5 | Reflection & Learning | 10% | 87% | 87% | 87% | ReflectionConsolidator, JobReflector, PatternAnalyzer |
+| 6 | Telegram Integration | 60% | 78% | 80% | 80% | Platform-agnostic messaging via adapters |
+| 7 | Multi-Session Awareness | 15% | 72% | 72% | 72% | Activity registry, session sentinel, work ledger |
+| 8 | Quota & Resource | 5% | 91% | 91% | 91% | QuotaManager, multi-account, exhaustion detection |
+| 9 | Skills System | 5% | 68% | 68% | 68% | AutonomySkill, capability mapper, MCP interop |
+| 10 | Safety & Security | 40% | 89% | 89% | 90% | +ConfigDefaults unified system, PromptGate default-on |
+| 11 | Monitoring & Health | 20% | 85% | 85% | 86% | +FeatureRegistry graceful degradation, native module preflight |
+| 12 | Self-Evolution | 5% | 84% | 90% | 90% | Implicit evolution detection stable |
+| 13 | Research & Web | N/A | N/A | 92% | 92% | Smart-fetch, research navigation, canonical state hierarchy |
+| | **Aggregate** | **~25%** | **~83%** | **~88%** | **~89%** | **Production-ready, approaching convergence** |
 
 ---
+
+## What Changed (Mar 30 -> Apr 2)
+
+v0.25.4 → v0.26.3 — Unified config defaults, reliability hardening, and identity grounding for MCP operations:
+
+- **ConfigDefaults unified system** (v0.26.0) — Single source of truth for agent config defaults, prevents init/migration divergence. Agent-type-aware defaults, security-conscious migration overrides.
+- **SessionMonitor escalation fix** (v0.26.2) — Only escalates when user is actually waiting, eliminating false stall alerts.
+- **FeatureRegistry graceful degradation** (v0.26.3) — Survives sqlite3 native module failures instead of crash-looping.
+- **Native module auto-rebuild** (v0.26.3) — Detects Node version mismatches, auto-rebuilds better-sqlite3.
+- **Post-rebase merge fallback** (v0.26.3) — Smarter recovery from stuck git rebases.
+- **MCP identity grounding** (this audit) — External-operation-gate now injects identity context before irreversible write/publish operations via MCP tools (browser automation, API tools).
+- **Settings template MCP matcher** (this audit) — `instar init` now includes `mcp__.*` PreToolUse matcher for external operation gate.
+- **PromptGate enabled by default** (v0.25.9) — All new agents get PromptGate active out of the box.
+
+### Dawn Patterns Audited (Not Ported — Already Covered or Still Proposed)
+
+| Dawn Pattern | Instar Status | Notes |
+|-------------|--------------|-------|
+| Auto-fixer infrastructure | N/A | Too large for single session; Instar has TriageOrchestrator as foundation |
+| Lesson-behavior-gap analyzer | N/A | Dawn-specific (references dawns_reflections.md lessons) |
+| PermissionDenied hook (PROP-298) | N/A | Still at proposal stage in Dawn — not implemented anywhere |
+| PostCompact identity recovery | Already covered | Instar's compaction-recovery.sh is MORE comprehensive (337 lines vs Dawn's 155) |
+| Conflict marker auto-resolution | Already covered | Instar has LLMConflictResolver with 3-tier escalation |
 
 ## What Changed (Mar 26 -> Mar 30)
 
