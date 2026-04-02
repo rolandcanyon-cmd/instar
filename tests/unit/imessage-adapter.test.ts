@@ -25,9 +25,9 @@ describe('IMessageAdapter', () => {
   });
 
   describe('constructor', () => {
-    it('requires authorizedSenders array', () => {
+    it('requires authorizedContacts array', () => {
       expect(() => new IMessageAdapter({} as Record<string, unknown>, project.stateDir))
-        .toThrow('authorizedSenders is required');
+        .toThrow('authorizedContacts is required');
     });
 
     it('accepts empty authorizedSenders (fail-closed)', () => {
