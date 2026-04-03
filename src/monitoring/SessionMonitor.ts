@@ -18,6 +18,7 @@
 
 import { EventEmitter } from 'events';
 import type { SessionRecovery, RecoveryResult } from './SessionRecovery.js';
+import { detectContextExhaustion } from './QuotaExhaustionDetector.js';
 
 export interface SessionMonitorConfig {
   /** Enable the session monitor (default: true) */
@@ -199,6 +200,37 @@ export class SessionMonitor extends EventEmitter {
         snap.lastUserMessageAt = ts;
       } else if (!msg.fromUser && ts > snap.lastAgentMessageAt) {
         snap.lastAgentMessageAt = ts;
+      }
+    }
+
+    // ── Proactive context exhaustion check ────────────────────
+    // Run BEFORE health classification because a context-exhausted session
+    // appears "alive" with recent output (the error message itself), so it
+    // would be classified as 'healthy' and skip all recovery logic.
+    if (alive && currentOutput && this.deps.sessionRecovery) {
+      const ctxCheck = detectContextExhaustion(currentOutput);
+      if (ctxCheck.matched) {
+        console.log(`[SessionMonitor] Context exhaustion detected in topic ${topicId} (pattern: ${ctxCheck.pattern})`);
+        try {
+          const recoveryResult = await this.deps.sessionRecovery.checkAndRecover(topicId, sessionName);
+          this.emit('monitor:mechanical-recovery', { topicId, sessionName, result: recoveryResult });
+          if (recoveryResult.recovered) {
+            console.log(`[SessionMonitor] Context exhaustion recovery succeeded for topic ${topicId}: ${recoveryResult.message}`);
+            snap.status = 'healthy';
+            snap.notifiedAt = now;
+            return;
+          }
+        } catch (err) {
+          console.error(`[SessionMonitor] Context exhaustion recovery error for topic ${topicId}:`, err);
+        }
+        // If recovery failed/not available, notify user
+        snap.status = 'dead'; // Treat unrecoverable context exhaustion as dead
+        await this.deps.sendToTopic(topicId,
+          `Session hit "conversation too long" and can't continue. Send a new message to start a fresh session with your recent history.`
+        ).catch(() => {});
+        this.emit('monitor:user-notified', { topicId, message: 'context_exhausted' });
+        snap.notifiedAt = now;
+        return;
       }
     }
 

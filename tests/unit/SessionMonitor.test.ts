@@ -367,6 +367,52 @@ describe('SessionMonitor', () => {
       expect(deps.triggerTriage).toHaveBeenCalled();
     });
 
+    it('detects context exhaustion in healthy-looking alive session and triggers recovery', async () => {
+      const now = Date.now();
+      const mockRecovery = { checkAndRecover: vi.fn(async () => ({ recovered: true, failureType: 'context_exhaustion' as const, message: 'Respawned fresh' })) };
+      deps = createMockDeps({
+        getActiveTopicSessions: vi.fn(() => new Map([[904, 'session-ctx']])),
+        isSessionAlive: vi.fn(() => true),
+        // Tmux output contains the context exhaustion error
+        captureSessionOutput: vi.fn(() => 'Error during compaction: Error: Conversation too long. Press esc twice to go up a few messages and try again.\n> '),
+        getTopicHistory: vi.fn(() => [
+          { text: 'do the thing', fromUser: true, timestamp: new Date(now - 2 * 60_000).toISOString() },
+          { text: 'working on it', fromUser: false, timestamp: new Date(now - 1 * 60_000).toISOString() },
+        ]),
+        sessionRecovery: mockRecovery as any,
+      });
+      monitor = new SessionMonitor(deps);
+      const events: string[] = [];
+      monitor.on('monitor:mechanical-recovery', () => events.push('recovery'));
+
+      // Even on the FIRST poll, context exhaustion should be detected
+      // because it checks tmux output before health classification
+      await monitor.poll();
+
+      expect(mockRecovery.checkAndRecover).toHaveBeenCalled();
+      expect(events).toContain('recovery');
+    });
+
+    it('notifies user when context exhaustion detected but recovery fails', async () => {
+      const now = Date.now();
+      const mockRecovery = { checkAndRecover: vi.fn(async () => ({ recovered: false, failureType: null, message: 'No recovery' })) };
+      deps = createMockDeps({
+        getActiveTopicSessions: vi.fn(() => new Map([[905, 'session-ctx2']])),
+        isSessionAlive: vi.fn(() => true),
+        captureSessionOutput: vi.fn(() => 'conversation too long'),
+        getTopicHistory: vi.fn(() => []),
+        sessionRecovery: mockRecovery as any,
+      });
+      monitor = new SessionMonitor(deps);
+      const events: string[] = [];
+      monitor.on('monitor:user-notified', () => events.push('notified'));
+
+      await monitor.poll();
+
+      expect(events).toContain('notified');
+      expect(deps.sendToTopic).toHaveBeenCalledWith(905, expect.stringContaining('conversation too long'));
+    });
+
     it('calls recovery for idle sessions when user expects response (context exhaustion check)', async () => {
       const mockRecovery = { checkAndRecover: vi.fn(async () => ({ recovered: false, failureType: null, message: '' })) };
       deps = createMockDeps({
