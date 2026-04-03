@@ -3179,14 +3179,26 @@ export async function startServer(options: StartOptions): Promise<void> {
           // Slack channel-session mappings (use synthetic IDs for compatibility)
           if (_slackAdapter) {
             const registry = _slackAdapter.getChannelRegistry();
+            const runningSessions = sessionManager.listRunningSessions();
             for (const [channelId, entry] of Object.entries(registry)) {
               const syntheticId = slackChannelToSyntheticId(channelId);
-              const sessions = sessionManager.listRunningSessions();
-              const session = sessions.find(s => s.tmuxSession === entry.sessionName);
+              const session = runningSessions.find(s => s.tmuxSession === entry.sessionName);
               enriched.set(syntheticId, {
                 sessionName: entry.sessionName,
                 claudeSessionId: session?.claudeSessionId ?? undefined,
               });
+
+              // Also save to the Slack-specific resume map so that
+              // getChannelResume() finds the UUID on next message.
+              // refreshResumeMappings only writes to topic-resume-map.json
+              // (keyed by synthetic numeric ID), but Slack message handling
+              // reads from slack-channel-resume-map.json (keyed by channel ID).
+              const uuid = session?.claudeSessionId && _topicResumeMap!.jsonlExistsPublic(session.claudeSessionId)
+                ? session.claudeSessionId
+                : (runningSessions.length === 1 ? _topicResumeMap!.findClaudeSessionUuid() : null);
+              if (uuid) {
+                _slackAdapter.saveChannelResume(channelId, uuid, entry.sessionName);
+              }
             }
           }
 

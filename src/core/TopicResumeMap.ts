@@ -269,6 +269,14 @@ export class TopicResumeMap {
 
   /**
    * Check if a JSONL file exists for the given UUID in this project's directory.
+   * Public alias for use by the resume heartbeat (Slack channel resume writes).
+   */
+  jsonlExistsPublic(uuid: string): boolean {
+    return this.jsonlExists(uuid);
+  }
+
+  /**
+   * Check if a JSONL file exists for the given UUID in this project's directory.
    */
   private jsonlExists(uuid: string): boolean {
     const jsonlPath = path.join(this.claudeProjectJsonlDir(), `${uuid}.jsonl`);

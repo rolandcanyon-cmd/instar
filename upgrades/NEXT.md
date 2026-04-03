@@ -8,28 +8,16 @@
 
 ## What Changed
 
-<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
-<!-- Write this for the AGENT — they need to understand the system deeply. -->
+**Fix Slack session resume** — The resume heartbeat (60s interval) was saving Slack channel resume UUIDs to the wrong file. It wrote to `topic-resume-map.json` using synthetic numeric IDs, but the Slack message handler reads from `slack-channel-resume-map.json` using real channel IDs. The heartbeat now writes to both files, ensuring that when a Slack session dies, the next message in that channel correctly resumes the previous session.
+
+Also fixed a stale unit test for `findUuidForSession()` and added a public `jsonlExistsPublic()` method to `TopicResumeMap` for external UUID validation.
 
 ## What to Tell Your User
 
-<!-- Write talking points the agent should relay to their user. -->
-<!-- This should be warm, conversational, user-facing — not a changelog. -->
-<!-- Focus on what THEY can now do, not internal plumbing. -->
-<!--                                                                    -->
-<!-- PROHIBITED in this section (will fail validation):                 -->
-<!--   camelCase config keys: silentReject, maxRetries, telegramNotify -->
-<!--   Inline code backtick references like silentReject: false        -->
-<!--   Fenced code blocks                                              -->
-<!--   Instructions to edit files or run commands                      -->
-<!--                                                                    -->
-<!-- CORRECT style: "I can turn that on for you" not "set X to false"  -->
-<!-- The agent relays this to their user — keep it human.              -->
-
-- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
+- **Session resume in Slack**: "When a conversation session stops in a Slack channel, the next message you send will now properly pick up where you left off instead of starting fresh. This was a bug where the resume data was being saved in the wrong place."
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| [Capability] | [Endpoint, command, or "automatic"] |
+| Reliable Slack session resume | Automatic — sessions resume on next message after dying |
