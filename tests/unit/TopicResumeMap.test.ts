@@ -239,12 +239,40 @@ describe('TopicResumeMap', () => {
   // ── findUuidForSession() ────────────────────────────────────────
 
   describe('findUuidForSession()', () => {
-    it('delegates to findClaudeSessionUuid', () => {
+    it('returns claudeSessionId when provided and JSONL exists', () => {
+      const uuid = '550e8400-e29b-41d4-a716-446655440000';
+      setupFakeClaudeProject(uuid);
+
+      const result = resumeMap.findUuidForSession('any-tmux-session', uuid);
+      expect(result).toBe(uuid);
+    });
+
+    it('returns null when claudeSessionId is not provided', () => {
       const uuid = '550e8400-e29b-41d4-a716-446655440000';
       setupFakeClaudeProject(uuid);
 
       const result = resumeMap.findUuidForSession('any-tmux-session');
-      expect(result).toBe(uuid);
+      expect(result).toBeNull();
+    });
+
+    it('returns null when claudeSessionId JSONL does not exist', () => {
+      const result = resumeMap.findUuidForSession('any-tmux-session', 'deadbeef-dead-beef-dead-beefdeadbeef');
+      expect(result).toBeNull();
+    });
+  });
+
+  // ── jsonlExistsPublic() ────────────────────────────────────────
+
+  describe('jsonlExistsPublic()', () => {
+    it('returns true when JSONL file exists', () => {
+      const uuid = '550e8400-e29b-41d4-a716-446655440000';
+      setupFakeClaudeProject(uuid);
+
+      expect(resumeMap.jsonlExistsPublic(uuid)).toBe(true);
+    });
+
+    it('returns false when JSONL file does not exist', () => {
+      expect(resumeMap.jsonlExistsPublic('deadbeef-dead-beef-dead-beefdeadbeef')).toBe(false);
     });
   });
 

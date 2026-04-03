@@ -820,7 +820,71 @@ export class SlackAdapter implements MessagingAdapter {
           const savedPath = await this.fileHandler.downloadFile(url, destPath);
           filePaths.push(savedPath);
 
-          if (isImage) {
+          // Detect text-based content (snippets, plain text, code, markdown, CSV, etc.)
+          const isText = mimetype.startsWith('text/') ||
+            mimetype === 'application/json' ||
+            mimetype === 'application/xml' ||
+            mimetype === 'application/javascript' ||
+            mimetype === 'application/x-yaml' ||
+            mimetype === 'application/x-sh' ||
+            ['txt', 'md', 'csv', 'json', 'yaml', 'yml', 'xml', 'js', 'ts', 'py', 'sh', 'html', 'css', 'sql', 'log', 'conf', 'ini', 'toml', 'env'].includes(filename.split('.').pop()?.toLowerCase() ?? '');
+          const filetype = file.filetype as string ?? '';
+          const isSnippet = filetype === 'text' || filetype === 'snippet' || filetype === 'post';
+
+          if (isText || isSnippet) {
+            // Text-based content: try to get content directly from Slack API first
+            // (url_private sometimes returns HTML instead of actual content for snippets)
+            const title = file.title as string ?? filename;
+            let textContent: string | null = null;
+
+            // Method 1: Check if Slack included preview/plain_text directly in the event
+            const preview = file.preview as string ?? file.plain_text as string ?? null;
+            if (preview && preview.length > 0) {
+              textContent = preview;
+            }
+
+            // Method 2: Use files.info API to get the content field (works for snippets)
+            if (!textContent) {
+              try {
+                const fileInfo = await this.apiClient.call('files.info', { file: file.id as string }) as Record<string, unknown>;
+                const fileData = fileInfo.file as Record<string, unknown> | undefined;
+                const content = fileData?.content as string ?? fileData?.preview as string ?? fileData?.plain_text as string ?? null;
+                if (content && content.length > 0 && !content.startsWith('<!DOCTYPE')) {
+                  textContent = content;
+                }
+              } catch {
+                // files.info failed — fall back to downloaded file
+              }
+            }
+
+            // Method 3: Fall back to the downloaded file, but validate it's not HTML
+            if (!textContent) {
+              try {
+                const downloaded = fs.readFileSync(savedPath, 'utf-8');
+                // Check if Slack returned HTML instead of actual content
+                if (downloaded.startsWith('<!DOCTYPE') || downloaded.startsWith('<html')) {
+                  console.warn(`[slack] Downloaded snippet is HTML (auth issue?) — using preview instead`);
+                  // textContent stays null — we'll note the issue
+                } else {
+                  textContent = downloaded;
+                }
+              } catch {
+                // Read failed
+              }
+            }
+
+            if (textContent) {
+              const truncated = textContent.length > 10000 ? textContent.slice(0, 10000) + '\n... [truncated, full content saved to ' + savedPath + ']' : textContent;
+              cleanText = cleanText
+                ? `${cleanText}\n\n[User shared "${title}"]\n\`\`\`\n${truncated}\n\`\`\``
+                : `[User shared "${title}"]\n\`\`\`\n${truncated}\n\`\`\``;
+            } else {
+              // All methods failed — note the attachment but warn it couldn't be read
+              cleanText = cleanText
+                ? `${cleanText}\n\n[User shared "${title}" but the content could not be retrieved — file may require manual review at ${savedPath}]`
+                : `[User shared "${title}" but the content could not be retrieved — file may require manual review at ${savedPath}]`;
+            }
+          } else if (isImage) {
             // Validate the downloaded file is actually a processable image
             const imageValid = this._validateImageFile(savedPath);
             if (imageValid) {

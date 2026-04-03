@@ -997,8 +997,9 @@ function wireTelegramRouting(
         // Track for stall detection
         telegram.trackMessageInjection(topicId, targetSession, text);
       } else {
-        // Session died — check if it's a quota death before respawning
+        // Session died — classify death cause before deciding how to respawn
         let isQuotaDeath = false;
+        let isContextExhausted = false;
         try {
           const output = sessionManager.captureOutput(targetSession, 100);
           if (output) {
@@ -1010,11 +1011,37 @@ function wireTelegramRouting(
                 `🔴 Session died — quota limit reached.\n${classification.detail}\n\n` +
                 `Use /switch-account to switch, /login to add an account, or reply again to force restart.`
               ).catch(() => {});
+            } else if (classification.cause === 'context_exhausted') {
+              isContextExhausted = true;
+              telegram.sendToTopic(topicId,
+                `🔄 Conversation got too long — starting a fresh session with your recent history.`
+              ).catch(() => {});
             }
           }
         } catch { /* classification failed — fall through to respawn */ }
 
-        if (!isQuotaDeath) {
+        if (isContextExhausted) {
+          // Context exhaustion: respawn FRESH (no --resume) — the old conversation
+          // is too large to continue. The respawn path will load telegram thread
+          // history as context, giving the new session continuity.
+          if (spawningTopics.has(topicId)) {
+            console.log(`[telegram→session] Spawn already in progress for topic ${topicId} — skipping duplicate respawn`);
+            return;
+          }
+          spawningTopics.add(topicId);
+          // Remove the resume UUID so respawnSessionForTopic doesn't try --resume
+          if (_topicResumeMap) {
+            _topicResumeMap.remove(topicId);
+          }
+          respawnSessionForTopic(sessionManager, telegram, targetSession, topicId, text, topicMemory, resolvedUser ?? undefined)
+            .catch(err => {
+              console.error(`[telegram→session] Context exhaustion respawn failed:`, err);
+              telegram.sendToTopic(topicId, `❌ Fresh session restart failed. Try sending your message again.`).catch(() => {});
+            })
+            .finally(() => {
+              spawningTopics.delete(topicId);
+            });
+        } else if (!isQuotaDeath) {
           // Guard: skip respawn if one is already in progress for this topic.
           // Prevents the infinite respawn loop: dead session + rapid messages → each
           // message triggers a new respawn → multiple concurrent spawns → chaos.
@@ -1125,6 +1152,153 @@ function wireWhatsAppRouting(
       } catch (err) { // @silent-fallback-ok — matches Telegram auto-spawn pattern
         console.error(`[whatsapp→session] Auto-spawn failed:`, err);
       }
+    }
+  });
+}
+
+/**
+ * Wire iMessage message routing — mirrors Telegram's session patterns exactly.
+ *
+ * Routes incoming iMessages to Claude Code sessions using the same flow as Telegram:
+ * 1. Existing alive session → injectIMessageMessage (with pendingInjections tracking)
+ * 2. Existing dead session → respawn via spawnInteractiveSession(bootstrapMessage)
+ * 3. No session → auto-spawn via spawnInteractiveSession(bootstrapMessage)
+ *
+ * Key design: the bootstrap message (with inline context) is passed as the
+ * initialMessage to spawnInteractiveSession, which handles wait-for-ready and
+ * injection internally — the same code path that Telegram uses successfully.
+ */
+function wireIMessageRouting(
+  imessage: import('../messaging/imessage/IMessageAdapter.js').IMessageAdapter,
+  sessionManager: SessionManager,
+): void {
+  const spawningSenders = new Set<string>();
+
+  // Wire session alive check for stall detection
+  imessage.setIsSessionAlive((sessionName) => sessionManager.isSessionAlive(sessionName));
+
+  const replyScript = '.claude/scripts/imessage-reply.sh';
+
+  /**
+   * Build a bootstrap message for spawning an iMessage session.
+   * Follows Telegram's spawnSessionForTopic pattern: context is INLINE in the
+   * bootstrap message, not a file reference. For long messages, writes to a temp
+   * file with a strong read instruction (matching Telegram's BOOTSTRAP_FILE_THRESHOLD).
+   */
+  function buildBootstrapMessage(sender: string, text: string, senderName?: string): string {
+    // Get conversation history from chat.db (includes both user AND agent messages)
+    const conversationContext = imessage.getConversationContext(sender, 30);
+
+    const parts: string[] = [];
+
+    if (conversationContext) {
+      parts.push(
+        `CONTINUATION — You are resuming an EXISTING conversation via iMessage.`,
+        `Read the context below before responding.`,
+        ``,
+        conversationContext,
+        ``,
+        `IMPORTANT: Your response MUST acknowledge and continue the conversation above. Do NOT introduce yourself or ask "how can I help" — the user has been talking to you. Pick up where the conversation left off.`,
+        ``,
+      );
+    }
+
+    // Sanitize sender name to prevent injection via chat.db display_name
+    const safeSenderName = senderName ? senderName.replace(/[\[\]`$\\]/g, '') : undefined;
+
+    // iMessage relay instructions
+    parts.push(
+      `--- iMessage SESSION (${sender}) ---`,
+      `This is a PERSISTENT conversational session via iMessage.`,
+      `MANDATORY: After EVERY response, relay your message back to the user:`,
+      `  cat <<'EOF' | ${replyScript} "${sender}"`,
+      `  Your response text here`,
+      `  EOF`,
+      ``,
+      `CRITICAL: After replying, STAY AT THE PROMPT and wait for follow-up messages.`,
+      `Do NOT exit. More messages will be injected as [imessage:${sender}] prefixed text.`,
+      `Strip the [imessage:...] prefix before interpreting messages.`,
+      `Only relay conversational text — not tool output or internal reasoning.`,
+      `--- END iMessage SESSION ---`,
+      ``,
+      `The user's latest message:`,
+      `[imessage:${sender}${safeSenderName ? ` from ${safeSenderName}` : ''}] ${text}`,
+    );
+
+    let bootstrapMessage = parts.join('\n');
+
+    // Large bootstrap messages: write to temp file with strong read instruction
+    // (matches Telegram's BOOTSTRAP_FILE_THRESHOLD pattern)
+    const BOOTSTRAP_FILE_THRESHOLD = 500;
+    if (bootstrapMessage.length > BOOTSTRAP_FILE_THRESHOLD) {
+      const tmpDir = '/tmp/instar-imessage';
+      fs.mkdirSync(tmpDir, { recursive: true, mode: 0o700 });
+      // Clean up old temp files (>1 hour) to prevent unbounded accumulation
+      try {
+        const cutoff = Date.now() - 3_600_000;
+        for (const f of fs.readdirSync(tmpDir)) {
+          const fp = path.join(tmpDir, f);
+          try { if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp); } catch { /* ignore */ }
+        }
+      } catch { /* non-critical */ }
+      const senderSlug = sender.replace(/[^a-zA-Z0-9]/g, '').slice(-8);
+      const filepath = path.join(tmpDir, `bootstrap-${senderSlug}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`);
+      fs.writeFileSync(filepath, bootstrapMessage, { mode: 0o600 });
+      console.log(`[imessage→session] Bootstrap too large (${bootstrapMessage.length} chars), wrote to ${filepath}`);
+      bootstrapMessage = `[IMPORTANT: Read ${filepath} — it contains your full session context, conversation history, and the user's latest message. You MUST read this file before responding.]`;
+    }
+
+    return bootstrapMessage;
+  }
+
+  imessage.onMessage(async (msg) => {
+    const sender = msg.channel?.identifier;
+    if (!sender) return;
+
+    const text = msg.content;
+    const senderName = (msg.metadata?.senderName as string) ?? undefined;
+    const senderNorm = sender.toLowerCase();
+
+    // Skip empty messages (reactions, read receipts, lookback artifacts)
+    if (!text || !text.trim()) return;
+
+    // Check for existing session
+    const targetSession = imessage.getSessionForSender(sender);
+
+    // Guard: skip if spawn already in progress for this sender
+    if (spawningSenders.has(senderNorm)) {
+      console.log(`[imessage→session] Spawn already in progress for ${senderNorm} — skipping`);
+      return;
+    }
+
+    if (targetSession && sessionManager.isSessionAlive(targetSession)) {
+      // Session alive — inject directly (same as Telegram's injectTelegramMessage path)
+      console.log(`[imessage→session] Injecting into ${targetSession}: "${text.slice(0, 80)}"`);
+      sessionManager.injectIMessageMessage(targetSession, sender, text, senderName);
+      imessage.trackMessageInjection(sender, targetSession, text);
+    } else {
+      // Session dead or missing — spawn with full context (same as Telegram's spawnSessionForTopic)
+      spawningSenders.add(senderNorm);
+
+      // Use a hash of the full sender to avoid collisions (slice(-6) collides easily)
+      const crypto = await import('node:crypto');
+      const senderHash = crypto.createHash('sha1').update(sender.toLowerCase()).digest('hex').slice(0, 8);
+      const sessionName = `im-${senderHash}`;
+      const bootstrapMessage = buildBootstrapMessage(sender, text, senderName);
+
+      // Pass bootstrap as initialMessage — spawnInteractiveSession handles
+      // wait-for-ready and injection internally (same code path as Telegram)
+      sessionManager.spawnInteractiveSession(bootstrapMessage, sessionName)
+        .then((newSession) => {
+          imessage.registerSession(sender, newSession);
+          console.log(`[imessage→session] Spawned "${newSession}" for ${(imessage.constructor as any).maskIdentifier?.(sender) || sender}`);
+        })
+        .catch((err) => {
+          console.error(`[imessage→session] Spawn failed:`, err);
+        })
+        .finally(() => {
+          spawningSenders.delete(senderNorm);
+        });
     }
   });
 }
@@ -2879,6 +3053,43 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }
 
+    // ── iMessage adapter initialization ────────────────────────────────
+    let imessageAdapter: import('../messaging/imessage/IMessageAdapter.js').IMessageAdapter | undefined;
+
+    const imessageConfig = config.messaging?.find(m => m.type === 'imessage' && m.enabled);
+    if (imessageConfig) {
+      try {
+        const { IMessageAdapter } = await import('../messaging/imessage/index.js');
+        imessageAdapter = new IMessageAdapter(imessageConfig.config as Record<string, unknown>, config.stateDir);
+
+        // Wire session routing (following Telegram/WhatsApp pattern)
+        wireIMessageRouting(imessageAdapter, sessionManager);
+
+        // Set agent name for mention-based triggering
+        const imAgentName = (imessageConfig.config as any)?.agentName || config.projectName;
+        if (imAgentName) imessageAdapter.setAgentName(imAgentName);
+
+        await imessageAdapter.start();
+        const triggerInfo = imessageAdapter.getTriggerMode() === 'mention'
+          ? `trigger: @${imAgentName}`
+          : 'trigger: all messages';
+        console.log(pc.green(`  iMessage adapter: connected (${triggerInfo})`));
+        console.log(pc.green('  iMessage message routing: wired'));
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.error(pc.red(`  iMessage init failed: ${reason}`));
+        imessageAdapter = undefined;
+
+        degradationReporter.report({
+          feature: 'iMessage',
+          primary: 'iMessage messaging adapter',
+          fallback: 'Other messaging channels',
+          reason: `iMessage init failed: ${reason}`,
+          impact: 'iMessage messaging unavailable.',
+        });
+      }
+    }
+
     // Initialize SemanticMemory — the knowledge graph that unifies all memory systems.
     // Uses the same better-sqlite3 as TopicMemory; shares the rebuild path.
     let semanticMemory: SemanticMemory | undefined;
@@ -2968,14 +3179,26 @@ export async function startServer(options: StartOptions): Promise<void> {
           // Slack channel-session mappings (use synthetic IDs for compatibility)
           if (_slackAdapter) {
             const registry = _slackAdapter.getChannelRegistry();
+            const runningSessions = sessionManager.listRunningSessions();
             for (const [channelId, entry] of Object.entries(registry)) {
               const syntheticId = slackChannelToSyntheticId(channelId);
-              const sessions = sessionManager.listRunningSessions();
-              const session = sessions.find(s => s.tmuxSession === entry.sessionName);
+              const session = runningSessions.find(s => s.tmuxSession === entry.sessionName);
               enriched.set(syntheticId, {
                 sessionName: entry.sessionName,
                 claudeSessionId: session?.claudeSessionId ?? undefined,
               });
+
+              // Also save to the Slack-specific resume map so that
+              // getChannelResume() finds the UUID on next message.
+              // refreshResumeMappings only writes to topic-resume-map.json
+              // (keyed by synthetic numeric ID), but Slack message handling
+              // reads from slack-channel-resume-map.json (keyed by channel ID).
+              const uuid = session?.claudeSessionId && _topicResumeMap!.jsonlExistsPublic(session.claudeSessionId)
+                ? session.claudeSessionId
+                : (runningSessions.length === 1 ? _topicResumeMap!.findClaudeSessionUuid() : null);
+              if (uuid) {
+                _slackAdapter.saveChannelResume(channelId, uuid, entry.sessionName);
+              }
             }
           }
 
@@ -3411,6 +3634,21 @@ export async function startServer(options: StartOptions): Promise<void> {
             const slackChId = slackProxyChannelMap.get(topicId);
             if (slackChId && _slackAdapter) { await _slackAdapter.sendToChannel(slackChId, message); return; }
             if (telegram) await telegram.sendToTopic(topicId, message);
+          },
+          captureSessionOutput: (name, lines) => {
+            return sessionManager.captureOutput(name, lines);
+          },
+          respawnSessionFresh: async (topicId, _sessionName, recoveryPrompt) => {
+            // Fresh respawn for context exhaustion — explicitly clear resume UUID
+            // so the new session starts clean with telegram history, not --resume.
+            if (_topicResumeMap) {
+              _topicResumeMap.remove(topicId);
+            }
+            if (telegram) {
+              const targetSession = telegram.getSessionForTopic(topicId);
+              if (!targetSession) return;
+              await respawnSessionForTopic(sessionManager, telegram, targetSession, topicId, undefined, topicMemory, undefined, recoveryPrompt, { silent: true });
+            }
           },
         },
       );
@@ -4700,11 +4938,28 @@ export async function startServer(options: StartOptions): Promise<void> {
     const featureRegistry = new FeatureRegistry(config.stateDir, {
       hmacKey: config.authToken || undefined,
     });
-    await featureRegistry.open();
+    let featureRegistryReady = false;
+    try {
+      await featureRegistry.open();
+      featureRegistryReady = true;
+    } catch (frErr: unknown) {
+      const msg = frErr instanceof Error ? frErr.message : String(frErr);
+      console.warn(pc.yellow(`  FeatureRegistry: failed to open (${msg.slice(0, 120)})`));
+      const { DegradationReporter } = await import('../monitoring/DegradationReporter.js');
+      DegradationReporter.getInstance().report({
+        feature: 'FeatureRegistry',
+        primary: 'SQLite-backed feature registry with discovery state tracking',
+        fallback: 'Feature definitions available in-memory only (no persistent state)',
+        reason: `FeatureRegistry open failed: ${msg.slice(0, 200)}`,
+        impact: 'Feature discovery state not persisted. Features default to definitions only.',
+      });
+    }
     for (const def of BUILTIN_FEATURES) {
       featureRegistry.register(def);
     }
-    featureRegistry.bootstrap(config as unknown as Record<string, unknown>);
+    if (featureRegistryReady) {
+      featureRegistry.bootstrap(config as unknown as Record<string, unknown>);
+    }
     {
       const summaries = featureRegistry.getSummaries();
       const enabledCount = summaries.filter((f: { enabled: boolean }) => f.enabled).length;
@@ -4752,7 +5007,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       }, { description: 'Feature discovery state and behavioral contract summary' });
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, listenerManager: listenerManager ?? undefined, responseReviewGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, liveConfig });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, listenerManager: listenerManager ?? undefined, responseReviewGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, liveConfig });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.

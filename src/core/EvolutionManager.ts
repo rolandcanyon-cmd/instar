@@ -740,6 +740,90 @@ export class EvolutionManager {
   }
 
   /**
+   * Verify that implemented proposals left actual file traces in the workspace.
+   *
+   * Inspired by Dawn's lesson-behavior-gap analyzer: proposals marked
+   * "implemented" should have corresponding infrastructure (hooks, scripts,
+   * config entries, code files). Proposals with no detectable traces may be
+   * "phantom implementations" — marked done without actual changes.
+   *
+   * Returns proposals that lack verifiable infrastructure traces.
+   */
+  verifyImplementationTraces(): Array<{
+    id: string;
+    title: string;
+    implementedAt: string;
+    tracesFound: string[];
+    verdict: 'verified' | 'unverified' | 'weak';
+  }> {
+    const evolutionState = this.loadEvolution();
+    const implemented = evolutionState.proposals.filter(
+      (p: EvolutionProposal) => p.status === 'implemented',
+    );
+
+    const results: Array<{
+      id: string;
+      title: string;
+      implementedAt: string;
+      tracesFound: string[];
+      verdict: 'verified' | 'unverified' | 'weak';
+    }> = [];
+
+    // Build search paths
+    const projectDir = this.config.stateDir.replace(/\/.instar\/state$/, '');
+    const searchDirs = [
+      path.join(projectDir, '.instar', 'hooks'),
+      path.join(projectDir, '.instar', 'scripts'),
+      path.join(projectDir, '.claude', 'hooks'),
+      path.join(projectDir, '.claude', 'skills'),
+      path.join(projectDir, '.claude', 'scripts'),
+    ].filter(d => fs.existsSync(d));
+
+    for (const proposal of implemented) {
+      const keywords = this.extractKeywords(proposal.title + ' ' + proposal.description);
+      const traces: string[] = [];
+
+      // Check if any file in infrastructure dirs mentions keywords from the proposal
+      for (const dir of searchDirs) {
+        try {
+          const files = fs.readdirSync(dir, { recursive: true }) as string[];
+          for (const file of files) {
+            const filePath = path.join(dir, String(file));
+            try {
+              const stat = fs.statSync(filePath);
+              if (!stat.isFile()) continue;
+              // Check filename match
+              const fileName = path.basename(String(file)).toLowerCase();
+              const nameKeywords = new Set(fileName.replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 2));
+              const nameOverlap = [...keywords].filter(k => nameKeywords.has(k));
+              if (nameOverlap.length >= 2) {
+                traces.push(`filename:${path.relative(projectDir, filePath)}`);
+              }
+            } catch { /* skip unreadable files */ }
+          }
+        } catch { /* skip unreadable dirs */ }
+      }
+
+      // Check git log for mentions (fast: just search commit messages)
+      // Skip this for performance — file traces are sufficient
+
+      const verdict = traces.length >= 2 ? 'verified'
+        : traces.length === 1 ? 'weak'
+        : 'unverified';
+
+      results.push({
+        id: proposal.id,
+        title: proposal.title,
+        implementedAt: proposal.implementedAt || proposal.proposedAt || '',
+        tracesFound: traces,
+        verdict,
+      });
+    }
+
+    return results;
+  }
+
+  /**
    * Simple keyword overlap matching. Returns the best match if overlap
    * exceeds a threshold, or null if no match is strong enough.
    */
