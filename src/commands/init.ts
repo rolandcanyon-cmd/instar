@@ -3062,6 +3062,12 @@ export function refreshHooksAndSettings(projectDir: string, stateDir: string): v
   refreshClaudeMd(projectDir, stateDir);
   refreshJobs(stateDir);
   refreshScripts(projectDir, stateDir);
+
+  // Deploy any missing built-in skills (e.g., guardian job skills added after initial setup).
+  // installBuiltinSkills is already non-destructive — only writes missing SKILL.md files.
+  const skillsDir = path.join(projectDir, '.claude', 'skills');
+  fs.mkdirSync(skillsDir, { recursive: true });
+  installBuiltinSkills(skillsDir, serverPort ?? 4321);
 }
 
 /**
