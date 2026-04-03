@@ -80,12 +80,30 @@ export class FileHandler {
     const destDir = path.dirname(resolvedPath);
     await fs.promises.mkdir(destDir, { recursive: true });
 
-    // Download with auth header
-    const response = await fetch(url, {
+    // Download with auth header.
+    // Use manual redirect handling to preserve the Authorization header across redirects.
+    // Node.js fetch (undici) strips Authorization on cross-origin redirects per spec,
+    // which causes Slack CDN redirects to return HTML login pages instead of file content.
+    let response = await fetch(url, {
       headers: {
-        'Authorization': `Bearer ${this.botToken}`,
+        Authorization: `Bearer ${this.botToken}`,
       },
+      redirect: 'manual',
     });
+
+    // Follow redirects manually, preserving auth header
+    let redirectCount = 0;
+    while (response.status >= 300 && response.status < 400 && redirectCount < 5) {
+      const location = response.headers.get('location');
+      if (!location) break;
+      response = await fetch(location, {
+        headers: {
+          Authorization: `Bearer ${this.botToken}`,
+        },
+        redirect: 'manual',
+      });
+      redirectCount++;
+    }
 
     if (!response.ok) {
       throw new Error(`[slack-file] Download failed: ${response.status} ${response.statusText}`);

@@ -807,7 +807,8 @@ export class SlackAdapter implements MessagingAdapter {
     const filePaths: string[] = [];
     if (files && files.length > 0) {
       for (const file of files) {
-        const url = file.url_private as string;
+        // Prefer url_private_download (direct download URL) over url_private (preview URL)
+        const url = (file.url_private_download as string) || (file.url_private as string);
         const mimetype = file.mimetype as string ?? '';
         const filename = file.name as string ?? 'file';
         if (!url) continue;
@@ -852,8 +853,8 @@ export class SlackAdapter implements MessagingAdapter {
                 if (content && content.length > 0 && !content.startsWith('<!DOCTYPE')) {
                   textContent = content;
                 }
-              } catch {
-                // files.info failed — fall back to downloaded file
+              } catch (infoErr) {
+                console.warn(`[slack] files.info failed for ${file.id}: ${(infoErr as Error).message}`);
               }
             }
 
@@ -910,6 +911,30 @@ export class SlackAdapter implements MessagingAdapter {
           console.warn(`[slack] Failed to download file ${filename}: ${(err as Error).message}`);
           const isImage = mimetype.startsWith('image/');
           cleanText = cleanText ? `${cleanText} [${isImage ? 'image' : 'document'}:download-failed]` : `[${isImage ? 'image' : 'document'}:download-failed]`;
+        }
+      }
+    }
+
+    // Extract text content from message attachments (unfurled links, rich previews, etc.)
+    // These are separate from files — they contain inline metadata from link unfurling.
+    const attachments = event.attachments as Array<Record<string, unknown>> | undefined;
+    if (attachments && attachments.length > 0) {
+      for (const attachment of attachments) {
+        const attTitle = attachment.title as string ?? '';
+        const attText = attachment.text as string ?? '';
+        const attFallback = attachment.fallback as string ?? '';
+        const attPretext = attachment.pretext as string ?? '';
+        // Combine non-empty fields into a readable block
+        const parts: string[] = [];
+        if (attTitle) parts.push(attTitle);
+        if (attPretext) parts.push(attPretext);
+        if (attText) parts.push(attText);
+        if (parts.length === 0 && attFallback) parts.push(attFallback);
+        if (parts.length > 0) {
+          const attContent = parts.join('\n');
+          cleanText = cleanText
+            ? `${cleanText}\n\n[Attachment: ${attTitle || 'link preview'}]\n${attContent}`
+            : `[Attachment: ${attTitle || 'link preview'}]\n${attContent}`;
         }
       }
     }
