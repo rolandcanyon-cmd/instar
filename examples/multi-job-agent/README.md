@@ -6,41 +6,12 @@ An Instar agent with multiple scheduled jobs, including a frequent health check 
 
 ### `.instar/jobs.json`
 
-```json
-[
-  {
-    "slug": "health-check",
-    "name": "Health Check",
-    "description": "Verify the agent environment is healthy before other work accumulates",
-    "schedule": "*/30 * * * *",
-    "priority": "high",
-    "model": "haiku",
-    "enabled": true,
-    "execute": {
-      "type": "prompt",
-      "value": "Verify the project directory exists, check available disk space, and confirm outbound network connectivity. If anything looks unhealthy, report the issue clearly and suggest the next debugging step."
-    }
-  },
-  {
-    "slug": "daily-review",
-    "name": "Daily Review",
-    "description": "Review local work in progress and summarize what needs attention",
-    "schedule": "0 10 * * 1-5",
-    "priority": "medium",
-    "model": "sonnet",
-    "enabled": true,
-    "grounding": {
-      "requiresIdentity": true,
-      "processesExternalInput": false,
-      "contextFiles": [".instar/AGENT.md"]
-    },
-    "execute": {
-      "type": "prompt",
-      "value": "Review any uncommitted changes in the current project. Summarize what appears to be in progress, call out likely risks, and note the next concrete step to move the work forward."
-    }
-  }
-]
-```
+See [`jobs.json`](./jobs.json) in this directory for the full example configuration.
+
+| Job | Schedule | Priority | Model | Purpose |
+|-----|----------|----------|-------|---------|
+| `health-check` | Every 30 minutes | `high` | `haiku` | Verify the environment is healthy before other work accumulates |
+| `daily-review` | Weekdays at 10:00 | `medium` | `sonnet` | Review local work in progress and summarize what needs attention |
 
 ## Setup
 
@@ -73,4 +44,4 @@ An Instar agent with multiple scheduled jobs, including a frequent health check 
 - Lower the health check frequency if your environment is stable
 - Change the review job prompt to match your team's recurring workflow
 
-> **Full docs:** [Scheduler](https://instar.sh/features/scheduler/) · [Configuration](https://instar.sh/reference/configuration/)
+> **Full docs:** [Scheduler](../../site/src/content/docs/features/scheduler.md) · [Configuration](../../site/src/content/docs/reference/configuration.md)
