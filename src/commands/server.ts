@@ -3641,10 +3641,66 @@ export async function startServer(options: StartOptions): Promise<void> {
           },
           respawnSessionFresh: async (topicId, _sessionName, recoveryPrompt) => {
             // Fresh respawn for context exhaustion — explicitly clear resume UUID
-            // so the new session starts clean with telegram history, not --resume.
+            // so the new session starts clean with history, not --resume.
             if (_topicResumeMap) {
               _topicResumeMap.remove(topicId);
             }
+
+            // Check if this is a Slack channel (synthetic negative topic IDs)
+            const slackChId = slackProxyChannelMap.get(topicId);
+            if (slackChId && _slackAdapter) {
+              // Kill the existing session
+              const session = sessionManager.listRunningSessions().find(s => s.tmuxSession === _sessionName);
+              if (session) sessionManager.killSession(session.id);
+
+              // Clear the channel resume so the new session starts fresh
+              _slackAdapter.removeChannelResume(slackChId);
+
+              // Spawn a fresh session with recovery context
+              await new Promise(resolve => setTimeout(resolve, 2000));
+
+              // Build a recovery bootstrap message with thread history
+              const history = _slackAdapter.getChannelMessages(slackChId, 30);
+              const botUserId = _slackAdapter.getBotUserId?.() ?? null;
+              const lines: string[] = [];
+              lines.push(`[RECOVERY] Previous session hit the context window limit. This is a FRESH restart with thread history.`);
+              if (recoveryPrompt) lines.push(recoveryPrompt);
+              lines.push('');
+              lines.push(`--- Thread History (last ${history.length} messages) ---`);
+              for (const m of history) {
+                const date = new Date(parseFloat(m.ts) * 1000);
+                const time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                const isBot = botUserId && m.user === botUserId;
+                const label = isBot ? 'Agent' : m.user;
+                lines.push(`[${time}] ${label}: ${m.text}`);
+              }
+              lines.push('--- End Thread History ---');
+              lines.push('');
+              lines.push('CRITICAL: You MUST relay your response back to Slack.');
+              lines.push(`cat <<'EOF' | .claude/scripts/slack-reply.sh ${slackChId}`);
+              lines.push('Your response text here');
+              lines.push('EOF');
+
+              const tmpDir = '/tmp/instar-slack';
+              fs.mkdirSync(tmpDir, { recursive: true });
+              const ctxPath = path.join(tmpDir, `recovery-${slackChId}-${Date.now()}.txt`);
+              const contextData = lines.join('\n');
+              fs.writeFileSync(ctxPath, contextData);
+
+              const bootstrapMessage = `[slack:${slackChId}] [RECOVERY] Context exhaustion — session restarted fresh. (IMPORTANT: Read ${ctxPath} for thread history and Slack relay instructions — you MUST relay your response back.)`;
+
+              try {
+                const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage);
+                if (newSessionName) {
+                  _slackAdapter.registerChannelSession(slackChId, newSessionName);
+                  console.log(`[slack→recovery] Fresh session "${newSessionName}" spawned for channel ${slackChId} (context exhaustion recovery)`);
+                }
+              } catch (err) {
+                console.error(`[slack→recovery] Fresh session spawn failed for ${slackChId}: ${err instanceof Error ? err.message : err}`);
+              }
+              return;
+            }
+
             if (telegram) {
               const targetSession = telegram.getSessionForTopic(topicId);
               if (!targetSession) return;
