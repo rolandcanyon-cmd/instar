@@ -479,7 +479,7 @@ describe('PresenceProxy E2E', () => {
       expect(tier3Msg!.text).toContain('unstick');
     });
 
-    it('reports dead session', async () => {
+    it('reports dead session', { timeout: 30000 }, async () => {
       deps.llmResponses = ['Reading.', 'Progress.'];
       deps.aliveSessions.clear(); // Session is dead
       deps.processes = [];
@@ -488,12 +488,41 @@ describe('PresenceProxy E2E', () => {
 
       proxy.onMessageLogged(makeUserMessage(100, 'test'));
 
-      // Dead session should skip to Tier 3 immediately from Tier 1
-      await waitFor(() => deps.sentMessages.length >= 1, { timeoutMs: 3000 });
+      // Dead session skips to Tier 3 from Tier 1, but with retry delays (5s each in fireTier + fireTier3)
+      await waitFor(() => deps.sentMessages.length >= 1, { timeoutMs: 25000 });
 
       const deadMsg = deps.sentMessages.find(m => m.text.includes('stopped'));
       expect(deadMsg).toBeDefined();
       expect(deadMsg!.text).toContain('unstick');
+    });
+
+    it('recovers from transient isSessionAlive false negative', async () => {
+      // Simulate a session that briefly appears dead then comes back alive.
+      // The retry logic should catch this and NOT declare the session dead.
+      deps.llmResponses = ['Analyzing the request.'];
+      let callCount = 0;
+      const config = createMockConfig(tmpDir, deps);
+      const originalIsAlive = config.isSessionAlive;
+      config.isSessionAlive = (name: string) => {
+        callCount++;
+        // First call returns false (transient), subsequent calls return true
+        if (callCount === 1) return false;
+        return originalIsAlive(name);
+      };
+
+      proxy = new PresenceProxy(config);
+      proxy.start();
+
+      proxy.onMessageLogged(makeUserMessage(100, 'test'));
+
+      // Should eventually send a tier 1 message (not a "stopped" message)
+      await waitFor(() => deps.sentMessages.length >= 1, { timeoutMs: 15000 });
+
+      const deadMsg = deps.sentMessages.find(m => m.text.includes('stopped'));
+      expect(deadMsg).toBeUndefined(); // Should NOT have declared dead
+
+      const tier1Msg = deps.sentMessages.find(m => m.metadata?.tier === 1);
+      expect(tier1Msg).toBeDefined(); // Should have proceeded with tier 1
     });
   });
 

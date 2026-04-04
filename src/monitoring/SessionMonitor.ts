@@ -208,29 +208,33 @@ export class SessionMonitor extends EventEmitter {
     // appears "alive" with recent output (the error message itself), so it
     // would be classified as 'healthy' and skip all recovery logic.
     if (alive && currentOutput && this.deps.sessionRecovery) {
-      const ctxCheck = detectContextExhaustion(currentOutput);
-      if (ctxCheck.matched) {
-        console.log(`[SessionMonitor] Context exhaustion detected in topic ${topicId} (pattern: ${ctxCheck.pattern})`);
-        try {
-          const recoveryResult = await this.deps.sessionRecovery.checkAndRecover(topicId, sessionName);
-          this.emit('monitor:mechanical-recovery', { topicId, sessionName, result: recoveryResult });
-          if (recoveryResult.recovered) {
-            console.log(`[SessionMonitor] Context exhaustion recovery succeeded for topic ${topicId}: ${recoveryResult.message}`);
-            snap.status = 'healthy';
-            snap.notifiedAt = now;
-            return;
+      // Skip if we already notified about context exhaustion (prevents spam loop)
+      const alreadyNotified = snap.status === 'dead' && snap.notifiedAt;
+      if (!alreadyNotified) {
+        const ctxCheck = detectContextExhaustion(currentOutput);
+        if (ctxCheck.matched) {
+          console.log(`[SessionMonitor] Context exhaustion detected in topic ${topicId} (pattern: ${ctxCheck.pattern})`);
+          try {
+            const recoveryResult = await this.deps.sessionRecovery.checkAndRecover(topicId, sessionName);
+            this.emit('monitor:mechanical-recovery', { topicId, sessionName, result: recoveryResult });
+            if (recoveryResult.recovered) {
+              console.log(`[SessionMonitor] Context exhaustion recovery succeeded for topic ${topicId}: ${recoveryResult.message}`);
+              snap.status = 'healthy';
+              snap.notifiedAt = now;
+              return;
+            }
+          } catch (err) {
+            console.error(`[SessionMonitor] Context exhaustion recovery error for topic ${topicId}:`, err);
           }
-        } catch (err) {
-          console.error(`[SessionMonitor] Context exhaustion recovery error for topic ${topicId}:`, err);
+          // If recovery failed/not available, notify user ONCE
+          snap.status = 'dead';
+          await this.deps.sendToTopic(topicId,
+            `Session hit "conversation too long" and can't continue. Send a new message to start a fresh session with your recent history.`
+          ).catch(() => {});
+          this.emit('monitor:user-notified', { topicId, message: 'context_exhausted' });
+          snap.notifiedAt = now;
+          return;
         }
-        // If recovery failed/not available, notify user
-        snap.status = 'dead'; // Treat unrecoverable context exhaustion as dead
-        await this.deps.sendToTopic(topicId,
-          `Session hit "conversation too long" and can't continue. Send a new message to start a fresh session with your recent history.`
-        ).catch(() => {});
-        this.emit('monitor:user-notified', { topicId, message: 'context_exhausted' });
-        snap.notifiedAt = now;
-        return;
       }
     }
 

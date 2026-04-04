@@ -18,6 +18,7 @@ import * as crypto from 'crypto';
 import { execSync } from 'child_process';
 import type { IntelligenceProvider, IntelligenceOptions } from '../core/types.js';
 import type { MessageLoggedEvent } from '../messaging/shared/MessagingEventBus.js';
+import { detectContextExhaustion } from './QuotaExhaustionDetector.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -41,6 +42,9 @@ export interface PresenceProxyConfig {
   releaseTriageMutex?: (sessionName: string, holder: string) => void;
   isTriageMutexHeld?: (sessionName: string) => string | null; // returns holder name or null
   triggerManualTriage?: (topicId: number, sessionName: string) => Promise<void>;
+
+  // Optional: context exhaustion auto-recovery
+  recoverContextExhaustion?: (topicId: number, sessionName: string) => Promise<{ recovered: boolean }>;
 
   // Timer config
   tier1DelayMs?: number;       // Default: 20000
@@ -580,9 +584,18 @@ export class PresenceProxy {
     // Rate limit check
     if (!this.checkRateLimit(state)) return;
 
-    // Check session
+    // Check session — retry once after a short delay to avoid transient false negatives.
+    // isSessionAlive can briefly return false during process restarts, compaction, or
+    // pane command transitions. A single false reading should NOT fast-track to "dead."
     const sessionName = state.sessionName;
-    const alive = this.config.isSessionAlive(sessionName);
+    let alive = this.config.isSessionAlive(sessionName);
+
+    if (!alive) {
+      // Wait 5 seconds and recheck before acting on a negative result
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      if (state.cancelled) return; // Agent may have responded during the wait
+      alive = this.config.isSessionAlive(sessionName);
+    }
 
     if (!alive && tier < 3) {
       // Dead session — skip to Tier 3 logic
@@ -787,7 +800,18 @@ export class PresenceProxy {
       this.config.acquireTriageMutex(state.sessionName, 'presence-proxy');
     }
 
-    const alive = this.config.isSessionAlive(state.sessionName);
+    let alive = this.config.isSessionAlive(state.sessionName);
+
+    // Retry once before declaring dead — transient false negatives are common
+    if (!alive) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      if (state.cancelled) {
+        this.config.releaseTriageMutex?.(state.sessionName, 'presence-proxy');
+        return;
+      }
+      alive = this.config.isSessionAlive(state.sessionName);
+    }
+
     const lines = this.config.maxTmuxLines?.t3 ?? 200;
     const raw = alive ? this.config.captureSessionOutput(state.sessionName, lines) : null;
     const snapshot = raw ? sanitizeTmuxOutput(raw, this.config.credentialPatterns) : null;
@@ -804,6 +828,41 @@ export class PresenceProxy {
         state.tier3Assessment = 'waiting';
         state.tier3Summary = quotaMessage;
         await this.sendProxyMessage(topicId, `${this.prefix} 5-minute check — ${quotaMessage}`, 3);
+        this.config.releaseTriageMutex?.(state.sessionName, 'presence-proxy');
+        this.persistState(topicId, state);
+        this.cleanupState(topicId);
+        return;
+      }
+    }
+
+    // ── Context exhaustion: auto-recover before LLM call ──
+    if (snapshot) {
+      const ctxCheck = detectContextExhaustion(snapshot);
+      if (ctxCheck.matched && ctxCheck.confidence === 'high') {
+        if (state.cancelled) {
+          this.config.releaseTriageMutex?.(state.sessionName, 'presence-proxy');
+          return;
+        }
+        if (this.config.recoverContextExhaustion) {
+          const result = await this.config.recoverContextExhaustion(topicId, state.sessionName);
+          if (result.recovered) {
+            state.tier3FiredAt = Date.now();
+            state.tier3Assessment = 'waiting';
+            state.tier3Summary = 'Context exhaustion — auto-recovered';
+            await this.sendProxyMessage(topicId,
+              `🔄 Conversation got too long — starting a fresh session with your recent history.`, 3);
+            this.config.releaseTriageMutex?.(state.sessionName, 'presence-proxy');
+            this.persistState(topicId, state);
+            this.cleanupState(topicId);
+            return;
+          }
+        }
+        // No recovery callback or recovery failed — notify user
+        state.tier3FiredAt = Date.now();
+        state.tier3Assessment = 'dead';
+        state.tier3Summary = 'Conversation too long — session cannot continue';
+        await this.sendProxyMessage(topicId,
+          `${this.prefix} 5-minute check — Session hit "conversation too long" and can't continue. Send a new message to start a fresh session with your recent history.`, 3);
         this.config.releaseTriageMutex?.(state.sessionName, 'presence-proxy');
         this.persistState(topicId, state);
         this.cleanupState(topicId);

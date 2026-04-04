@@ -97,6 +97,7 @@ import { createMessagingProbes } from '../monitoring/probes/MessagingProbe.js';
 import { createLifelineProbes } from '../monitoring/probes/LifelineProbe.js';
 import { createPlatformProbes } from '../monitoring/probes/PlatformProbe.js';
 import { bootstrapThreadline } from '../threadline/ThreadlineBootstrap.js';
+import { createUnifiedTrustSystem, type UnifiedTrustSystem } from '../threadline/UnifiedTrustWiring.js';
 import type { PipelineMessage } from '../types/pipeline.js';
 import { toPipeline, toInjection, toLogEntry, formatHistoryLine } from '../types/pipeline.js';
 import type { Message, IntelligenceProvider, UserProfile, InstarConfig } from '../core/types.js';
@@ -4201,6 +4202,12 @@ export async function startServer(options: StartOptions): Promise<void> {
                 await triageNurse!.triage(topicId, sessionName, '', Date.now(), 'manual');
               }
             : undefined,
+          recoverContextExhaustion: sessionRecovery
+            ? async (topicId, sessionName) => {
+                const result = await sessionRecovery!.checkAndRecover(topicId, sessionName);
+                return { recovered: result.recovered };
+              }
+            : undefined,
         });
 
         // Hook into Telegram's onMessageLogged callback (always active, unlike EventBus which requires a feature flag)
@@ -4802,6 +4809,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     let threadlineHandshake: import('../threadline/HandshakeManager.js').HandshakeManager | undefined;
     let threadlineShutdown: (() => Promise<void>) | undefined;
     let threadlineRelayClient: import('../threadline/client/ThreadlineClient.js').ThreadlineClient | undefined;
+    let unifiedTrust: UnifiedTrustSystem | undefined;
     try {
       const threadline = await bootstrapThreadline({
         agentName: config.projectName,
@@ -4816,6 +4824,19 @@ export async function startServer(options: StartOptions): Promise<void> {
       threadlineHandshake = threadline.handshakeManager;
       threadlineShutdown = threadline.shutdown;
       threadlineRelayClient = threadline.relayClient;
+
+      // Initialize unified trust system (three-layer model + MoltBridge)
+      if (threadline.trustManager) {
+        try {
+          unifiedTrust = createUnifiedTrustSystem(threadline.trustManager, {
+            stateDir: config.stateDir,
+            moltbridge: (config as any).moltbridge,
+          });
+          console.log(`Unified trust system initialized (identity: ${unifiedTrust.identity.get()?.displayFingerprint ?? 'none'})`);
+        } catch (err) {
+          console.error(`Unified trust system init failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+        }
+      }
 
       if (threadlineRelayClient) {
         // Wire relay message delivery through ThreadlineRouter (Phase 1).
@@ -5007,7 +5028,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       }, { description: 'Feature discovery state and behavioral contract summary' });
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, listenerManager: listenerManager ?? undefined, responseReviewGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, liveConfig });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, listenerManager: listenerManager ?? undefined, responseReviewGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, unifiedTrust, liveConfig });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
