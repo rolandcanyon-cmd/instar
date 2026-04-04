@@ -80,6 +80,8 @@ export class SessionMonitor extends EventEmitter {
   private snapshots = new Map<number, SessionSnapshot>();
   private interval: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** Topic-level cooldown for context exhaustion — survives snapshot cleanup */
+  private contextExhaustionCooldowns = new Map<number, number>();
 
   constructor(deps: SessionMonitorDeps, config?: Partial<SessionMonitorConfig>) {
     super();
@@ -208,12 +210,16 @@ export class SessionMonitor extends EventEmitter {
     // appears "alive" with recent output (the error message itself), so it
     // would be classified as 'healthy' and skip all recovery logic.
     if (alive && currentOutput && this.deps.sessionRecovery) {
-      // Skip if we already notified about context exhaustion (prevents spam loop)
-      const alreadyNotified = snap.status === 'dead' && snap.notifiedAt;
-      if (!alreadyNotified) {
+      // Topic-level cooldown survives snapshot cleanup (which happens when sessions die between polls)
+      const lastCtxAction = this.contextExhaustionCooldowns.get(topicId);
+      const ctxCooldownMs = this.config.notificationCooldownMinutes * 60 * 1000;
+      const inCtxCooldown = lastCtxAction && (now - lastCtxAction) < ctxCooldownMs;
+
+      if (!inCtxCooldown) {
         const ctxCheck = detectContextExhaustion(currentOutput);
         if (ctxCheck.matched) {
           console.log(`[SessionMonitor] Context exhaustion detected in topic ${topicId} (pattern: ${ctxCheck.pattern})`);
+          this.contextExhaustionCooldowns.set(topicId, now);
           try {
             const recoveryResult = await this.deps.sessionRecovery.checkAndRecover(topicId, sessionName);
             this.emit('monitor:mechanical-recovery', { topicId, sessionName, result: recoveryResult });

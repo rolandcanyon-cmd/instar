@@ -436,5 +436,49 @@ describe('SessionMonitor', () => {
       // a response — context exhaustion can manifest in alive/idle sessions
       expect(mockRecovery.checkAndRecover).toHaveBeenCalled();
     });
+
+    it('does not spam context exhaustion notifications after snapshot cleanup between polls', async () => {
+      // Regression test: snapshot gets deleted when session dies between polls,
+      // new snapshot has no cooldown state, causing repeated detection + notification.
+      // The topic-level cooldown map must survive snapshot cleanup.
+      const mockRecovery = {
+        checkAndRecover: vi.fn(async () => ({
+          recovered: false,
+          failureType: 'context_exhaustion' as const,
+          message: 'In cooldown',
+        })),
+      };
+
+      deps = createMockDeps({
+        getActiveTopicSessions: vi.fn()
+          // First poll: session is active
+          .mockReturnValueOnce(new Map([[906, 'echo-topic-906']]))
+          // Second poll: session was killed (snapshot cleanup happens)
+          .mockReturnValueOnce(new Map())
+          // Third poll: new session spawned, also context-exhausted
+          .mockReturnValueOnce(new Map([[906, 'echo-topic-906']])),
+        isSessionAlive: vi.fn(() => true),
+        captureSessionOutput: vi.fn(() => 'Error: conversation is too long. Press Escape twice'),
+        sessionRecovery: mockRecovery as any,
+      });
+
+      monitor = new SessionMonitor(deps, {
+        pollIntervalSec: 10,
+        notificationCooldownMinutes: 30,
+      });
+
+      // First poll: detects context exhaustion, sends notification
+      await (monitor as any).poll();
+      expect(mockRecovery.checkAndRecover).toHaveBeenCalledTimes(1);
+      expect(deps.sendToTopic).toHaveBeenCalledTimes(1);
+
+      // Second poll: session is gone, snapshot gets cleaned up
+      await (monitor as any).poll();
+
+      // Third poll: new session active with same error — should NOT re-notify (topic cooldown)
+      await (monitor as any).poll();
+      expect(deps.sendToTopic).toHaveBeenCalledTimes(1); // Still just 1, not 2
+      expect(mockRecovery.checkAndRecover).toHaveBeenCalledTimes(1); // Still just 1
+    });
   });
 });
