@@ -14,10 +14,25 @@
  * - Config is cached at startup — runtime edits don't expand permissions
  * - SessionChannelRegistry maps senders to sessions
  * - StallDetector monitors for unanswered messages
+ *
+ * Immediate Ack Feature:
+ * - Sends a brief text message when a message is received, before session spawn
+ * - Closes the feedback loop within seconds (30-90s session spawn delay otherwise)
+ * - Configurable message text and cooldown period
+ * - Note: Typing indicator (`imsg typing`) was attempted but has limitations:
+ *   - Fails with "Chat not found" even when chat exists in chat.db
+ *   - Chat GUID exists (e.g., "any;-;+14084424360") but imsg can't locate it
+ *   - May require Messages.app to be actively open or newer imsg version
+ *   - Reverted to text message acks as reliable alternative (2026-04-02)
+ *
+ * Version History:
+ * - 2026-04-02: Added immediate text message ack feature
+ * - 2026-04-02: Attempted typing indicator, reverted due to imsg limitations
  */
 
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import type { MessagingAdapter, Message, OutgoingMessage } from '../../core/types.js';
 import { NativeBackend } from './NativeBackend.js';
 import { MessageLogger, type LogEntry } from '../shared/MessageLogger.js';
@@ -72,6 +87,7 @@ export class IMessageAdapter implements MessagingAdapter {
   private receivedMessageIds = new Set<string>();
   private lastInboundFrom = new Map<string, number>();  // normalized contact → timestamp
   private pendingSendTokens = new Map<string, SendToken>();
+  private lastAckTime = new Map<string, number>();  // normalized contact → last ack timestamp
 
   // Callbacks (wired by server.ts)
   onMessageLogged: ((entry: LogEntry) => void) | null = null;
@@ -453,18 +469,26 @@ export class IMessageAdapter implements MessagingAdapter {
 
   /**
    * Check whether an incoming message triggers the agent.
-   * In "mention" mode, requires @{agentName} in the message text.
+   * In "mention" mode, requires @{agentName} in the message text — but only
+   * for group chats. 1:1 conversations always trigger regardless of mode,
+   * because mention gating only makes sense when multiple people are talking.
    * In "all" mode, every message triggers.
    * Returns the stripped text (mention removed) if triggered.
    */
-  _checkTrigger(text: string): { triggered: boolean; strippedText: string } {
+  _checkTrigger(text: string, chatId?: string): { triggered: boolean; strippedText: string } {
     if (this.triggerMode === 'all') {
       return { triggered: true, strippedText: text };
     }
 
-    // Mention mode — require @{agentName}
+    // 1:1 chats always trigger — mention mode only applies to group chats.
+    // iMessage 1:1 chatIds look like phone numbers (+1...) or emails (foo@bar).
+    // Group chats have identifiers like "chat123456789".
+    if (chatId && (chatId.startsWith('+') || chatId.includes('@'))) {
+      return { triggered: true, strippedText: text };
+    }
+
+    // Mention mode for group chats — require @{agentName}
     if (!this.agentName) {
-      // No agent name configured — fall back to triggering on all messages
       return { triggered: true, strippedText: text };
     }
 
@@ -577,7 +601,8 @@ export class IMessageAdapter implements MessagingAdapter {
     this.lastInboundFrom.set(senderNormalized, Date.now());
 
     // Check trigger mode — in "mention" mode, only respond if @agentName is present
-    const triggerResult = this._checkTrigger(msg.text);
+    // (but 1:1 chats always trigger — mention gating is for group chats only)
+    const triggerResult = this._checkTrigger(msg.text, msg.chatId);
     if (!triggerResult.triggered) {
       console.log(`[imessage] Message from ${IMessageAdapter.maskIdentifier(msg.sender)} logged but not triggered (mention mode, no @${this.agentName})`);
       // Still log the message for awareness, just don't route it
@@ -620,6 +645,9 @@ export class IMessageAdapter implements MessagingAdapter {
       raw: msg,
     });
 
+    // Send immediate acknowledgment if enabled
+    this._sendImmediateAck(msg.sender);
+
     // Route to registered message handler
     if (this.messageHandler) {
       const message: Message = {
@@ -642,6 +670,31 @@ export class IMessageAdapter implements MessagingAdapter {
         console.error(`[imessage] Message handler error: ${(err as Error).message}`);
       }
     }
+  }
+
+  private _sendImmediateAck(sender: string): void {
+    const ackConfig = this.config.immediateAck;
+    if (!ackConfig?.enabled) return;
+
+    const cooldown = (ackConfig.cooldownSeconds ?? 30) * 1000;
+    const now = Date.now();
+    const lastAck = this.lastAckTime.get(sender) ?? 0;
+
+    if (now - lastAck < cooldown) return;
+
+    this.lastAckTime.set(sender, now);
+
+    const cliPath = this.config.cliPath ?? 'imsg';
+    const message = ackConfig.message ?? 'Got it, thinking...';
+
+    // Send brief text ack (non-blocking)
+    execFile(cliPath, ['send', '--to', sender, '--text', message, '--service', 'imessage'], (err) => {
+      if (err) {
+        console.error(`[imessage] Immediate ack failed: ${err.message}`);
+      } else {
+        console.log(`[imessage] Sent immediate ack to ${IMessageAdapter.maskIdentifier(sender)}: "${message}"`);
+      }
+    });
   }
 
   private _trackReceivedId(messageId: string): void {
