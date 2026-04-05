@@ -1860,7 +1860,14 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.red(`  Port conflict: ${err instanceof Error ? err.message : err}`));
       process.exit(1);
     }
-    const stopHeartbeat = startHeartbeat(config.projectDir);
+    let stopHeartbeat: (() => void) | undefined;
+    try {
+      stopHeartbeat = startHeartbeat(config.projectDir);
+    } catch (err) {
+      // Registry heartbeat is non-critical — server should run without it.
+      // ELOCKED errors from concurrent agent startups are transient.
+      console.log(pc.yellow(`  Registry heartbeat failed to start (non-critical): ${err instanceof Error ? err.message : err}`));
+    }
 
     // Warn if no auth token configured — server allows unauthenticated access
     if (!config.authToken) {
@@ -5473,7 +5480,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       sessionMonitor?.stop();
       if (tunnel) await tunnel.stop();
       if (threadlineShutdown) await threadlineShutdown();
-      stopHeartbeat();
+      stopHeartbeat?.();
       unregisterAgent(config.projectDir);
       scheduler?.stop();
       if (telegram) await telegram.stop();

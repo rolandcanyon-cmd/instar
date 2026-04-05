@@ -667,6 +667,38 @@ function resolveNodeCandidates(): string[] {
 }
 
 /**
+ * Pick the most durable node path from candidates.
+ *
+ * Prefers stable, non-versioned paths (e.g. /opt/homebrew/bin/node) over
+ * version-specific paths (e.g. /opt/homebrew/opt/node@20/bin/node) because
+ * version-specific paths disappear when that version is uninstalled — causing
+ * the symlink to break and the agent to become unrecoverable.
+ */
+function pickDurableNodePath(candidates: string[]): string | undefined {
+  // Stable paths that survive version switches (ordered by preference)
+  const stablePrefixes = [
+    '/opt/homebrew/bin/',        // Apple Silicon homebrew — updated by `brew upgrade`
+    '/usr/local/bin/',           // Intel homebrew / manual installs
+  ];
+
+  // Version-specific patterns that should be avoided
+  const versionSpecificPattern = /node@\d|\/Cellar\/node\/|\/\.asdf\/installs\/|\/\.nvm\/versions\//;
+
+  // First pass: find a stable, non-versioned path
+  for (const prefix of stablePrefixes) {
+    const match = candidates.find(c => c.startsWith(prefix) && !versionSpecificPattern.test(c));
+    if (match && fs.existsSync(match)) return match;
+  }
+
+  // Second pass: any candidate that isn't version-specific
+  const nonVersioned = candidates.find(c => !versionSpecificPattern.test(c) && fs.existsSync(c));
+  if (nonVersioned) return nonVersioned;
+
+  // Last resort: any valid candidate
+  return candidates.find(c => fs.existsSync(c));
+}
+
+/**
  * Create or update a stable node symlink at .instar/bin/node.
  *
  * The plist references this symlink instead of a hardcoded node path.
@@ -678,16 +710,19 @@ function resolveNodeCandidates(): string[] {
 export function ensureStableNodeSymlink(projectDir: string): string {
   const binDir = path.join(projectDir, '.instar', 'bin');
   const symlinkPath = path.join(binDir, 'node');
-  const nodePath = findNodePath();
 
   fs.mkdirSync(binDir, { recursive: true });
 
-  // Check if symlink exists and is valid
+  // Resolve all available node paths and pick the most durable one
+  const candidates = resolveNodeCandidates();
+  const durablePath = pickDurableNodePath(candidates) ?? findNodePath();
+
+  // Check if symlink exists and already points to a valid, durable target
   try {
     const target = fs.readlinkSync(symlinkPath);
     if (fs.existsSync(target)) {
-      // Symlink exists and points to a valid node — update only if we found a newer/better one
-      if (target === nodePath) return symlinkPath;
+      // Symlink works — only update if we found a more durable path
+      if (target === durablePath) return symlinkPath;
     }
   } catch { /* symlink doesn't exist or is broken */ }
 
@@ -695,13 +730,12 @@ export function ensureStableNodeSymlink(projectDir: string): string {
   try {
     fs.unlinkSync(symlinkPath);
   } catch { /* didn't exist */ }
-  fs.symlinkSync(nodePath, symlinkPath);
+  fs.symlinkSync(durablePath, symlinkPath);
 
   // Also write the candidate list for the JS boot wrapper's fallback logic
-  const candidates = resolveNodeCandidates();
   fs.writeFileSync(
     path.join(binDir, 'node-candidates.json'),
-    JSON.stringify({ primary: nodePath, candidates, updatedAt: new Date().toISOString() }, null, 2),
+    JSON.stringify({ primary: durablePath, candidates, updatedAt: new Date().toISOString() }, null, 2),
   );
 
   return symlinkPath;
@@ -886,39 +920,55 @@ const NODE_SYMLINK = ${JSON.stringify(path.join(nodeSymlinkDir, 'node'))};
 const NODE_CANDIDATES_FILE = ${JSON.stringify(nodeCandidatesFile)};
 
 // ── Self-heal node symlink ──
-// Update the stable node symlink to point at the node binary that's
-// currently running us. This ensures the NEXT launchd restart will work
-// even if node moved (NVM switch, homebrew upgrade) since the last boot.
+// Update the stable node symlink to point at the most durable node binary.
+// Prefers stable, non-versioned paths (e.g. /opt/homebrew/bin/node) over
+// version-specific paths (e.g. /opt/homebrew/opt/node@20/bin/node) because
+// version-specific paths disappear when that version is uninstalled.
 function selfHealNodeSymlink() {
   try {
     const currentNode = process.execPath;
     const symlinkDir = path.dirname(NODE_SYMLINK);
     fs.mkdirSync(symlinkDir, { recursive: true });
 
-    // Check if symlink already points to current node
-    try {
-      const target = fs.readlinkSync(NODE_SYMLINK);
-      if (target === currentNode) return; // already correct
-    } catch { /* broken or missing — will recreate */ }
-
-    // Update symlink
-    try { fs.unlinkSync(NODE_SYMLINK); } catch { /* didn't exist */ }
-    fs.symlinkSync(currentNode, NODE_SYMLINK);
-
-    // Update candidates file for diagnostics
+    // Build candidate list
     const candidates = [currentNode];
     const wellKnown = ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node'];
     for (const p of wellKnown) {
       if (p !== currentNode && fs.existsSync(p)) candidates.push(p);
     }
+
+    // Pick the most durable path — prefer stable, non-versioned paths
+    const versionPattern = /node@\\d|\\/Cellar\\/node\\/|\\.asdf\\/installs\\/|\\.nvm\\/versions\\//;
+    const stablePrefixes = ['/opt/homebrew/bin/', '/usr/local/bin/'];
+    let best = currentNode;
+    for (const prefix of stablePrefixes) {
+      const match = candidates.find(c => c.startsWith(prefix) && !versionPattern.test(c) && fs.existsSync(c));
+      if (match) { best = match; break; }
+    }
+    if (versionPattern.test(best)) {
+      const nonVersioned = candidates.find(c => !versionPattern.test(c) && fs.existsSync(c));
+      if (nonVersioned) best = nonVersioned;
+    }
+
+    // Check if symlink already points to the best candidate
+    try {
+      const target = fs.readlinkSync(NODE_SYMLINK);
+      if (target === best) return; // already optimal
+    } catch { /* broken or missing — will recreate */ }
+
+    // Update symlink
+    try { fs.unlinkSync(NODE_SYMLINK); } catch { /* didn't exist */ }
+    fs.symlinkSync(best, NODE_SYMLINK);
+
+    // Update candidates file for diagnostics
     fs.writeFileSync(NODE_CANDIDATES_FILE, JSON.stringify({
-      primary: currentNode,
+      primary: best,
       candidates: candidates,
       updatedAt: new Date().toISOString(),
       updatedBy: 'instar-boot.js',
     }, null, 2));
 
-    process.stderr.write('[instar-boot] Node symlink self-healed: ' + NODE_SYMLINK + ' -> ' + currentNode + '\\n');
+    process.stderr.write('[instar-boot] Node symlink self-healed: ' + NODE_SYMLINK + ' -> ' + best + '\\n');
   } catch (err) {
     // Non-fatal — symlink update is best-effort
     process.stderr.write('[instar-boot] Node symlink self-heal failed (non-critical): ' + err.message + '\\n');
@@ -1066,6 +1116,20 @@ ${argsXml}
     fs.mkdirSync(launchAgentsDir, { recursive: true });
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(plistPath, plist);
+
+    // Validate the plist is well-formed XML before loading.
+    // A corrupted plist means launchd can't restart the agent after crashes,
+    // which turns transient failures into permanently dead agents.
+    try {
+      execFileSync('plutil', ['-lint', plistPath], { stdio: 'pipe' });
+    } catch (err) {
+      const stderr = err instanceof Error && 'stderr' in err ? String((err as any).stderr) : '';
+      console.error(`[setup] CRITICAL: Generated plist failed validation: ${stderr}`);
+      console.error(`[setup] Plist path: ${plistPath}`);
+      // Remove the invalid plist so we don't leave a landmine
+      try { fs.unlinkSync(plistPath); } catch { /* best effort */ }
+      return false;
+    }
 
     // Load the agent
     try {

@@ -269,7 +269,10 @@ export class TelegramLifeline {
       process.exit(0); // Clean exit — launchd will restart after ThrottleInterval, acting as a watchdog
     }
 
-    // Register in agent registry (lifeline entry — uses project dir + "-lifeline" suffix)
+    // Register in agent registry (lifeline entry — uses project dir + "-lifeline" suffix).
+    // Registry operations are NON-CRITICAL — the lifeline must survive ELOCKED errors
+    // from concurrent agent startups or stale locks. A dead lifeline means the agent
+    // becomes permanently unreachable and unrecoverable.
     try {
       registerAgent(
         this.projectConfig.projectDir + '-lifeline',
@@ -277,7 +280,11 @@ export class TelegramLifeline {
         this.projectConfig.port + 1000, // Lifeline uses port + 1000 to avoid conflict
       );
     } catch { /* non-critical */ }
-    this.stopHeartbeat = startHeartbeat(this.projectConfig.projectDir + '-lifeline');
+    try {
+      this.stopHeartbeat = startHeartbeat(this.projectConfig.projectDir + '-lifeline');
+    } catch (err) {
+      console.error(`[Lifeline] Registry heartbeat failed to start (non-critical): ${err instanceof Error ? err.message : err}`);
+    }
 
     // Ensure Lifeline topic exists (auto-recreate if deleted)
     this.lifelineTopicId = await this.ensureLifelineTopic();
