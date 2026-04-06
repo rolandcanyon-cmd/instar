@@ -7855,6 +7855,7 @@ export function createRoutes(ctx: RouteContext): Router {
             const isAutoAck = textContent.startsWith('Message received.') || textContent.startsWith('Message received,');
             const waiter = ctx.threadlineReplyWaiters.get(senderAgent);
             if (waiter && !isAutoAck) {
+              console.log(`[relay-agent] Resolved reply waiter for ${senderAgent}`);
               waiter.resolve(textContent);
             }
           }
