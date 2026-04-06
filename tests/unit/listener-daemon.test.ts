@@ -286,22 +286,34 @@ describe('ThreadResumeMap cross-machine migration', () => {
   let projectDir: string;
 
   // Create mock JSONL files so ThreadResumeMap.get() doesn't return null
+  let mockProjectDir: string | null = null;
   function createMockJsonl(uuid: string): void {
     const homeDir = os.homedir();
     const claudeProjectsDir = path.join(homeDir, '.claude', 'projects');
-    // Find any existing project dir to create the mock in
+
+    // Find an existing project dir, or create a temporary one (e.g. on CI)
+    let targetDir: string;
     if (fs.existsSync(claudeProjectsDir)) {
       const dirs = fs.readdirSync(claudeProjectsDir).filter(d =>
         fs.statSync(path.join(claudeProjectsDir, d)).isDirectory()
       );
       if (dirs.length > 0) {
-        const mockPath = path.join(claudeProjectsDir, dirs[0], `${uuid}.jsonl`);
-        if (!fs.existsSync(mockPath)) {
-          fs.writeFileSync(mockPath, '{"mock": true}\n');
-          // Clean up after test
-          afterEach(() => { try { fs.unlinkSync(mockPath); } catch { /* ignore */ } });
-        }
+        targetDir = path.join(claudeProjectsDir, dirs[0]);
+      } else {
+        targetDir = path.join(claudeProjectsDir, '_instar-test-mock');
+        fs.mkdirSync(targetDir, { recursive: true });
+        mockProjectDir = targetDir;
       }
+    } else {
+      targetDir = path.join(claudeProjectsDir, '_instar-test-mock');
+      fs.mkdirSync(targetDir, { recursive: true });
+      mockProjectDir = targetDir;
+    }
+
+    const mockPath = path.join(targetDir, `${uuid}.jsonl`);
+    if (!fs.existsSync(mockPath)) {
+      fs.writeFileSync(mockPath, '{"mock": true}\n');
+      afterEach(() => { try { fs.unlinkSync(mockPath); } catch { /* ignore */ } });
     }
   }
 
@@ -313,6 +325,10 @@ describe('ThreadResumeMap cross-machine migration', () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (mockProjectDir && fs.existsSync(mockProjectDir)) {
+      fs.rmSync(mockProjectDir, { recursive: true, force: true });
+      mockProjectDir = null;
+    }
   });
 
   it('supports machineOrigin and migratedTo fields', async () => {
