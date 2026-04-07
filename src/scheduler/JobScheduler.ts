@@ -217,8 +217,17 @@ export class JobScheduler {
       }
     }
 
-    // Check for missed jobs — any enabled job overdue by >1.5x its interval
-    this.checkMissedJobs(scopedJobs);
+    // Check for missed jobs — any enabled job overdue by >1.5x its interval.
+    // Delay the first evaluation by startupGraceMs (default 5s) so the HTTP
+    // server is ready before health-check gates run.  Without this, gate
+    // checks fail on startup and jobs wait for the next cron window.
+    const graceMs = this.config.startupGraceMs ?? 5000;
+    if (graceMs > 0) {
+      console.log(`[scheduler] Startup grace period: ${graceMs}ms before missed-job evaluation`);
+      setTimeout(() => this.checkMissedJobs(scopedJobs), graceMs);
+    } else {
+      this.checkMissedJobs(scopedJobs);
+    }
 
     // Ensure every job has a Telegram topic (job-topic coupling)
     if (this.telegram) {

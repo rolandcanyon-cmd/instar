@@ -211,6 +211,9 @@ export interface JobSchedulerConfig {
     /** Above this: no jobs */
     shutdown: number;
   };
+  /** Grace period (ms) before first missed-job evaluation, allowing HTTP server to start.
+   *  Defaults to 5000ms. Set to 0 to disable. */
+  startupGraceMs?: number;
 }
 
 // ── User Management ─────────────────────────────────────────────────
