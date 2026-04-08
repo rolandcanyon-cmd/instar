@@ -67,6 +67,15 @@ export class JobScheduler {
   /** Map session names to run IDs for completion tracking */
   private activeRunIds: Map<string, string> = new Map();
 
+  /** Retry state for skipped jobs: slug → { retries, lastAttempt, timer } */
+  private retryState: Map<string, { retries: number; timer: ReturnType<typeof setTimeout> }> = new Map();
+
+  /** Max retries before giving up within a single scheduled window */
+  private static readonly MAX_RETRIES = 5;
+
+  /** Base retry delay in ms (doubles each attempt: 30s, 60s, 120s, 240s, 480s) */
+  private static readonly BASE_RETRY_DELAY_MS = 30_000;
+
   /** Local machine identity — used for machine-scoped job filtering */
   private machineId: string | null = null;
   private machineName: string | null = null;
@@ -209,6 +218,8 @@ export class JobScheduler {
     for (const job of scopedJobs) {
       try {
         const task = new Cron(job.schedule, () => {
+          // New cron window — reset retry state so we get fresh attempts
+          this.clearRetryState(job.slug);
           this.triggerJob(job.slug, 'scheduled');
         });
         this.cronTasks.set(job.slug, task);
@@ -254,6 +265,11 @@ export class JobScheduler {
     }
     this.cronTasks.clear();
     this.queue = [];
+    // Clear all retry timers
+    for (const [, state] of this.retryState) {
+      if (state.timer) clearTimeout(state.timer);
+    }
+    this.retryState.clear();
     this.running = false;
 
     this.state.appendEvent({
@@ -311,12 +327,14 @@ export class JobScheduler {
         timestamp: new Date().toISOString(),
         metadata: { slug, reason, priority: job.priority },
       });
+      this.scheduleRetry(slug, 'quota');
       return 'skipped';
     }
 
     // Run gate command if configured — zero-token pre-screening
     if (job.gate) {
       if (!this.runGate(job)) {
+        this.scheduleRetry(slug, 'gate');
         return 'skipped';
       }
     }
@@ -336,6 +354,9 @@ export class JobScheduler {
         console.error(`[scheduler] Failed to broadcast claim for "${slug}": ${err}`);
       });
     }
+
+    // Clear retry state on successful trigger
+    this.clearRetryState(slug);
 
     this.spawnJobSession(job, reason);
     return 'triggered';
@@ -1080,6 +1101,50 @@ export class JobScheduler {
         metadata: { slug: job.slug, exitCode, stderr: stderr.slice(0, 500), gate: gateCmd },
       });
       return false;
+    }
+  }
+
+  /**
+   * Schedule a retry for a transiently-skipped job.
+   * Uses exponential backoff: 30s, 60s, 120s, 240s, 480s.
+   * Gives up after MAX_RETRIES within a single scheduled window.
+   */
+  private scheduleRetry(slug: string, skipReason: string): void {
+    const state = this.retryState.get(slug);
+    const retries = state ? state.retries : 0;
+
+    if (retries >= JobScheduler.MAX_RETRIES) {
+      console.log(`[scheduler] Job "${slug}" exhausted ${JobScheduler.MAX_RETRIES} retries (last skip: ${skipReason}) — waiting for next cron window`);
+      return;
+    }
+
+    // Clear any existing retry timer
+    if (state?.timer) clearTimeout(state.timer);
+
+    const delayMs = JobScheduler.BASE_RETRY_DELAY_MS * Math.pow(2, retries);
+    const nextRetry = retries + 1;
+
+    console.log(`[scheduler] Job "${slug}" skipped (${skipReason}) — retry ${nextRetry}/${JobScheduler.MAX_RETRIES} in ${Math.round(delayMs / 1000)}s`);
+
+    const timer = setTimeout(() => {
+      if (!this.running || this.paused) return;
+      const job = this.jobs.find(j => j.slug === slug);
+      if (!job || !job.enabled) return;
+      console.log(`[scheduler] Retrying job "${slug}" (attempt ${nextRetry})`);
+      this.triggerJob(slug, `retry:${skipReason}`);
+    }, delayMs);
+
+    this.retryState.set(slug, { retries: nextRetry, timer });
+  }
+
+  /**
+   * Clear retry state for a job (on success or new cron window).
+   */
+  private clearRetryState(slug: string): void {
+    const state = this.retryState.get(slug);
+    if (state) {
+      if (state.timer) clearTimeout(state.timer);
+      this.retryState.delete(slug);
     }
   }
 
