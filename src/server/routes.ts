@@ -4596,7 +4596,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const { title, markdown, pin } = req.body;
+    const { title, markdown, pin, metadata } = req.body;
     if (!title || typeof title !== 'string' || title.length > 256) {
       res.status(400).json({ error: '"title" must be a string under 256 characters' });
       return;
@@ -4613,8 +4613,19 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"pin" must be a string between 4 and 32 characters' });
       return;
     }
+    // Validate metadata if provided
+    if (metadata !== undefined && (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata))) {
+      res.status(400).json({ error: '"metadata" must be an object' });
+      return;
+    }
+    if (metadata?.source) {
+      if (typeof metadata.source !== 'object' || !metadata.source.type || !metadata.source.id) {
+        res.status(400).json({ error: '"metadata.source" must have "type" and "id" strings' });
+        return;
+      }
+    }
 
-    const view = ctx.viewer.create(title, markdown, pin);
+    const view = ctx.viewer.create(title, markdown, pin, metadata);
 
     res.status(201).json({
       id: view.id,
@@ -4704,13 +4715,25 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const views = ctx.viewer.list().map(v => ({
+    let allViews = ctx.viewer.list();
+
+    // Filter by source if provided (e.g. ?source=job:coherence-audit)
+    const source = _req.query.source as string | undefined;
+    if (source && source.includes(':')) {
+      const [sourceType, sourceId] = source.split(':', 2);
+      allViews = allViews.filter(v =>
+        v.metadata?.source?.type === sourceType && v.metadata?.source?.id === sourceId
+      );
+    }
+
+    const views = allViews.map(v => ({
       id: v.id,
       title: v.title,
       localUrl: `/view/${v.id}`,
       tunnelUrl: viewTunnelUrl(v.id),
       createdAt: v.createdAt,
       updatedAt: v.updatedAt,
+      metadata: v.metadata,
     }));
     res.json({ views });
   });

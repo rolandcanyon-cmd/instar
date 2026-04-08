@@ -650,6 +650,15 @@ export class JobScheduler {
       }
     }
 
+    // Inject view metadata instruction so job-created reports are linked
+    const viewMetaBlock = [
+      '[VIEW METADATA]',
+      `When creating private views (POST /view), include metadata to link the report to this job:`,
+      `  "metadata": { "source": { "type": "job", "id": "${job.slug}" } }`,
+      '[/VIEW METADATA]',
+    ].join('\n');
+    base = `${viewMetaBlock}\n\n${base}`;
+
     // Inject handoff notes from the last execution (continuity between runs)
     const handoff = this.runHistory.getLastHandoff(job.slug);
     if (handoff) {
