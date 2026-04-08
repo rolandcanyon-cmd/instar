@@ -8,28 +8,14 @@
 
 ## What Changed
 
-<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
-<!-- Write this for the AGENT — they need to understand the system deeply. -->
+Fixed 8 CI test failures across trust wiring, quota tracking, config validation, and job scheduler edge cases. UnifiedTrustWiring now handles missing threadline config gracefully. Quota tracker tests updated for consistent warning/failure threshold assertions. Config tests aligned with current schema defaults. Job scheduler edge case test fixed for timing sensitivity. Builtin manifest updated to reflect current version.
 
 ## What to Tell Your User
 
-<!-- Write talking points the agent should relay to their user. -->
-<!-- This should be warm, conversational, user-facing — not a changelog. -->
-<!-- Focus on what THEY can now do, not internal plumbing. -->
-<!--                                                                    -->
-<!-- PROHIBITED in this section (will fail validation):                 -->
-<!--   camelCase config keys: silentReject, maxRetries, telegramNotify -->
-<!--   Inline code backtick references like silentReject: false        -->
-<!--   Fenced code blocks                                              -->
-<!--   Instructions to edit files or run commands                      -->
-<!--                                                                    -->
-<!-- CORRECT style: "I can turn that on for you" not "set X to false"  -->
-<!-- The agent relays this to their user — keep it human.              -->
-
-- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
+- **Stability improvements**: "Under-the-hood reliability fixes — nothing you need to do, everything just works more consistently now."
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| [Capability] | [Endpoint, command, or "automatic"] |
+| Improved trust wiring resilience | Automatic — threadline config failures no longer cascade |
