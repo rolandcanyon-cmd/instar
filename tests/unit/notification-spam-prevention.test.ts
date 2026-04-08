@@ -454,7 +454,7 @@ describe('Job quiet mode (on-alert)', () => {
     expect(prompt).not.toContain('NOTIFICATION PROTOCOL');
   });
 
-  it('cleans up stale topic mappings for on-alert jobs on startup', async () => {
+  it('preserves explicitly-configured topicId for on-alert jobs', async () => {
     const mockTelegram = {
       sendToTopic: vi.fn().mockResolvedValue(undefined),
       findOrCreateForumTopic: vi.fn().mockResolvedValue({ topicId: 42, name: 'test', reused: false }),
@@ -462,28 +462,48 @@ describe('Job quiet mode (on-alert)', () => {
     };
     scheduler.setTelegram(mockTelegram as unknown as TelegramAdapter);
 
-    // Simulate stale topic mappings from before on-alert was the default
-    state.set('job-topic-mappings', { 'stale-job': 777 });
-
-    // Inject an on-alert job (undefined telegramNotify) with the stale topicId
+    // Job has an explicitly-configured topicId — should NOT be closed
     injectJobs([{ slug: 'stale-job', name: 'Stale Job', topicId: 777 }]);
 
-    // Call ensureJobTopics (private, via start)
     const ensureJobTopics = (scheduler as unknown as {
       ensureJobTopics: (jobs: JobDefinition[]) => Promise<void>;
     }).ensureJobTopics;
     const jobs = (scheduler as unknown as { jobs: JobDefinition[] }).jobs;
     await ensureJobTopics.call(scheduler, jobs);
 
-    // Should have closed the stale topic
+    // Should NOT close explicitly-configured topics
+    expect(mockTelegram.closeForumTopic).not.toHaveBeenCalled();
+
+    // topicId should be preserved
+    expect(jobs[0].topicId).toBe(777);
+  });
+
+  it('cleans up dynamically-created topic mappings for on-alert jobs', async () => {
+    const mockTelegram = {
+      sendToTopic: vi.fn().mockResolvedValue(undefined),
+      findOrCreateForumTopic: vi.fn().mockResolvedValue({ topicId: 42, name: 'test', reused: false }),
+      closeForumTopic: vi.fn().mockResolvedValue(true),
+    };
+    scheduler.setTelegram(mockTelegram as unknown as TelegramAdapter);
+
+    // Simulate stale dynamic mapping (no explicit topicId on job)
+    state.set('job-topic-mappings', { 'stale-job': 777 });
+
+    // Job without explicit topicId — the mapping is from a previous dynamic creation
+    injectJobs([{ slug: 'stale-job', name: 'Stale Job' }]);
+
+    const ensureJobTopics = (scheduler as unknown as {
+      ensureJobTopics: (jobs: JobDefinition[]) => Promise<void>;
+    }).ensureJobTopics;
+    const jobs = (scheduler as unknown as { jobs: JobDefinition[] }).jobs;
+    await ensureJobTopics.call(scheduler, jobs);
+
+    // Should close the dynamically-created stale topic
     expect(mockTelegram.closeForumTopic).toHaveBeenCalledWith(777);
 
     // Should have removed the mapping
     const mappings = state.get<Record<string, number>>('job-topic-mappings');
     expect(mappings?.['stale-job']).toBeUndefined();
-
-    // Should have cleared the topicId on the job
-    expect(jobs[0].topicId).toBeUndefined();
   });
 
   it('does NOT clean up topics for telegramNotify: true jobs', async () => {

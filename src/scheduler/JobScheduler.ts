@@ -973,24 +973,34 @@ export class JobScheduler {
     // Load existing topic mappings
     const mappings = this.state.get<Record<string, number>>('job-topic-mappings') ?? {};
 
+    // Collect all explicitly-configured topicIds so we never close a topic
+    // that another job is actively using.
+    const explicitTopicIds = new Set<number>();
+    for (const j of enabledJobs) {
+      if (j.topicId) explicitTopicIds.add(j.topicId);
+    }
+
     for (const job of enabledJobs) {
       // Skip eager topic creation for silent or on-alert jobs.
       // On-alert jobs get topics created lazily when they first have something to report.
       const mode = this.getNotifyMode(job);
       if (mode === 'never' || mode === 'on-alert') {
-        // Clean up stale topic mappings from before on-alert was the default.
-        // Older versions created topics eagerly for ALL jobs. Close and remove them.
-        const staleTopicId = job.topicId || mappings[job.slug];
-        if (staleTopicId) {
-          console.log(`[scheduler] Cleaning up stale topic for on-alert job "${job.slug}" (topic ${staleTopicId})`);
-          try {
-            await this.telegram.closeForumTopic(staleTopicId);
-          } catch {
-            // @silent-fallback-ok — topic may already be closed or deleted, cleanup is best-effort
+        // Clean up dynamically-created topic mappings (not explicitly configured).
+        // Only remove mappings — don't close topics that may be shared or explicitly set.
+        const dynamicTopicId = mappings[job.slug];
+        if (dynamicTopicId && !job.topicId) {
+          // Only close if no other job explicitly uses this topic
+          if (!explicitTopicIds.has(dynamicTopicId)) {
+            console.log(`[scheduler] Cleaning up stale dynamic topic for on-alert job "${job.slug}" (topic ${dynamicTopicId})`);
+            try {
+              await this.telegram.closeForumTopic(dynamicTopicId);
+            } catch {
+              // @silent-fallback-ok — topic may already be closed or deleted
+            }
           }
           delete mappings[job.slug];
-          job.topicId = undefined;
         }
+        // Never clear an explicitly-configured topicId — the job definition owns it
         continue;
       }
 
