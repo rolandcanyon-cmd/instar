@@ -74,8 +74,7 @@
     ".claude/skills/secret-setup",
     ".claude/skills/autonomous",
     ".claude/skills/build",
-    ".claude/hooks",
-    ".claude/settings.json"
+    ".claude/hooks"
   ],
   "license": "MIT",
   "engines": {
