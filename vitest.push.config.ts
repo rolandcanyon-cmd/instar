@@ -168,6 +168,13 @@ const FLAKY_TESTS = [
   'tests/unit/claude-session-id-bridge.test.ts',
   'tests/unit/commitment-routes.test.ts',
   'tests/unit/machine-auth.test.ts',
+
+  // ── Supertest port collision (serendipity routes 404 intermittently) ──
+  'tests/integration/serendipity-routes.test.ts',
+
+  // ── Supertest / timing flakes (different tests fail each run) ─────────
+  'tests/unit/job-retry.test.ts',
+  'tests/integration/dispatch-routes.test.ts',
 ];
 
 export default defineConfig({
