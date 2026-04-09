@@ -643,6 +643,58 @@ export function createFileRoutes(options: { config: InstarConfig; liveConfig?: {
     });
   });
 
+  // ── GET /api/files/download ──────────────────────────────────────
+
+  router.get('/api/files/download', async (req: Request, res: Response) => {
+    const requestedPath = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    const validation = await validatePath(requestedPath, projectDir, config);
+    if (!validation.valid) {
+      res.status(validation.status || 403).json({ error: validation.error });
+      return;
+    }
+
+    const blocked = checkBlockedFilename(requestedPath, config);
+    if (blocked) {
+      res.status(403).json({ error: blocked });
+      return;
+    }
+
+    const absPath = validation.resolvedPath!;
+
+    try {
+      const stat = await fs.promises.stat(absPath);
+      if (stat.isDirectory()) {
+        res.status(400).json({ error: 'Cannot download a directory' });
+        return;
+      }
+
+      if (stat.size > config.maxFileSize) {
+        res.status(413).json({ error: 'File too large', size: stat.size, maxSize: config.maxFileSize });
+        return;
+      }
+
+      const filename = path.basename(absPath);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '\\"')}"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', stat.size);
+
+      const stream = fs.createReadStream(absPath);
+      stream.pipe(res);
+      stream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to stream file' });
+        }
+      });
+    } catch {
+      res.status(500).json({ error: 'Failed to download file' });
+    }
+  });
+
   // ── GET /api/files/link ─────────────────────────────────────────
   // Phase 3: Generate a deep link URL for a file in the dashboard
 
