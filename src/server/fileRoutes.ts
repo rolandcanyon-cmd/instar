@@ -112,6 +112,8 @@ async function validatePath(
   const normalizedClean = stripTrailing(normalized);
   const allowed = config.allowedPaths.some(ap => {
     const normalizedAllowed = stripTrailing(path.normalize(ap));
+    // '.' means project root — allow everything within the project
+    if (normalizedAllowed === '.') return true;
     return normalizedClean === normalizedAllowed ||
            normalizedClean.startsWith(normalizedAllowed + '/');
   });
@@ -135,6 +137,8 @@ async function validatePath(
     const relativAfterResolve = path.relative(realProjectDir, realPath);
     const allowedAfterResolve = config.allowedPaths.some(ap => {
       const normalizedAllowed = path.normalize(ap);
+      // '.' means project root — allow everything within the project
+      if (normalizedAllowed === '.' || normalizedAllowed === './') return true;
       return relativAfterResolve === normalizedAllowed.replace(/\/$/, '') ||
              relativAfterResolve.startsWith(normalizedAllowed.endsWith('/') ? normalizedAllowed : normalizedAllowed + '/') ||
              // Handle exact match with the allowed path itself (e.g. listing .claude/)
