@@ -1082,30 +1082,46 @@ export class JobScheduler {
   /**
    * Run a job's gate command. Returns true if the job should proceed, false to skip.
    * Gates are zero-token pre-screening — a bash command that exits 0 (proceed) or non-zero (skip).
+   * Retries up to 3 times with 5s delay to handle transient failures (e.g., server restart windows).
    */
   private runGate(job: JobDefinition): boolean {
-    try {
-      execFileSync('/bin/sh', ['-c', job.gate!], {
-        encoding: 'utf-8',
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      return true;
-    } catch (err: unknown) {
-      // Gate non-zero exit means skip — but capture diagnostics
-      const stderr = (err as { stderr?: string })?.stderr?.trim() || '';
-      const exitCode = (err as { status?: number })?.status ?? null;
-      const gateCmd = job.gate!.length > 200 ? job.gate!.slice(0, 200) + '…' : job.gate!;
+    const maxAttempts = 3;
+    const retryDelayMs = 5000;
+    let lastErr: unknown;
 
-      this.skipLedger.recordSkip(job.slug, 'gate');
-      this.state.appendEvent({
-        type: 'job_gate_skip',
-        summary: `Job "${job.slug}" skipped — gate returned exit ${exitCode}${stderr ? `: ${stderr.slice(0, 200)}` : ''}`,
-        timestamp: new Date().toISOString(),
-        metadata: { slug: job.slug, exitCode, stderr: stderr.slice(0, 500), gate: gateCmd },
-      });
-      return false;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        execFileSync('/bin/sh', ['-c', job.gate!], {
+          encoding: 'utf-8',
+          timeout: 10000,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        if (attempt > 1) {
+          console.log(`[scheduler] Gate for "${job.slug}" passed on attempt ${attempt}/${maxAttempts}`);
+        }
+        return true;
+      } catch (err: unknown) {
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          console.log(`[scheduler] Gate for "${job.slug}" failed (attempt ${attempt}/${maxAttempts}), retrying in ${retryDelayMs / 1000}s...`);
+          try { execFileSync('/bin/sleep', [String(retryDelayMs / 1000)], { stdio: 'ignore' }); } catch { /* ignore */ }
+        }
+      }
     }
+
+    // All attempts failed
+    const stderr = (lastErr as { stderr?: string })?.stderr?.trim() || '';
+    const exitCode = (lastErr as { status?: number })?.status ?? null;
+    const gateCmd = job.gate!.length > 200 ? job.gate!.slice(0, 200) + '…' : job.gate!;
+
+    this.skipLedger.recordSkip(job.slug, 'gate');
+    this.state.appendEvent({
+      type: 'job_gate_skip',
+      summary: `Job "${job.slug}" skipped — gate returned exit ${exitCode} after ${maxAttempts} attempts${stderr ? `: ${stderr.slice(0, 200)}` : ''}`,
+      timestamp: new Date().toISOString(),
+      metadata: { slug: job.slug, exitCode, stderr: stderr.slice(0, 500), gate: gateCmd, attempts: maxAttempts },
+    });
+    return false;
   }
 
   /**
