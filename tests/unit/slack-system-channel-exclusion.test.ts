@@ -112,12 +112,17 @@ describe('SlackAdapter system channel exclusion', () => {
     expect(adapter.isSystemChannel('C_RANDOM')).toBe(false);
   });
 
-  it('refuses to register sessions for system channels', () => {
+  it('allows registering sessions for system channels (prevents infinite respawn)', () => {
+    // System channels MUST be able to register sessions.  Previously, registration
+    // was blocked for system channels which caused every @mention to spawn a new
+    // session (the old dead session was found, respawned, but never saved to the
+    // map — so the next message repeated the cycle infinitely).
     const { adapter } = createTestAdapter();
 
-    adapter.registerChannelSession(DASHBOARD_CHANNEL, 'test-session');
+    adapter.registerChannelSession(LIFELINE_CHANNEL, 'test-session');
     const registry = adapter.getChannelRegistry();
-    expect(registry[DASHBOARD_CHANNEL]).toBeUndefined();
+    expect(registry[LIFELINE_CHANNEL]).toBeDefined();
+    expect(registry[LIFELINE_CHANNEL].sessionName).toBe('test-session');
   });
 
   it('allows registering sessions for normal channels', () => {

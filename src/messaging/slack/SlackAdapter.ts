@@ -448,10 +448,10 @@ export class SlackAdapter implements MessagingAdapter {
 
   /** Register a channel → session binding. Persisted to disk. */
   registerChannelSession(channelId: string, sessionName: string, channelName?: string): void {
-    if (this.isSystemChannel(channelId)) {
-      console.warn(`[slack] Refusing to register session for system channel ${channelId}`);
-      return;
-    }
+    // System channels are allowed: _handleMessage already gates what gets
+    // through (only @mentions from authorized users).  Refusing to register
+    // here caused infinite session spawning — every new message found the
+    // old dead session, respawned, but never saved the mapping.
     this.channelToSession.set(channelId, {
       sessionName,
       channelName,

@@ -294,7 +294,7 @@ export class QuotaManager extends EventEmitter {
       respawnJob: async (slug) => {
         // Resume scheduler momentarily to allow the trigger
         sched.resume();
-        const result = sched.triggerJob(slug, 'migration-respawn');
+        const result = await sched.triggerJob(slug, 'migration-respawn');
         if (result === 'skipped') {
           console.log(`[QuotaManager] Respawn ${slug} skipped (quota/gate check failed)`);
         }
