@@ -232,6 +232,42 @@ export function createFileRoutes(options: { config: InstarConfig; liveConfig?: {
 
     // If no path specified, return the root allowed directories
     if (!requestedPath) {
+      // If allowedPaths includes './' (project root), list the project directory directly
+      const hasProjectRoot = config.allowedPaths.some(ap => {
+        const normalized = path.normalize(ap).replace(/\/$/, '');
+        return normalized === '.';
+      });
+
+      if (hasProjectRoot) {
+        // List the project root directory contents directly
+        try {
+          const dirEntries = await fs.promises.readdir(projectDir, { withFileTypes: true });
+          const sorted = dirEntries.sort((a, b) => {
+            const aDir = a.isDirectory() ? 0 : 1;
+            const bDir = b.isDirectory() ? 0 : 1;
+            if (aDir !== bDir) return aDir - bDir;
+            return a.name.localeCompare(b.name);
+          });
+          const entries: Array<{ name: string; type: string; size?: number; modified?: string }> = [];
+          for (const entry of sorted.slice(0, 500)) {
+            if (isBlockedFilename(entry.name, config.blockedFilenames)) continue;
+            if (entry.isDirectory()) {
+              entries.push({ name: entry.name, type: 'directory' });
+            } else if (entry.isFile() || entry.isSymbolicLink()) {
+              try {
+                const entryAbsPath = path.join(projectDir, entry.name);
+                const entryStat = await fs.promises.stat(entryAbsPath);
+                entries.push({ name: entry.name, type: 'file', size: entryStat.size, modified: entryStat.mtime.toISOString() });
+              } catch { /* skip */ }
+            }
+          }
+          res.json({ path: '', entries });
+        } catch {
+          res.status(500).json({ error: 'Failed to list project root' });
+        }
+        return;
+      }
+
       const roots: Array<{ name: string; type: string }> = [];
       for (const ap of config.allowedPaths) {
         const normalizedAp = path.normalize(ap).replace(/\/$/, '');
