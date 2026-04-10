@@ -26,7 +26,9 @@ export class UrlValidityReviewer extends CoherenceReviewer {
 
     const toolContext = context.toolOutputContext
       ? `Recent tool output (for URL cross-referencing):\n${context.toolOutputContext}`
-      : 'No tool output context available.';
+      : context.isExternalFacing
+        ? 'No tool output context available. This is an EXTERNAL-FACING message — any URL not in the canonical registry that cannot be verified from tool output should be flagged with "block" severity.'
+        : 'No tool output context available.';
 
     const canonicalContext = context.canonicalStateContext
       ? `\nCanonical registry (verified ground truth — known project URLs and deployment targets):\n${context.canonicalStateContext}\n`

@@ -23,7 +23,9 @@ export class ClaimProvenanceReviewer extends CoherenceReviewer {
 
     const toolContext = context.toolOutputContext
       ? `Recent tool output (for cross-referencing claims):\n${context.toolOutputContext}`
-      : 'No tool output context available. Evaluate based on language patterns only and use "warn" rather than "block" severity.';
+      : context.isExternalFacing
+        ? 'No tool output context available. This is an EXTERNAL-FACING message. Any specific factual claim (URL, status code, metric, file state) without tool output backing is suspicious — use "block" severity for concrete claims and "warn" for softer assertions.'
+        : 'No tool output context available. Evaluate based on language patterns only and use "warn" rather than "block" severity.';
 
     const canonicalContext = context.canonicalStateContext
       ? `\nCanonical registry (verified ground truth — claims about projects, URLs, or facts that contradict this registry are likely fabricated):\n${context.canonicalStateContext}\n`
