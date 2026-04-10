@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import pc from 'picocolors';
 // @inquirer/prompts imported dynamically — requires Node 20.12+
-import { detectTmuxPath, detectClaudePath } from './Config.js';
+import { detectTmuxPath, detectClaudePath, detectGhPath } from './Config.js';
 
 export interface PrerequisiteResult {
   name: string;
@@ -182,6 +182,44 @@ function claudeInstallInfo(): { hint: string; canAutoInstall: boolean; command: 
 }
 
 /**
+ * Build install hint and command for GitHub CLI based on platform.
+ * gh enables: cloud-backed agent discovery, git sync to github backups,
+ * CI status checks, and PR/issue management. Without it, instar still
+ * works but loses these capabilities.
+ */
+function ghInstallInfo(): { hint: string; canAutoInstall: boolean; command?: string; needsHomebrew?: boolean } {
+  const platform = detectPlatform();
+  switch (platform) {
+    case 'macos-arm':
+    case 'macos-intel':
+      if (hasHomebrew()) {
+        return {
+          hint: 'Install with: brew install gh',
+          canAutoInstall: true,
+          command: 'brew install gh',
+        };
+      }
+      return {
+        hint: 'Install Homebrew first (https://brew.sh), then: brew install gh',
+        canAutoInstall: true,
+        command: 'brew install gh',
+        needsHomebrew: true,
+      };
+    case 'linux':
+      return {
+        hint: 'Install with: sudo apt install gh (Debian/Ubuntu) or see https://cli.github.com/',
+        canAutoInstall: true,
+        command: 'sudo apt install -y gh',
+      };
+    default:
+      return {
+        hint: 'Install GitHub CLI: https://cli.github.com/',
+        canAutoInstall: false,
+      };
+  }
+}
+
+/**
  * Check all prerequisites and return a structured result.
  */
 export function checkPrerequisites(): PrerequisiteCheck {
@@ -224,6 +262,19 @@ export function checkPrerequisites(): PrerequisiteCheck {
     installHint: claudeInfo.hint,
     canAutoInstall: claudeInfo.canAutoInstall,
     installCommand: claudeInfo.command,
+  });
+
+  // 4. GitHub CLI (gh) — needed for cloud-backed agent discovery and git sync
+  const ghPath = detectGhPath();
+  const ghInfo = ghInstallInfo();
+  results.push({
+    name: 'GitHub CLI',
+    found: !!ghPath,
+    path: ghPath || undefined,
+    installHint: ghInfo.hint,
+    canAutoInstall: ghInfo.canAutoInstall,
+    installCommand: ghInfo.command,
+    needsHomebrew: ghInfo.needsHomebrew,
   });
 
   const missing = results.filter(r => !r.found);

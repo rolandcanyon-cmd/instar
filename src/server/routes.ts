@@ -8004,14 +8004,27 @@ export function createRoutes(ctx: RouteContext): Router {
           }
         }
 
-        // If the message has a threadId and we have a ThreadlineRouter,
-        // route it through the threadline pipeline for session resume/spawn.
-        if (ctx.threadlineRouter && envelope.message?.threadId) {
-          // Fire-and-forget — the relay is already accepted, threadline handling
-          // is best-effort for session management.
-          ctx.threadlineRouter.handleInboundMessage(envelope).catch(err => {
+        // If we have a ThreadlineRouter, route the message through it for
+        // session resume/spawn. We AWAIT the result so callers learn the real
+        // outcome (spawned / resumed / injected / handled:false). The message
+        // has already been accepted into the inbox, so we don't alter the HTTP
+        // status unless the router throws.
+        if (ctx.threadlineRouter) {
+          try {
+            const threadlineResult = await ctx.threadlineRouter.handleInboundMessage(envelope);
+            res.json({ ok: true, threadline: threadlineResult });
+            return;
+          } catch (err) {
             console.error('[routes] ThreadlineRouter handling error:', err);
-          });
+            res.json({
+              ok: true,
+              threadline: {
+                handled: false,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              },
+            });
+            return;
+          }
         }
         res.json({ ok: true });
       } else {
@@ -8632,7 +8645,20 @@ export function createRoutes(ctx: RouteContext): Router {
                 });
 
                 if (localResp.ok) {
-                  console.log(`[relay-send] Local delivery to ${localTarget.name}:${localTarget.port} (thread: ${effectiveThreadId})`);
+                  let localRespBody: { ok?: boolean; threadline?: {
+                    handled?: boolean; spawned?: boolean; resumed?: boolean; injected?: boolean;
+                    threadId?: string; sessionName?: string; error?: string; gateDecision?: string;
+                  } } = {};
+                  try { localRespBody = await localResp.json() as typeof localRespBody; } catch { /* no body */ }
+                  const tl = localRespBody.threadline;
+                  const outcome = tl?.injected ? 'injected into live session'
+                    : tl?.spawned ? 'spawned new session'
+                    : tl?.resumed ? 'resumed existing thread'
+                    : tl?.gateDecision === 'queue-for-approval' ? 'queued for approval'
+                    : tl?.error ? `error: ${tl.error}`
+                    : tl?.handled === false ? 'queued (no live session)'
+                    : 'accepted';
+                  console.log(`[relay-send] Local delivery to ${localTarget.name}:${localTarget.port} (thread: ${effectiveThreadId}) — ${outcome}`);
 
                   if (waitForReply) {
                     const reply = await waitForThreadlineReply(ctx, localTarget.name, effectiveThreadId, timeoutSeconds);
@@ -8642,6 +8668,8 @@ export function createRoutes(ctx: RouteContext): Router {
                       threadId: effectiveThreadId,
                       resolvedAgent: localTarget.name,
                       deliveryPath: 'local',
+                      deliveryOutcome: outcome,
+                      threadline: tl,
                       reply,
                     });
                   } else {
@@ -8651,6 +8679,8 @@ export function createRoutes(ctx: RouteContext): Router {
                       threadId: effectiveThreadId,
                       resolvedAgent: localTarget.name,
                       deliveryPath: 'local',
+                      deliveryOutcome: outcome,
+                      threadline: tl,
                     });
                   }
                   return;

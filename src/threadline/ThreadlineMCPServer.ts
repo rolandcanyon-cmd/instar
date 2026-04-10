@@ -88,6 +88,10 @@ export interface SendMessageResult {
   reply?: string;
   replyFrom?: string;
   error?: string;
+  /** Human-readable delivery outcome (e.g. "spawned new session", "resumed existing thread", "queued (no live session)") */
+  deliveryOutcome?: string;
+  /** How the message was delivered (local, relay) */
+  deliveryPath?: string;
 }
 
 export interface ThreadHistoryMessage {
@@ -418,7 +422,12 @@ export class ThreadlineMCPServer {
           }
 
           const response: Record<string, unknown> = {
-            delivered: true,
+            // `delivered` was previously a lie — we did not wait for the
+            // recipient to actually handle the message. We now report the
+            // true outcome from the recipient (or "accepted" if unknown).
+            delivered: Boolean(result.deliveryOutcome && !result.deliveryOutcome.startsWith('error')),
+            outcome: result.deliveryOutcome ?? 'accepted',
+            deliveryPath: result.deliveryPath,
             threadId: result.threadId,
             messageId: result.messageId,
           };

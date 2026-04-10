@@ -9,8 +9,8 @@ describe('Prerequisites', () => {
   it('returns structured results for all checks', () => {
     const result = checkPrerequisites();
 
-    expect(result.results).toHaveLength(3);
-    expect(result.results.map(r => r.name)).toEqual(['Node.js', 'tmux', 'Claude CLI']);
+    expect(result.results).toHaveLength(4);
+    expect(result.results.map(r => r.name)).toEqual(['Node.js', 'tmux', 'Claude CLI', 'GitHub CLI']);
 
     // Each result has the expected shape
     for (const r of result.results) {

@@ -86,13 +86,18 @@ async function sendMessageViaHttp(
     });
 
     if (relayResponse.ok) {
-      const result = await relayResponse.json() as { success: boolean; messageId: string; threadId: string; reply?: string; error?: string };
+      const result = await relayResponse.json() as {
+        success: boolean; messageId: string; threadId: string; reply?: string; error?: string;
+        deliveryOutcome?: string; deliveryPath?: string;
+      };
       if (result.success) {
         return {
           success: true,
           threadId: result.threadId,
           messageId: result.messageId,
           reply: result.reply ?? undefined,
+          deliveryOutcome: result.deliveryOutcome,
+          deliveryPath: result.deliveryPath,
         };
       }
     }
