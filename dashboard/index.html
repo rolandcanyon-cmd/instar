@@ -3738,9 +3738,11 @@
       return langMap[ext] || null;
     }
 
-    async function apiFetch(url) {
+    async function apiFetch(url, options = {}) {
+      const { headers: extraHeaders = {}, ...rest } = options;
       const resp = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${token}` },
+        headers: { 'Authorization': `Bearer ${token}`, ...extraHeaders },
+        ...rest,
       });
       if (!resp.ok) {
         const data = await resp.json().catch(() => ({}));
