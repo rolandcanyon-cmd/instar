@@ -34,6 +34,7 @@ import type { CapabilityRegistry, CommonBlocker } from './types.js';
 import { ResearchRateLimiter } from './ResearchRateLimiter.js';
 import { RecipientResolver, type RecipientContext } from './RecipientResolver.js';
 import { CustomReviewerLoader } from './CustomReviewerLoader.js';
+import { CanonicalState } from './CanonicalState.js';
 import type { ResponseReviewConfig, ChannelReviewConfig } from './types.js';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -149,6 +150,7 @@ export class CoherenceGate {
   private reviewHistory: AuditLogEntry[] = [];
   private proposals: ReviewProposal[] = [];
   private researchRateLimiter: ResearchRateLimiter;
+  private canonicalState: CanonicalState;
   private onResearchTriggered?: (context: ResearchTriggerContext) => void;
   private static RETENTION_DAYS = 30;
 
@@ -157,6 +159,7 @@ export class CoherenceGate {
     this.stateDir = options.stateDir;
     this.onResearchTriggered = options.onResearchTriggered;
     this.researchRateLimiter = new ResearchRateLimiter({ stateDir: options.stateDir });
+    this.canonicalState = new CanonicalState({ stateDir: path.join(options.stateDir, 'state') });
 
     // Initialize PEL
     this.pel = new PolicyEnforcementLayer(options.stateDir);
@@ -278,6 +281,9 @@ export class CoherenceGate {
     // ── Step 5: Load value documents (cached) ────────────────────
     const valueDocs = this.loadValueDocs();
 
+    // ── Step 5b: Load canonical state for fact-checking ───────────
+    const canonicalStateContext = this.loadCanonicalStateContext();
+
     // ── Step 6: Build review context ─────────────────────────────
     const reviewCtx: EscalationReviewContext = {
       message,
@@ -295,6 +301,7 @@ export class CoherenceGate {
         formality: recipientContext.formality,
         themes: recipientContext.themes,
       } : undefined,
+      canonicalStateContext: canonicalStateContext || undefined,
       capabilityRegistry: context.capabilityRegistry,
       autonomyLevel: context.autonomyLevel,
       jobBlockers: context.jobBlockers,
@@ -766,6 +773,45 @@ export class CoherenceGate {
 
     this.valueDocCache = { agentValues, userValues, orgValues, loadedAt: Date.now() };
     return this.valueDocCache;
+  }
+
+  /**
+   * Load canonical state context for fact-checking reviewers.
+   * Returns a compact summary of known projects, URLs, and facts
+   * that reviewers can cross-reference against agent claims.
+   */
+  private loadCanonicalStateContext(): string | null {
+    try {
+      const projects = this.canonicalState.getProjects();
+      const facts = this.canonicalState.getQuickFacts();
+
+      if (projects.length === 0 && facts.length === 0) return null;
+
+      const lines: string[] = [];
+
+      if (projects.length > 0) {
+        lines.push('Known projects (from canonical registry):');
+        for (const p of projects) {
+          const parts = [`  - ${p.name}`];
+          if (p.dir) parts.push(`dir: ${p.dir}`);
+          if (p.deploymentTargets?.length) parts.push(`deploys: ${p.deploymentTargets.join(', ')}`);
+          if (p.gitRemote) parts.push(`git: ${p.gitRemote}`);
+          lines.push(parts.join(' | '));
+        }
+      }
+
+      if (facts.length > 0) {
+        lines.push('');
+        lines.push('Known facts (from canonical registry):');
+        for (const f of facts.slice(0, 10)) {
+          lines.push(`  - Q: ${f.question} → A: ${f.answer}`);
+        }
+      }
+
+      return lines.join('\n');
+    } catch {
+      return null;
+    }
   }
 
   /**

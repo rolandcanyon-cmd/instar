@@ -43,6 +43,8 @@ export interface ReviewContext {
   trustLevel?: string;
   /** Relationship context (communicationStyle, formality - no free-text fields) */
   relationshipContext?: { communicationStyle?: string; formality?: string; themes?: string[] };
+  /** Canonical state context — known projects, URLs, facts from CanonicalState registry */
+  canonicalStateContext?: string;
 }
 
 export interface ReviewerOptions {
