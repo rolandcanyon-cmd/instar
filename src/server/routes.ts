@@ -351,6 +351,15 @@ export function createRoutes(ctx: RouteContext): Router {
       if (ctx.systemReviewer) {
         const latest = ctx.systemReviewer.getLatest();
         const health = ctx.systemReviewer.getHealthStatus();
+        const failedProbes = latest
+          ? latest.results.filter(r => !r.passed).map(r => ({
+              probeId: r.probeId,
+              name: r.name,
+              tier: r.tier,
+              error: r.error,
+              remediation: r.remediation,
+            }))
+          : [];
         base.systemReview = {
           status: health,
           lastReview: latest ? {
@@ -361,6 +370,8 @@ export function createRoutes(ctx: RouteContext): Router {
             skipped: latest.stats.skipped,
           } : null,
           probesRegistered: ctx.systemReviewer.getProbeCount(),
+          failedProbes,
+          detailsUrl: '/system-reviews/latest',
         };
         // Contribute to overall degradation if critical
         if (latest?.status === 'critical') {
@@ -8317,6 +8328,35 @@ export function createRoutes(ctx: RouteContext): Router {
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Review failed' });
     }
+  });
+
+  // Alias for discoverability: agents commonly look for /health/probes or /system-review
+  router.get('/health/probes', (_req, res) => {
+    if (!ctx.systemReviewer) {
+      res.status(503).json({ error: 'SystemReviewer not available' });
+      return;
+    }
+    const latest = ctx.systemReviewer.getLatest();
+    if (!latest) {
+      res.json({ message: 'No reviews yet', probes: [] });
+      return;
+    }
+    res.json({
+      timestamp: latest.timestamp,
+      status: latest.status,
+      stats: latest.stats,
+      probes: latest.results,
+      skipped: latest.skipped,
+    });
+  });
+
+  router.get('/system-review', (_req, res) => {
+    if (!ctx.systemReviewer) {
+      res.status(503).json({ error: 'SystemReviewer not available' });
+      return;
+    }
+    const latest = ctx.systemReviewer.getLatest();
+    res.json(latest ?? { message: 'No reviews yet' });
   });
 
   router.get('/system-reviews/latest', (_req, res) => {
