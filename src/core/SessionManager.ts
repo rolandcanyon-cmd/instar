@@ -55,6 +55,10 @@ const DEFAULT_MAX_DURATION_MINUTES = 240;
 /** Minutes of idle-at-prompt before a non-protected session is killed */
 const IDLE_PROMPT_KILL_MINUTES = 15;
 
+/** Fallback constants — used when config values are not set */
+const FALLBACK_MAX_DURATION_MINUTES = DEFAULT_MAX_DURATION_MINUTES;
+const FALLBACK_IDLE_PROMPT_KILL_MINUTES = IDLE_PROMPT_KILL_MINUTES;
+
 /** Patterns that indicate Claude is sitting at its idle prompt (not actively working) */
 const IDLE_PROMPT_PATTERNS = [
   'bypass permissions on',
@@ -158,6 +162,16 @@ export class SessionManager extends EventEmitter {
     super();
     this.config = config;
     this.state = state;
+  }
+
+  /** Effective idle-at-prompt kill threshold (config override or hardcoded default) */
+  private get effectiveIdleKillMinutes(): number {
+    return this.config.idlePromptKillMinutes ?? FALLBACK_IDLE_PROMPT_KILL_MINUTES;
+  }
+
+  /** Effective absolute max session duration (config override or hardcoded default) */
+  private get effectiveMaxDurationMinutes(): number {
+    return this.config.defaultMaxDurationMinutes ?? FALLBACK_MAX_DURATION_MINUTES;
   }
 
   /**
@@ -409,7 +423,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
         // Uses explicit maxDurationMinutes if set, otherwise falls back to
         // DEFAULT_MAX_DURATION_MINUTES as an absolute safety net.
         if (session.startedAt) {
-          const maxMinutes = session.maxDurationMinutes || DEFAULT_MAX_DURATION_MINUTES;
+          const maxMinutes = session.maxDurationMinutes || this.effectiveMaxDurationMinutes;
           const elapsed = (Date.now() - new Date(session.startedAt).getTime()) / 60000;
           const buffer = Math.min(maxMinutes * 0.2, 60); // 20% buffer, max 60 min
           const limit = maxMinutes + buffer;
@@ -502,7 +516,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
               }
             } else {
               const idleMs = now - this.idlePromptSince.get(session.id)!;
-              if (idleMs > IDLE_PROMPT_KILL_MINUTES * 60_000) {
+              if (idleMs > this.effectiveIdleKillMinutes * 60_000) {
                 // Veto: active compaction recovery in flight — skip kill and
                 // reset the idle clock so we don't race the recovery window.
                 if (this.activeRecoveryChecker && this.activeRecoveryChecker(session)) {
@@ -1032,7 +1046,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
       const ageMinutes = s.startedAt
         ? Math.round((now - new Date(s.startedAt).getTime()) / 60000)
         : 0;
-      const maxDuration = s.maxDurationMinutes || DEFAULT_MAX_DURATION_MINUTES;
+      const maxDuration = s.maxDurationMinutes || this.effectiveMaxDurationMinutes;
 
       // A session is stale if it's exceeded its expected duration
       let isStale = false;
@@ -1312,7 +1326,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
       tmuxSession,
       startedAt: new Date().toISOString(),
       prompt: initialMessage,
-      maxDurationMinutes: DEFAULT_MAX_DURATION_MINUTES,
+      maxDurationMinutes: this.effectiveMaxDurationMinutes,
     };
     this.state.saveSession(session);
 
