@@ -498,10 +498,22 @@ export type SkipReason =
   | 'disabled'        // Job has enabled: false
   | 'paused'          // Scheduler is paused
   | 'quota'           // Quota constraints
+  | 'memory-pressure' // Memory gate blocked the job (distinct from quota)
   | 'capacity'        // No available session slots (queued instead of skipped, but tracked)
   | 'claimed'         // Another machine already claimed this job (Phase 4C — Gap 5)
   | 'machine-scope'   // Job is scoped to a different machine
   | 'gate';           // Gate command returned non-zero (nothing to do)
+
+/**
+ * Result of a canRunJob gate check. The callback may return a plain boolean
+ * (legacy) or this richer form so the scheduler can log/track the actual
+ * gating reason instead of always reporting 'quota'.
+ */
+export interface CanRunJobResult {
+  allowed: boolean;
+  reason?: SkipReason;
+  detail?: string;
+}
 
 export interface SkipEvent {
   slug: string;

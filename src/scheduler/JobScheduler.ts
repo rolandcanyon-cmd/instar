@@ -25,7 +25,7 @@ import { classifySessionDeath } from '../monitoring/QuotaExhaustionDetector.js';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
-import type { IntelligenceProvider, MessagingAdapter, SkipReason } from '../core/types.js';
+import type { CanRunJobResult, IntelligenceProvider, MessagingAdapter, SkipReason } from '../core/types.js';
 import { TOPIC_STYLE } from '../messaging/TelegramAdapter.js';
 import type { JobDefinition, JobSchedulerConfig, JobState, JobPriority } from '../core/types.js';
 import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
@@ -87,8 +87,12 @@ export class JobScheduler {
   private machineId: string | null = null;
   private machineName: string | null = null;
 
-  /** Callback to check if quota allows running a job at the given priority */
-  canRunJob: (priority: JobPriority) => boolean = () => true;
+  /**
+   * Callback to check if a job at the given priority may run.
+   * May return a plain boolean (legacy) or a CanRunJobResult so the
+   * scheduler can record the actual gating reason (memory vs quota vs gate).
+   */
+  canRunJob: (priority: JobPriority) => boolean | CanRunJobResult = () => true;
 
   /** Optional messenger for sending job notifications */
   private messenger: MessagingAdapter | null = null;
@@ -326,16 +330,21 @@ export class JobScheduler {
     }
 
     // Script jobs bypass quota gating — they don't consume LLM tokens
-    if (job.execute.type !== 'script' && !this.canRunJob(job.priority)) {
-      this.skipLedger.recordSkip(slug, 'quota');
-      this.state.appendEvent({
-        type: 'job_skipped',
-        summary: `Job "${slug}" skipped — quota check failed`,
-        timestamp: new Date().toISOString(),
-        metadata: { slug, reason, priority: job.priority },
-      });
-      this.scheduleRetry(slug, 'quota');
-      return 'skipped';
+    if (job.execute.type !== 'script') {
+      const gateResult = this.normalizeCanRunResult(this.canRunJob(job.priority));
+      if (!gateResult.allowed) {
+        const skipReason: SkipReason = gateResult.reason ?? 'quota';
+        const detail = gateResult.detail ? ` (${gateResult.detail})` : '';
+        this.skipLedger.recordSkip(slug, skipReason);
+        this.state.appendEvent({
+          type: 'job_skipped',
+          summary: `Job "${slug}" skipped — ${skipReason}${detail}`,
+          timestamp: new Date().toISOString(),
+          metadata: { slug, reason, priority: job.priority, gateReason: skipReason, gateDetail: gateResult.detail },
+        });
+        this.scheduleRetry(slug, skipReason);
+        return 'skipped';
+      }
     }
 
     // Run gate command if configured — zero-token pre-screening (async, non-blocking)
@@ -403,7 +412,8 @@ export class JobScheduler {
     const job = this.jobs.find(j => j.slug === next.slug);
     if (!job) return;
 
-    if (!this.canRunJob(job.priority)) {
+    const queueGate = this.normalizeCanRunResult(this.canRunJob(job.priority));
+    if (!queueGate.allowed) {
       // Re-add to front of queue — don't silently drop
       this.queue.unshift(next);
       return;
@@ -1128,6 +1138,16 @@ export class JobScheduler {
       metadata: { slug: job.slug, exitCode, stderr: stderr.slice(0, 500), gate: gateCmd, attempts: maxAttempts },
     });
     return false;
+  }
+
+  /**
+   * Normalize the canRunJob callback's result. Older wrappers return a bare
+   * boolean; newer ones return { allowed, reason, detail } so the scheduler
+   * can record WHY a job was gated (memory pressure vs quota etc.).
+   */
+  private normalizeCanRunResult(result: boolean | CanRunJobResult): CanRunJobResult {
+    if (typeof result === 'boolean') return { allowed: result };
+    return result;
   }
 
   /**

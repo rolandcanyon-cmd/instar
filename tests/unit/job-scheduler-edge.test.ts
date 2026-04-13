@@ -180,6 +180,24 @@ describe('JobScheduler edge cases', () => {
       expect(events).toHaveLength(1);
       expect(events[0].summary).toContain('quota');
     });
+
+    it('records the actual gate reason when canRunJob returns a rich result (memory pressure)', async () => {
+      createScheduler([makeJob('mem-test')]);
+      scheduler.start();
+      scheduler.canRunJob = () => ({
+        allowed: false,
+        reason: 'memory-pressure',
+        detail: 'memory pressure elevated (79.9%)',
+      });
+
+      await scheduler.triggerJob('mem-test', 'test');
+
+      const events = project.state.queryEvents({ type: 'job_skipped' });
+      expect(events).toHaveLength(1);
+      expect(events[0].summary).toContain('memory-pressure');
+      expect(events[0].summary).toContain('79.9%');
+      expect((events[0].metadata as any)?.gateReason).toBe('memory-pressure');
+    });
   });
 
   describe('queue re-add on quota failure', () => {

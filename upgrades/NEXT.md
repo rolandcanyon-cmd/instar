@@ -4,22 +4,35 @@
 
 ## What Changed
 
-The health endpoint's systemReview section now includes a failedProbes array with per-probe details (probeId, name, tier, error, remediation) so agents can drill into failures without a second API call. A detailsUrl field points to /system-reviews/latest for the full report.
+Scheduler skip events now report the actual gating reason instead of always saying "quota".
 
-Two new aliases were added for discoverability:
-- GET /health/probes — returns all probe results (pass and fail) with timestamps, stats, and skipped list.
-- GET /system-review (singular) — alias for /system-reviews/latest, matching the natural URL shape agents try first.
+When a job is blocked from spawning, the scheduler runs `canRunJob(priority)`. Previously this callback returned a bare `boolean`, so when it returned `false` the scheduler unconditionally logged `Job "X" skipped (quota)` and recorded reason `quota` in the SkipLedger — even when the real cause was memory pressure or another gate stacked on top of quota.
 
-Previously when the health endpoint reported 3 of 16 probes failed, there was no way to see WHICH probes failed from the health response itself. Agents had to know the exact plural endpoint name to drill in. This closes that gap — failures are now self-describing at the top-level health call, and the common URL shapes agents naturally try now work.
+Now the callback may return either a boolean (legacy behavior) or a richer `CanRunJobResult`:
+
+```ts
+interface CanRunJobResult {
+  allowed: boolean;
+  reason?: SkipReason;   // 'quota' | 'memory-pressure' | 'gate' | ...
+  detail?: string;       // human-readable context
+}
+```
+
+The server's memory gate wrapper (`src/commands/server.ts` ~line 4097) now returns the rich form, surfacing `memory-pressure` plus the underlying `memCheck.reason` (e.g. `"elevated (79.9%)"`). The scheduler logs this verbatim, records it in the SkipLedger as `memory-pressure`, and includes `gateReason` / `gateDetail` in the `job_skipped` event metadata.
+
+A new `'memory-pressure'` value was added to the `SkipReason` union.
+
+This fixes a long-standing diagnostic confusion where 31+ jobs would appear "skipped (quota)" in logs while `/quota` reported normal — because the actual cause was memory pressure on a 16GB machine sitting at 79% baseline usage.
+
+Backwards compatible: any existing `canRunJob` wrapper that returns a plain boolean continues to work and still records reason `quota`.
 
 ## What to Tell Your User
 
-- **Clearer health drill-down**: "When I check my own system health and see failures, I can now immediately see which checks failed and what to do about them — no more guessing."
+- **Clearer skip reasons**: "When I can't start a job, I'll now tell you exactly why — memory pressure versus quota versus a gate check — instead of always blaming quota. That should make it much faster to figure out why scheduled work isn't running."
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| Per-probe failure details in health | GET /health then read systemReview.failedProbes |
-| Full probe list (pass and fail) | GET /health/probes |
-| Latest review alias | GET /system-review |
+| Memory-pressure skip reason | Automatic — appears in skip ledger and `job_skipped` events |
+| Rich `CanRunJobResult` from gate callbacks | Return `{ allowed, reason, detail }` from custom `canRunJob` wrappers |

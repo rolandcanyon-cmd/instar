@@ -4095,10 +4095,15 @@ export async function startServer(options: StartOptions): Promise<void> {
     if (scheduler) {
       const originalCanRun = scheduler.canRunJob;
       scheduler.canRunJob = (priority) => {
-        // Check memory first
+        // Check memory first — return a rich result so the scheduler can
+        // log the actual gating reason instead of mislabelling it as 'quota'.
         const memCheck = memoryMonitor.canSpawnSession();
         if (!memCheck.allowed) {
-          return false;
+          return {
+            allowed: false,
+            reason: 'memory-pressure',
+            detail: memCheck.reason ?? 'memory pressure elevated',
+          };
         }
         // Then check original gate (quota, etc.)
         return originalCanRun(priority);
