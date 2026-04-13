@@ -131,6 +131,9 @@ export class IMessageAdapter implements MessagingAdapter {
       includeAttachments: this.config.includeAttachments,
       offsetPath: path.join(stateDir, 'imessage-poll-offset.json'),
       authorizedContacts: Array.from(this.authorizedContacts),
+      // Auto-hardlink attachments so daemon-spawned sessions can read photos
+      // without FDA on ~/Library/Messages/Attachments/ (same rationale as chat.db).
+      attachmentsDir: path.join(stateDir, 'imessage', 'attachments'),
     });
 
     // Initialize logger
