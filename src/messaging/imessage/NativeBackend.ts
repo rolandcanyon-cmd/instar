@@ -502,34 +502,38 @@ export class NativeBackend extends EventEmitter {
 
     // First try: if an external watcher (like the fswatch-based LaunchAgent)
     // has already hardlinked the source file into attachmentsDir, find and
-    // return THAT path. We match by inode — whatever naming scheme the
-    // external watcher uses, the inode is identical to the source. This works
-    // even when the daemon has no FDA on ~/Library/Messages/Attachments/,
-    // because stat() on attachmentsDir is always allowed.
+    // return THAT path.
+    //
+    // The watcher naming convention: ${parentDirUuid[0:8]}__${basename}
+    // derived from the srcPath layout:
+    //     ~/Library/Messages/Attachments/<xx>/<yy>/<UUID>/<filename>
+    // We construct the expected name from the srcPath alone — no stat call
+    // on the TCC-protected source needed. This works even when the daemon
+    // has zero FDA: we only read attachmentsDir (non-protected) and compose
+    // a filename string.
     try {
       if (fs.existsSync(this.attachmentsDir)) {
-        // We need the source inode to match against. Try stat on src; if that
-        // fails (EPERM), we fall back to matching by basename.
-        let srcIno: number | null = null;
-        try {
-          srcIno = fs.statSync(srcPath).ino;
-        } catch { /* no FDA, skip inode check */ }
+        const parts = srcPath.split(path.sep);
+        const fileName = parts[parts.length - 1] || '';
+        const parentUuid = parts[parts.length - 2] || '';
+        const uuidFrag = parentUuid.slice(0, 8);
 
-        const entries = fs.readdirSync(this.attachmentsDir);
-        const srcBase = path.basename(srcPath);
-        for (const name of entries) {
-          const candidate = path.join(this.attachmentsDir, name);
-          try {
-            const st = fs.statSync(candidate);
-            if (srcIno !== null && st.ino === srcIno) {
-              return candidate;  // perfect match by inode
-            }
-            if (srcIno === null && name.endsWith(`__${srcBase}`)) {
-              // Heuristic: external watcher prefixes with a uuid fragment
-              return candidate;
-            }
-          } catch { /* skip broken entries */ }
+        // Expected name per the external watcher convention
+        const expected = `${uuidFrag}__${fileName}`;
+        const expectedPath = path.join(this.attachmentsDir, expected);
+        if (fs.existsSync(expectedPath)) {
+          return expectedPath;
         }
+
+        // Fallback: scan for any file ending in `__${fileName}` (watcher may
+        // have used a different prefix scheme in future versions)
+        try {
+          const entries = fs.readdirSync(this.attachmentsDir);
+          const match = entries.find((n) => n === fileName || n.endsWith(`__${fileName}`));
+          if (match) {
+            return path.join(this.attachmentsDir, match);
+          }
+        } catch { /* ignore */ }
       }
     } catch { /* continue to own-create attempt */ }
 
