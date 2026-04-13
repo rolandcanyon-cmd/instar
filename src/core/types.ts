@@ -57,6 +57,11 @@ export interface SessionManagerConfig {
   anthropicApiKey?: string;
   /** Anthropic base URL for spawned sessions (e.g., 'http://127.0.0.1:3456' for meridian) */
   anthropicBaseUrl?: string;
+  /** Minutes of idle-at-prompt before a non-protected session is killed (default: 15) */
+  idlePromptKillMinutes?: number;
+  /** Absolute maximum session duration in minutes — safety net for sessions
+   *  without an explicit timeout (default: 240) */
+  defaultMaxDurationMinutes?: number;
 }
 
 // ── Job Scheduling ──────────────────────────────────────────────────
