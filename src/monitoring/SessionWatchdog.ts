@@ -228,9 +228,15 @@ export class SessionWatchdog extends EventEmitter {
       return;
     }
 
-    // Find Claude PID in the tmux session
+    // Find Claude PID in the tmux session. If we can't locate it, we skip
+    // the stuck-command path but still run compaction-idle detection —
+    // that path is output-based and doesn't strictly need a PID (its own
+    // process guard is null-safe).
     const claudePid = this.getClaudePid(tmuxSession);
-    if (!claudePid) return;
+    if (!claudePid) {
+      this.checkCompactionIdle(tmuxSession);
+      return;
+    }
 
     const children = this.getChildProcesses(claudePid);
     const stuckChild = children.find(
@@ -464,7 +470,16 @@ export class SessionWatchdog extends EventEmitter {
       const panePid = parseInt(panePidStr, 10);
       if (isNaN(panePid)) return null;
 
-      // Find claude child
+      // Instar typically spawns claude directly as the pane's root process,
+      // not as a child of a shell. Check the pane_pid's own command first —
+      // if it's claude, return it directly. Without this, pgrep -P finds no
+      // match (claude has no claude child) and the watchdog silently no-ops.
+      const paneCmd = shellExec(`ps -p ${panePid} -o comm= 2>/dev/null`).trim();
+      if (/^(-?)claude$/.test(paneCmd) || paneCmd.endsWith('/claude')) {
+        return panePid;
+      }
+
+      // Fallback: pane runs a shell wrapper that has claude as a child
       const claudePidStr = shellExec(
         `pgrep -P ${panePid} -f claude 2>/dev/null | head -1`
       ).trim();

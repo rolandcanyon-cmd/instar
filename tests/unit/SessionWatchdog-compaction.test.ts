@@ -238,6 +238,27 @@ describe('SessionWatchdog compaction-idle detection', () => {
     expect(emittedEvents).toEqual(['test-session']);
   });
 
+  // ─── Bug regression: claude IS the pane pid (not a child) ───
+  // Historical bug: instar spawns claude directly as the tmux pane's root
+  // process. The old getClaudePid() used `pgrep -P <pane_pid> -f claude`,
+  // which only finds claude as a CHILD. When claude is the pane itself,
+  // that returned null, causing checkSession() to early-exit and
+  // checkCompactionIdle() to never run. This test protects against
+  // regression.
+
+  it('checkSession still runs compaction-idle when getClaudePid returns null', async () => {
+    // Simulate: getClaudePid returns null (e.g., pgrep path miss),
+    // but the session is compacted and idle. Detection MUST still fire.
+    (watchdog as any).getClaudePid = vi.fn().mockReturnValue(null);
+    sessionManager.captureOutput.mockReturnValue(COMPACTED_AT_PROMPT);
+    sessionManager.listRunningSessions = vi.fn().mockReturnValue([
+      { tmuxSession: 'test-session' },
+    ]);
+
+    await (watchdog as any).checkSession('test-session');
+    expect(emittedEvents).toEqual(['test-session']);
+  });
+
   // ─── Recency guard (10-line window) ───
 
   it('only reads last 10 lines — stale compaction text does not trigger', () => {
