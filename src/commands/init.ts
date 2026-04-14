@@ -3121,10 +3121,10 @@ function refreshJobs(stateDir: string): void {
   const jobsPath = path.join(stateDir, 'jobs.json');
   if (!fs.existsSync(jobsPath)) return;
 
-  let port = 4321;
+  let port = 4040;
   try {
     const config = JSON.parse(fs.readFileSync(path.join(stateDir, 'config.json'), 'utf-8'));
-    port = config.port || 4321;
+    port = config.port || 4040;
   } catch { /* use default */ }
 
   try {
@@ -3139,6 +3139,32 @@ function refreshJobs(stateDir: string): void {
         added++;
       }
     }
+
+    // Repair stale port references in built-in jobs' gate/execute commands.
+    // When the configured port changes (e.g., from 4040 to 4041), existing jobs
+    // keep their old `localhost:NNNN` references and silently skip forever.
+    // For built-in jobs (matched by slug), if any localhost:OTHERPORT/ appears
+    // in the gate or execute.value, rewrite it to the current port.
+    const defaultBySlug = new Map(defaultJobs.map(j => [j.slug, j as Record<string, unknown>]));
+    const portRefPattern = /localhost:(\d+)(?=[/"'\s])/g;
+    let repaired = 0;
+    for (const existing of existingJobs as Array<Record<string, unknown>>) {
+      if (!defaultBySlug.has(existing.slug as string)) continue; // skip user-defined jobs
+
+      const rewrite = (s: string): string =>
+        s.replace(portRefPattern, (m, p) => (Number(p) === port ? m : `localhost:${port}`));
+
+      if (typeof existing.gate === 'string') {
+        const next = rewrite(existing.gate);
+        if (next !== existing.gate) { existing.gate = next; repaired++; }
+      }
+      const exec = existing.execute as Record<string, unknown> | undefined;
+      if (exec && typeof exec.value === 'string') {
+        const next = rewrite(exec.value as string);
+        if (next !== exec.value) { exec.value = next; repaired++; }
+      }
+    }
+    if (repaired > 0) added++; // force write
 
     // Auto-enable git-sync if git + remote are available (migration from disabled default)
     const gitSyncJob = existingJobs.find(j => j.slug === 'git-sync') as Record<string, unknown> | undefined;
