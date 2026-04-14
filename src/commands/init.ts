@@ -3140,28 +3140,35 @@ function refreshJobs(stateDir: string): void {
       }
     }
 
-    // Repair stale port references in built-in jobs' gate/execute commands.
-    // When the configured port changes (e.g., from 4040 to 4041), existing jobs
-    // keep their old `localhost:NNNN` references and silently skip forever.
-    // For built-in jobs (matched by slug), if any localhost:OTHERPORT/ appears
-    // in the gate or execute.value, rewrite it to the current port.
+    // Sync stale gate/execute commands in built-in jobs to current defaults.
+    // The contract: built-in jobs' `gate` and `execute` fields are implementation
+    // details that track the codebase. When a job's gate or execute logic is
+    // updated in source (e.g., gate path corrections, port changes, new auth
+    // headers), existing jobs.json entries keep the old logic and silently skip
+    // forever. Other fields (enabled, schedule, priority, model) are user-tunable
+    // and left untouched. To customize a built-in's gate/execute, fork it under
+    // a different slug.
     const defaultBySlug = new Map(defaultJobs.map(j => [j.slug, j as Record<string, unknown>]));
-    const portRefPattern = /localhost:(\d+)(?=[/"'\s])/g;
     let repaired = 0;
     for (const existing of existingJobs as Array<Record<string, unknown>>) {
-      if (!defaultBySlug.has(existing.slug as string)) continue; // skip user-defined jobs
+      const def = defaultBySlug.get(existing.slug as string);
+      if (!def) continue; // skip user-defined jobs
 
-      const rewrite = (s: string): string =>
-        s.replace(portRefPattern, (m, p) => (Number(p) === port ? m : `localhost:${port}`));
-
-      if (typeof existing.gate === 'string') {
-        const next = rewrite(existing.gate);
-        if (next !== existing.gate) { existing.gate = next; repaired++; }
+      if (typeof def.gate === 'string' && existing.gate !== def.gate) {
+        existing.gate = def.gate;
+        repaired++;
       }
-      const exec = existing.execute as Record<string, unknown> | undefined;
-      if (exec && typeof exec.value === 'string') {
-        const next = rewrite(exec.value as string);
-        if (next !== exec.value) { exec.value = next; repaired++; }
+      const defExec = def.execute as Record<string, unknown> | undefined;
+      const existingExec = existing.execute as Record<string, unknown> | undefined;
+      if (defExec && existingExec) {
+        if (typeof defExec.value === 'string' && existingExec.value !== defExec.value) {
+          existingExec.value = defExec.value;
+          repaired++;
+        }
+        if (typeof defExec.type === 'string' && existingExec.type !== defExec.type) {
+          existingExec.type = defExec.type;
+          repaired++;
+        }
       }
     }
     if (repaired > 0) added++; // force write
