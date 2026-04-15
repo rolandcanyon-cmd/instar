@@ -6435,7 +6435,13 @@ export function createRoutes(ctx: RouteContext): Router {
 
     const jsonlPath = path.join(ctx.config.stateDir, 'telegram-messages.jsonl');
     const imported = await ctx.topicMemory.rebuild(jsonlPath);
-    res.json({ rebuilt: true, messagesImported: imported, stats: ctx.topicMemory.stats() });
+    const importStats = ctx.topicMemory.getLastImportStats();
+    res.json({
+      rebuilt: true,
+      messagesImported: imported,
+      parseErrors: importStats ? { malformed: importStats.malformed, missingFields: importStats.missingFields } : null,
+      stats: ctx.topicMemory.stats(),
+    });
   });
 
   // ── Pairing API — Multi-machine state sync (Phase 4.5) ────────

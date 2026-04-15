@@ -20,7 +20,7 @@
  * - Empty/edge cases
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -804,6 +804,81 @@ describe('TopicMemory', () => {
       const result = topicMemory.importFromJsonl(jsonlPath);
       expect(result).toBeInstanceOf(Promise);
       return expect(result).resolves.toBe(0);
+    });
+
+    it('counts malformed JSON lines and surfaces them via getLastImportStats()', async () => {
+      const jsonlPath = path.join(tmpDir, 'corrupt.jsonl');
+      const body = [
+        JSON.stringify({ messageId: 1, topicId: 100, text: 'Valid', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
+        '{ not valid json',                                              // malformed
+        'also not json at all',                                          // malformed
+        JSON.stringify({ messageId: 2, topicId: 100, text: 'Valid 2', fromUser: false, timestamp: '2026-02-24T12:01:00Z' }),
+        '{"messageId":3}',                                               // valid json, missing topicId/text
+      ].join('\n');
+      fs.writeFileSync(jsonlPath, body);
+
+      const count = await topicMemory.importFromJsonl(jsonlPath);
+      expect(count).toBe(2);
+
+      const stats = topicMemory.getLastImportStats();
+      expect(stats).not.toBeNull();
+      expect(stats!.imported).toBe(2);
+      expect(stats!.malformed).toBe(2);
+      expect(stats!.missingFields).toBe(1);
+    });
+
+    it('logs a single summary warning when malformed lines are present', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const jsonlPath = path.join(tmpDir, 'warn.jsonl');
+        fs.writeFileSync(jsonlPath, [
+          JSON.stringify({ messageId: 1, topicId: 100, text: 'Ok', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
+          'garbage line',
+        ].join('\n'));
+
+        await topicMemory.importFromJsonl(jsonlPath);
+
+        const matchingCalls = warnSpy.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('importFromJsonl') && call[0].includes('malformed_json=1'),
+        );
+        expect(matchingCalls.length).toBe(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('does NOT log a warning when the JSONL is clean (quiet by default)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const jsonlPath = path.join(tmpDir, 'clean.jsonl');
+        fs.writeFileSync(jsonlPath, [
+          JSON.stringify({ messageId: 1, topicId: 100, text: 'Ok', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
+          JSON.stringify({ messageId: 2, topicId: 100, text: 'Ok2', fromUser: false, timestamp: '2026-02-24T12:01:00Z' }),
+          '',
+        ].join('\n'));
+
+        await topicMemory.importFromJsonl(jsonlPath);
+
+        const matchingCalls = warnSpy.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('importFromJsonl'),
+        );
+        expect(matchingCalls.length).toBe(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('getLastImportStats() returns null before any import runs', async () => {
+      // Fresh instance, no import yet
+      const freshDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-tm-'));
+      const fresh = new TopicMemory(freshDir);
+      await fresh.open();
+      try {
+        expect(fresh.getLastImportStats()).toBeNull();
+      } finally {
+        fresh.close();
+        fs.rmSync(freshDir, { recursive: true, force: true });
+      }
     });
   });
 

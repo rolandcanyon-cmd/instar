@@ -119,6 +119,8 @@ export class TopicMemory {
   private stateDir: string;
   /** Set after corruption auto-recovery — caller should reimport from JSONL */
   private _needsRebuild = false;
+  /** Stats from the most recent importFromJsonl() / rebuild() call */
+  private _lastImportStats: { imported: number; malformed: number; missingFields: number } | null = null;
 
   constructor(stateDir: string) {
     this.stateDir = stateDir;
@@ -736,6 +738,8 @@ export class TopicMemory {
     `);
 
     let count = 0;
+    let malformed = 0;
+    let missingFields = 0;
     const BATCH_SIZE = 500;
     let batch: TopicMessage[] = [];
 
@@ -782,8 +786,14 @@ export class TopicMemory {
           if (batch.length >= BATCH_SIZE) {
             flushBatch();
           }
+        } else {
+          // Valid JSON but missing the fields we need — count separately from malformed JSON.
+          missingFields++;
         }
-      } catch { /* @silent-fallback-ok — JSONL parse, skip corrupted */ }
+      } catch {
+        // @silent-fallback-ok — JSONL parse error; count so we can surface it at end.
+        malformed++;
+      }
     }
 
     // Flush remaining
@@ -792,7 +802,25 @@ export class TopicMemory {
     // Rebuild topic_meta from messages after import
     this.rebuildTopicMeta();
 
+    // Surface parse / schema problems at end of import so operators can
+    // diagnose corrupted JSONL without tailing logs during the hot path.
+    if (malformed > 0 || missingFields > 0) {
+      console.warn(
+        `[TopicMemory] importFromJsonl(${jsonlPath}): imported=${count} malformed_json=${malformed} missing_fields=${missingFields}`,
+      );
+    }
+
+    this._lastImportStats = { imported: count, malformed, missingFields };
     return count;
+  }
+
+  /**
+   * Returns stats from the most recent importFromJsonl() / rebuild() call.
+   * Useful for tests and /topic/rebuild endpoints that want to surface
+   * parse-error counts in the API response.
+   */
+  getLastImportStats(): { imported: number; malformed: number; missingFields: number } | null {
+    return this._lastImportStats;
   }
 
   /**
