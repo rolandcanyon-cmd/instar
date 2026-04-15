@@ -261,6 +261,30 @@ describe('CompactionSentinel', () => {
     expect(sentinel.getState('s1')).toBeUndefined();
   });
 
+  it('allows re-recovery after a previous recovery finalizes', async () => {
+    // After a successful recovery, the session should be eligible for a NEW
+    // recovery even if the second compaction happens within the dedupe window.
+    // Without this, a session that recovers cleanly and then compacts again
+    // ~30s later would be silently suppressed and left to the zombie-killer.
+    jsonl.write('foo.jsonl', 100);
+    sentinel.report('s1', 'watchdog-poll');
+    await vi.advanceTimersByTimeAsync(0);
+    jsonl.write('foo.jsonl', 400);
+    await vi.advanceTimersByTimeAsync(25_500);
+    // Recovered.
+    const firstRecovered = events.filter(e => e.type === 'compaction:recovered');
+    expect(firstRecovered).toHaveLength(1);
+    // Wait out the 5s keep-window so the active state is cleaned up.
+    await vi.advanceTimersByTimeAsync(6_000);
+
+    // Second compaction happens immediately — should NOT be suppressed.
+    jsonl.write('foo.jsonl', 400);
+    sentinel.report('s1', 'watchdog-poll');
+    await vi.advanceTimersByTimeAsync(0);
+    // A fresh detected event should fire.
+    expect(events.filter(e => e.type === 'compaction:detected')).toHaveLength(2);
+  });
+
   it('stop() cleans up all state and timers', async () => {
     jsonl.write('a.jsonl', 100);
     sentinel.report('a', 'watchdog-poll');

@@ -314,10 +314,15 @@ export class CompactionSentinel extends EventEmitter {
     }
     // Keep the state around just long enough to exit the recovery-guard window
     // (so the zombie-killer won't race the next prompt). Then clean up.
+    // Also clear the recentReports entry so a *new* compaction on this session
+    // can trigger a fresh recovery, even if the second compaction happens
+    // within the dedupe window of the first. Without this, the second
+    // compaction would be silently suppressed.
     const keepFor = status === 'recovered' ? 5_000 : 30_000;
     const handle = this.setTimer(() => {
       this.timers.delete(state.sessionName);
       this.active.delete(state.sessionName);
+      this.recentReports.delete(state.sessionName);
     }, keepFor);
     this.timers.set(state.sessionName, handle);
   }
