@@ -4230,6 +4230,11 @@ export async function startServer(options: StartOptions): Promise<void> {
       {
         recoverFn: recoverCompactedSession,
         projectDir: config.projectDir,
+        getClaudeSessionId: (sessionName: string) => {
+          const session = sessionManager.listRunningSessions()
+            .find(s => s.tmuxSession === sessionName);
+          return session?.claudeSessionId;
+        },
       },
       // Defaults are production-sensible; override here only if needed.
       {},

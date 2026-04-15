@@ -200,6 +200,43 @@ describe('CompactionSentinel', () => {
     expect(recoverFn).toHaveBeenCalledTimes(2);
   });
 
+  it('uses claudeSessionId to target the exact jsonl when available', async () => {
+    // Two sibling jsonl files exist. The session under test has uuid "abc-123".
+    // Only abc-123.jsonl should be watched — a sibling growing must NOT cause
+    // false "recovered" emission.
+    jsonl.write('abc-123.jsonl', 100);
+    jsonl.write('sibling-session.jsonl', 100);
+
+    // Recreate sentinel with a uuid resolver.
+    sentinel.stop();
+    sentinel = new CompactionSentinel(
+      {
+        recoverFn: recoverFn as any,
+        projectDir: '/fake/project',
+        jsonlRoot: jsonl.root,
+        getClaudeSessionId: (name: string) => (name === 's1' ? 'abc-123' : undefined),
+      },
+      { dedupeWindowMs: 60_000, verifyWindowMs: 25_000, maxInjectAttempts: 3, recoveryGuardMs: 10 * 60_000 },
+    );
+    events = [];
+    for (const e of ['compaction:detected', 'compaction:inject-attempted', 'compaction:recovered', 'compaction:failed']) {
+      sentinel.on(e as any, (p: any) => events.push({ type: e, payload: p }));
+    }
+
+    sentinel.report('s1', 'watchdog-poll');
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Sibling grows — must NOT trigger recovered for s1.
+    jsonl.write('sibling-session.jsonl', 5000);
+    await vi.advanceTimersByTimeAsync(25_500);
+    expect(events.find(e => e.type === 'compaction:recovered')).toBeUndefined();
+
+    // s1's own file grows — this time it SHOULD recover.
+    jsonl.write('abc-123.jsonl', 400);
+    await vi.advanceTimersByTimeAsync(25_500);
+    expect(events.find(e => e.type === 'compaction:recovered')).toBeDefined();
+  });
+
   it('detects growth via mtime change on a fixed-size jsonl', async () => {
     jsonl.write('foo.jsonl', 100);
     sentinel.report('s1', 'watchdog-poll');

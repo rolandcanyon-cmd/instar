@@ -72,6 +72,15 @@ export interface CompactionSentinelDeps {
   projectDir: string;
 
   /**
+   * Resolve a session's Claude Code session UUID (from hook events). When
+   * present, the sentinel reads the jsonl file named exactly `<uuid>.jsonl`
+   * instead of falling back to most-recently-modified — which prevents
+   * false positives where a sibling session's output makes this one look
+   * recovered. Return undefined for sessions whose uuid isn't known yet.
+   */
+  getClaudeSessionId?: (sessionName: string) => string | undefined;
+
+  /**
    * Override for the JSONL lookup root. Primarily for tests. Defaults to
    * `$HOME/.claude/projects/<project-hash>`.
    */
@@ -159,7 +168,7 @@ export class CompactionSentinel extends EventEmitter {
     }
     this.recentReports.set(sessionName, now);
 
-    const baseline = this.readJsonlBaseline();
+    const baseline = this.readJsonlBaseline(sessionName);
     const state: RecoveryState = {
       sessionName,
       trigger,
@@ -258,7 +267,7 @@ export class CompactionSentinel extends EventEmitter {
     this.timers.delete(state.sessionName);
 
     // Has the jsonl file grown? If so, claude processed the prompt and emitted.
-    const current = this.readJsonlBaseline();
+    const current = this.readJsonlBaseline(state.sessionName);
     const grew =
       state.baselineJsonlSize !== null &&
       current !== null &&
@@ -314,15 +323,33 @@ export class CompactionSentinel extends EventEmitter {
   }
 
   /**
-   * Look up the most recently-modified Claude Code JSONL file for this
-   * project. Returns path/size/mtime, or null if none found.
+   * Look up the JSONL file for this session. Prefers the exact file by
+   * Claude Code session UUID when known (prevents a sibling session's
+   * activity from looking like this session recovered). Falls back to the
+   * most recently-modified file in the project's jsonl root.
    */
-  private readJsonlBaseline(): { path: string; size: number; mtime: number } | null {
+  private readJsonlBaseline(sessionName: string): { path: string; size: number; mtime: number } | null {
     try {
       const root = this.deps.jsonlRoot
         || path.join(process.env.HOME || '/tmp', '.claude', 'projects',
                      this.deps.projectDir.replace(/\//g, '-'));
       if (!fs.existsSync(root)) return null;
+
+      // Prefer the exact file by claudeSessionId when available.
+      const uuid = this.deps.getClaudeSessionId?.(sessionName);
+      if (uuid) {
+        const exact = path.join(root, `${uuid}.jsonl`);
+        if (fs.existsSync(exact)) {
+          const st = fs.statSync(exact);
+          return { path: exact, size: st.size, mtime: st.mtimeMs };
+        }
+        // If uuid is known but file doesn't exist, return null rather than
+        // falling through — the session genuinely has no jsonl, and picking
+        // a sibling's file would be a false signal.
+        return null;
+      }
+
+      // Fallback: most-recently-modified jsonl in the project.
       const entries = fs.readdirSync(root).filter(f => f.endsWith('.jsonl'));
       if (entries.length === 0) return null;
       const latest = entries
