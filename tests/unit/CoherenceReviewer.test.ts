@@ -703,3 +703,75 @@ describe('InformationLeakageReviewer', () => {
     expect(result.pass).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// IntelligenceProvider routing
+// ---------------------------------------------------------------------------
+
+describe('CoherenceReviewer with IntelligenceProvider', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('routes LLM calls through IntelligenceProvider when provided', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch');
+    const evaluate = vi.fn(async () =>
+      '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}',
+    );
+    const intelligence = { evaluate };
+
+    const reviewer = new TestReviewer(FAKE_API_KEY, { intelligence });
+    const result = await reviewer.review(makeContext());
+
+    expect(result.pass).toBe(true);
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    const opts = evaluate.mock.calls[0]?.[1];
+    expect(opts).toMatchObject({ model: 'fast', temperature: 0 });
+  });
+
+  it('falls back to direct Anthropic API when intelligence is absent', async () => {
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
+      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
+    );
+
+    const reviewer = new TestReviewer(FAKE_API_KEY);
+    const result = await reviewer.review(makeContext());
+
+    expect(result.pass).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails open when IntelligenceProvider throws', async () => {
+    const evaluate = vi.fn(async () => {
+      throw new Error('provider down');
+    });
+    const intelligence = { evaluate };
+
+    const reviewer = new TestReviewer(FAKE_API_KEY, { intelligence });
+    const result = await reviewer.review(makeContext());
+
+    expect(result.pass).toBe(true);
+    expect(reviewer.metrics.errorCount).toBe(1);
+  });
+
+  it('maps haiku → fast, sonnet → balanced, opus → capable model tier', async () => {
+    const evaluate = vi.fn(async () =>
+      '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}',
+    );
+    const intelligence = { evaluate };
+
+    const haikuReviewer = new TestReviewer(FAKE_API_KEY, { intelligence, model: 'haiku' });
+    const sonnetReviewer = new TestReviewer(FAKE_API_KEY, { intelligence, model: 'sonnet' });
+    const opusReviewer = new TestReviewer(FAKE_API_KEY, { intelligence, model: 'opus' });
+
+    await haikuReviewer.review(makeContext());
+    await sonnetReviewer.review(makeContext());
+    await opusReviewer.review(makeContext());
+
+    expect(evaluate.mock.calls[0]?.[1]).toMatchObject({ model: 'fast' });
+    expect(evaluate.mock.calls[1]?.[1]).toMatchObject({ model: 'balanced' });
+    expect(evaluate.mock.calls[2]?.[1]).toMatchObject({ model: 'capable' });
+  });
+});

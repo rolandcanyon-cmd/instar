@@ -100,7 +100,14 @@ export interface ResearchTriggerContext {
 export interface CoherenceGateOptions {
   config: ResponseReviewConfig;
   stateDir: string;
+  /** Anthropic API key. Empty string is allowed when `intelligence` is provided. */
   apiKey: string;
+  /**
+   * Optional IntelligenceProvider. When provided, all reviewers route LLM calls
+   * through this abstraction (subscription-compatible). When omitted, reviewers
+   * fall back to direct Anthropic API calls using `apiKey`.
+   */
+  intelligence?: import('./types.js').IntelligenceProvider;
   relationships?: { getContextForPerson(id: string): string | null } | null;
   adaptiveTrust?: { getProfile(): any } | null;
   /** Callback fired when a research agent should be spawned (fire-and-forget). */
@@ -168,10 +175,11 @@ export class CoherenceGate {
     this.gateReviewer = new GateReviewer(options.apiKey, {
       model: options.config.gateModel ?? 'haiku',
       timeoutMs: 5_000,
+      intelligence: options.intelligence,
     });
 
     // Initialize built-in specialist reviewers
-    this.initializeReviewers(options.apiKey, options.config);
+    this.initializeReviewers(options.apiKey, options.config, options.intelligence);
 
     // Initialize recipient resolver
     this.recipientResolver = new RecipientResolver({
@@ -181,7 +189,7 @@ export class CoherenceGate {
     });
 
     // Load custom reviewers
-    this.loadCustomReviewers(options.apiKey);
+    this.loadCustomReviewers(options.apiKey, options.intelligence);
   }
 
   /**
@@ -547,7 +555,11 @@ export class CoherenceGate {
 
   // ── Reviewer Management ────────────────────────────────────────────
 
-  private initializeReviewers(apiKey: string, config: ResponseReviewConfig): void {
+  private initializeReviewers(
+    apiKey: string,
+    config: ResponseReviewConfig,
+    intelligence?: import('./types.js').IntelligenceProvider,
+  ): void {
     const defaultModel = config.reviewerModel ?? 'haiku';
     const overrides = config.reviewerModelOverrides ?? {};
 
@@ -571,11 +583,14 @@ export class CoherenceGate {
       const mode = reviewerConfig?.mode ?? 'block';
       const timeoutMs = config.timeoutMs ?? 8_000;
 
-      this.reviewers.set(name, new cls(apiKey, { model, mode, timeoutMs }));
+      this.reviewers.set(name, new cls(apiKey, { model, mode, timeoutMs, intelligence }));
     }
   }
 
-  private loadCustomReviewers(apiKey: string): void {
+  private loadCustomReviewers(
+    apiKey: string,
+    intelligence?: import('./types.js').IntelligenceProvider,
+  ): void {
     const loader = new CustomReviewerLoader(this.stateDir);
     // Custom reviewer loading is best-effort — don't break startup
     try {
@@ -589,7 +604,7 @@ export class CoherenceGate {
 
         // Dynamic reviewer using the spec's prompt
         const reviewer = new DynamicReviewer(spec.name, apiKey, spec.prompt, spec.contextRequirements, {
-          model, mode, timeoutMs: this.config.timeoutMs ?? 8_000,
+          model, mode, timeoutMs: this.config.timeoutMs ?? 8_000, intelligence,
         });
         this.reviewers.set(spec.name, reviewer);
       }

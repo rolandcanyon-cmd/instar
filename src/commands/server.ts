@@ -2014,22 +2014,55 @@ export async function startServer(options: StartOptions): Promise<void> {
     _projectDir = config.sessions.projectDir;
 
     // Shared intelligence provider — lightweight LLM for internal classification tasks.
-    // Prefer Anthropic API (faster, no tmux) → Claude CLI fallback.
+    // Priority: Claude CLI subscription (zero extra cost, default) → Anthropic API (explicit opt-in)
     // Components that need LLM intelligence (Sentinel, TelegramAdapter, etc.) share this.
+    //
+    // Rationale: Instar must not depend on an API key. The subscription path is the default so
+    // every agent gets LLM-gated features out of the box. Users who prefer direct API access can
+    // set `intelligenceProvider: "anthropic-api"` in config.json.
     let sharedIntelligence: IntelligenceProvider | undefined;
-    try {
-      const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-      if (apiProvider) {
-        sharedIntelligence = apiProvider;
-      }
-    } catch { /* no API key available */ }
+    const explicitIntelligenceProvider =
+      (config as unknown as { intelligenceProvider?: string }).intelligenceProvider;
+    let intelligenceSource = 'none';
+
+    if (explicitIntelligenceProvider === 'anthropic-api') {
+      try {
+        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
+        if (apiProvider) {
+          sharedIntelligence = apiProvider;
+          intelligenceSource = 'Anthropic API (explicit opt-in)';
+        } else {
+          console.log(pc.yellow('  intelligenceProvider: "anthropic-api" set but ANTHROPIC_API_KEY not found — falling back to Claude CLI'));
+        }
+      } catch { /* no API key available */ }
+    }
+
     if (!sharedIntelligence) {
       try {
         sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        intelligenceSource = 'Claude CLI subscription';
       } catch { /* CLI not available */ }
     }
 
+    if (!sharedIntelligence && explicitIntelligenceProvider !== 'anthropic-api') {
+      // Last resort: if user has API key but didn't explicitly opt in, use it rather than
+      // leaving the agent flying blind. We prefer subscription, but degrading to heuristics
+      // is worse than using whatever LLM is available.
+      try {
+        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
+        if (apiProvider) {
+          sharedIntelligence = apiProvider;
+          intelligenceSource = 'Anthropic API (CLI unavailable — last resort)';
+        }
+      } catch { /* no API key available */ }
+    }
+
     _sharedIntelligence = sharedIntelligence ?? null;
+    if (sharedIntelligence) {
+      console.log(pc.gray(`  Intelligence: ${intelligenceSource}`));
+    } else {
+      console.log(pc.yellow('  Intelligence: none (no Claude CLI, no API key) — LLM-gated features degraded'));
+    }
 
     // Wire intelligence into git sync for LLM conflict resolution (Tier 1 → 2)
     if (gitSync && sharedIntelligence) {
@@ -4135,15 +4168,24 @@ export async function startServer(options: StartOptions): Promise<void> {
     console.log(pc.green('  Hook event receiver enabled'));
 
     // ── Compaction Resume: unified recovery for one session ──────────────
-    // Robust against subsystem misconfiguration: works with or without
-    // triageOrchestrator. If the orchestrator is available we prefer it
-    // (richer recovery semantics); otherwise we fall back to a direct
-    // tmux re-injection of the unanswered user message.
+    // After compaction, the session's working context is gone. Rather than
+    // replaying the user's last message (which assumes the agent still has
+    // thread context), we inject a prompt telling the agent to re-read recent
+    // topic messages and continue. The agent fetches its own history, so this
+    // restores continuity without pretending no compaction happened.
+    //
+    // Note: we deliberately bypass triageOrchestrator here. Its reinject_message
+    // heuristic unconditionally re-sends the last user message from topic
+    // history — fine for "message lost mid-flight" stalls, wrong for compaction
+    // recovery where the agent needs to re-orient first.
     //
     // Three independent triggers call into this:
     //   1. PreCompact hook event (Claude Code fires it — unreliable)
     //   2. SessionWatchdog 'compaction-idle' polling (default-enabled)
     //   3. POST /internal/compaction-resume (compaction-recovery.sh hook)
+    const COMPACTION_RESUME_PROMPT =
+      'please read the previous messages in this topic and continue';
+
     const recoverCompactedSession = async (sessionName: string, triggerLabel: string): Promise<boolean> => {
       if (!sessionManager.isSessionAlive(sessionName)) return false;
 
@@ -4155,16 +4197,8 @@ export async function startServer(options: StartOptions): Promise<void> {
           const lastMsg = history[history.length - 1];
           if (lastMsg?.fromUser) {
             console.log(`[CompactionResume] (${triggerLabel}) topic ${topicId} session "${sessionName}" has unanswered message — recovering`);
-            if (triageOrchestrator) {
-              try {
-                await triageOrchestrator.activate(topicId, sessionName, 'watchdog', lastMsg.text, Date.now());
-                return true;
-              } catch (err) {
-                console.warn(`[CompactionResume] orchestrator failed, falling back to direct inject:`, err);
-              }
-            }
-            // Fallback: direct injection with topic tag so InputGuard accepts it.
-            const tagged = `[telegram:${topicId}] ${lastMsg.text}`;
+            // Direct injection with topic tag so InputGuard accepts it.
+            const tagged = `[telegram:${topicId}] ${COMPACTION_RESUME_PROMPT}`;
             const ok = sessionManager.injectMessage(sessionName, tagged);
             if (ok) {
               console.log(`[CompactionResume] (${triggerLabel}) direct re-inject OK for topic ${topicId}`);
@@ -4383,17 +4417,16 @@ export async function startServer(options: StartOptions): Promise<void> {
           }
         } catch { /* no log */ }
         if (!lastUserMsg) return false;
-        const text = lastUserMsg.text || 'message after compaction';
         console.log(`[CompactionResume] (${triggerLabel}) Slack channel ${channelId} has unanswered message — recovering`);
         if (triageOrchestrator) {
           try {
-            await triageOrchestrator.activate(syntheticId, sessionName, 'watchdog', text, Date.now());
+            await triageOrchestrator.activate(syntheticId, sessionName, 'watchdog', COMPACTION_RESUME_PROMPT, Date.now());
             return true;
           } catch (err) {
             console.warn(`[CompactionResume] Slack orchestrator failed, falling back to direct inject:`, err);
           }
         }
-        const ok = sessionManager.injectMessage(sessionName, text);
+        const ok = sessionManager.injectMessage(sessionName, COMPACTION_RESUME_PROMPT);
         if (ok) {
           console.log(`[CompactionResume] (${triggerLabel}) Slack direct re-inject OK for channel ${channelId}`);
           return true;
@@ -5437,22 +5470,29 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.yellow('  Messaging tone gate: inactive (no IntelligenceProvider available)'));
     }
 
-    // Response Review Pipeline (Coherence Gate) — evaluates agent responses before delivery
+    // Response Review Pipeline (Coherence Gate) — evaluates agent responses before delivery.
+    // Prefers the shared IntelligenceProvider (subscription-compatible) so the gate works
+    // even without ANTHROPIC_API_KEY. Falls back to direct Anthropic API if a key is set
+    // and no intelligence is available.
     let responseReviewGate: import('../core/CoherenceGate.js').CoherenceGate | undefined;
     if (config.responseReview?.enabled) {
-      const anthropicKey = process.env['ANTHROPIC_API_KEY']?.trim();
-      if (anthropicKey) {
+      const anthropicKey = process.env['ANTHROPIC_API_KEY']?.trim() ?? '';
+      if (sharedIntelligence || anthropicKey) {
         const { CoherenceGate } = await import('../core/CoherenceGate.js');
         responseReviewGate = new CoherenceGate({
           config: config.responseReview,
           stateDir: config.stateDir,
           apiKey: anthropicKey,
+          intelligence: sharedIntelligence,
           relationships: relationships ?? undefined,
           adaptiveTrust: adaptiveTrust ?? undefined,
         });
-        console.log(pc.green(`  Response review pipeline: enabled (${Object.keys(config.responseReview.reviewers ?? {}).length} reviewers configured)`));
+        const backend = sharedIntelligence
+          ? 'via shared IntelligenceProvider'
+          : 'via Anthropic API (direct)';
+        console.log(pc.green(`  Response review pipeline: enabled ${backend} (${Object.keys(config.responseReview.reviewers ?? {}).length} reviewers configured)`));
       } else {
-        console.warn(pc.yellow(`  Response review pipeline: configured but ANTHROPIC_API_KEY not set`));
+        console.warn(pc.yellow(`  Response review pipeline: configured but no IntelligenceProvider or ANTHROPIC_API_KEY available`));
       }
     }
 
