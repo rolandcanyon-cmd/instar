@@ -4183,8 +4183,17 @@ export async function startServer(options: StartOptions): Promise<void> {
     //   1. PreCompact hook event (Claude Code fires it — unreliable)
     //   2. SessionWatchdog 'compaction-idle' polling (default-enabled)
     //   3. POST /internal/compaction-resume (compaction-recovery.sh hook)
+    // After compaction the agent needs three things: orientation, user-facing
+    // transparency, and a clear handoff back to whatever they were doing.
+    // (1) "read previous messages" ensures re-orientation on the current thread
+    //     before responding — if the agent just replies from a blank slate it
+    //     will answer the wrong question.
+    // (2) "let the user know compaction occurred" keeps the user informed so
+    //     a sudden shift in tone or awareness isn't mysterious.
+    // (3) "continue where you left off" tells the agent not to re-ask or
+    //     re-litigate, just pick up.
     const COMPACTION_RESUME_PROMPT =
-      'please read the previous messages in this topic and continue';
+      'Your session just went through context compaction. Read the recent messages in this topic to re-orient, briefly let the user know compaction occurred, then continue where you left off.';
 
     const recoverCompactedSession = async (sessionName: string, triggerLabel: string): Promise<boolean> => {
       if (!sessionManager.isSessionAlive(sessionName)) return false;
