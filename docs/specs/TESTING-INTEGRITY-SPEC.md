@@ -28,8 +28,9 @@ This is the assembly gap. Unit tests verify components. Integration tests verify
 describe('StallTriageNurse wiring', () => {
   it('receives a functional intelligence provider', () => {
     // Reconstruct the wiring logic from server.ts
-    const intelligence = AnthropicIntelligenceProvider.fromEnv()
-      ?? new ClaudeCliIntelligenceProvider(claudePath);
+    // Priority: Claude CLI subscription (default, zero extra cost) → Anthropic API (explicit opt-in or last-resort fallback)
+    const intelligence = new ClaudeCliIntelligenceProvider(claudePath)
+      ?? AnthropicIntelligenceProvider.fromEnv();
 
     expect(intelligence).toBeDefined();
     expect(typeof intelligence.evaluate).toBe('function');
