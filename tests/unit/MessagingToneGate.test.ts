@@ -45,6 +45,7 @@ describe('MessagingToneGate', () => {
       const provider = mockProvider(() =>
         JSON.stringify({
           pass: false,
+          rule: 'B1_CLI_COMMAND',
           issue: 'CLI command recommended to user',
           suggestion: 'Run the command yourself and report the result.',
         }),
@@ -57,6 +58,7 @@ describe('MessagingToneGate', () => {
       );
 
       expect(result.pass).toBe(false);
+      expect(result.rule).toBe('B1_CLI_COMMAND');
       expect(result.issue).toContain('CLI');
       expect(result.suggestion).toBeTruthy();
     });
@@ -65,6 +67,7 @@ describe('MessagingToneGate', () => {
       const provider = mockProvider(() =>
         JSON.stringify({
           pass: false,
+          rule: 'B2_FILE_PATH',
           issue: 'File path exposed to user',
           suggestion: 'Reference concepts, not paths.',
         }),
@@ -77,12 +80,14 @@ describe('MessagingToneGate', () => {
       );
 
       expect(result.pass).toBe(false);
+      expect(result.rule).toBe('B2_FILE_PATH');
     });
 
     it('blocks messages with config keys', async () => {
       const provider = mockProvider(() =>
         JSON.stringify({
           pass: false,
+          rule: 'B3_CONFIG_KEY',
           issue: 'Config key leaked',
           suggestion: 'Describe the behavior change, not the config key.',
         }),
@@ -95,6 +100,136 @@ describe('MessagingToneGate', () => {
       );
 
       expect(result.pass).toBe(false);
+      expect(result.rule).toBe('B3_CONFIG_KEY');
+    });
+  });
+
+  describe('reasoning-discipline enforcement', () => {
+    it('fails open when the LLM tries to block with an invented rule id', async () => {
+      const provider = mockProvider(() =>
+        JSON.stringify({
+          pass: false,
+          rule: 'B_INTERNAL_DETAILS', // not in the valid set
+          issue: 'Exposes internal implementation details',
+          suggestion: 'Be less technical',
+        }),
+      );
+      const gate = new MessagingToneGate(provider);
+      const result = await gate.review('Some technical message', { channel: 'telegram' });
+      expect(result.pass).toBe(true);
+      expect(result.failedOpen).toBe(true);
+      expect(result.invalidRule).toBe(true);
+    });
+
+    it('fails open when the LLM tries to block without citing any rule', async () => {
+      const provider = mockProvider(() =>
+        JSON.stringify({
+          pass: false,
+          rule: '',
+          issue: 'Unspecified issue',
+          suggestion: 'Unspecified',
+        }),
+      );
+      const gate = new MessagingToneGate(provider);
+      const result = await gate.review('Some technical message', { channel: 'telegram' });
+      expect(result.pass).toBe(true);
+      expect(result.failedOpen).toBe(true);
+      expect(result.invalidRule).toBe(true);
+    });
+
+    it('honors a block cited with a valid signal-driven rule (B8)', async () => {
+      const provider = mockProvider(() =>
+        JSON.stringify({
+          pass: false,
+          rule: 'B8_LEAKED_DEBUG_PAYLOAD',
+          issue: 'Payload looks like a leaked test probe',
+          suggestion: 'Investigate the code path that emitted this.',
+        }),
+      );
+      const gate = new MessagingToneGate(provider);
+      const result = await gate.review('test', {
+        channel: 'telegram',
+        signals: { junk: { detected: true, reason: 'matches known debug token "test"' } },
+      });
+      expect(result.pass).toBe(false);
+      expect(result.rule).toBe('B8_LEAKED_DEBUG_PAYLOAD');
+      expect(result.invalidRule).toBeUndefined();
+    });
+
+    it('honors a block cited with the respawn-race rule (B9)', async () => {
+      const provider = mockProvider(() =>
+        JSON.stringify({
+          pass: false,
+          rule: 'B9_RESPAWN_RACE_DUPLICATE',
+          issue: 'Near-duplicate of a recent outbound message, no user request to repeat',
+          suggestion: 'Investigate respawn-race or retry-without-idempotency.',
+        }),
+      );
+      const gate = new MessagingToneGate(provider);
+      const result = await gate.review('Some detailed answer.', {
+        channel: 'telegram',
+        recentMessages: [
+          { role: 'user', text: 'Original user question.' },
+          { role: 'agent', text: 'Some detailed answer.' },
+        ],
+        signals: {
+          duplicate: {
+            detected: true,
+            similarity: 0.98,
+            matchedText: 'Some detailed answer.',
+          },
+        },
+      });
+      expect(result.pass).toBe(false);
+      expect(result.rule).toBe('B9_RESPAWN_RACE_DUPLICATE');
+      expect(result.invalidRule).toBeUndefined();
+    });
+  });
+
+  describe('signal rendering', () => {
+    it('includes junk-payload signal in the prompt when provided', async () => {
+      let capturedPrompt = '';
+      const provider = mockProvider((p) => {
+        capturedPrompt = p;
+        return JSON.stringify({ pass: true, rule: '', issue: '', suggestion: '' });
+      });
+      const gate = new MessagingToneGate(provider);
+      await gate.review('test', {
+        channel: 'telegram',
+        signals: { junk: { detected: true, reason: 'matches known debug token "test"' } },
+      });
+      expect(capturedPrompt).toContain('UPSTREAM SIGNALS');
+      expect(capturedPrompt).toContain('junk-payload detector: detected=true');
+      expect(capturedPrompt).toContain('matches known debug token');
+    });
+
+    it('includes duplicate signal with similarity score', async () => {
+      let capturedPrompt = '';
+      const provider = mockProvider((p) => {
+        capturedPrompt = p;
+        return JSON.stringify({ pass: true, rule: '', issue: '', suggestion: '' });
+      });
+      const gate = new MessagingToneGate(provider);
+      await gate.review('Hello world', {
+        channel: 'telegram',
+        signals: {
+          duplicate: { detected: true, similarity: 0.95, matchedText: 'Hello world prior' },
+        },
+      });
+      expect(capturedPrompt).toContain('outbound-dedup detector: detected=true similarity=0.950');
+      expect(capturedPrompt).toContain('Hello world prior');
+    });
+
+    it('renders placeholder when no signals provided', async () => {
+      let capturedPrompt = '';
+      const provider = mockProvider((p) => {
+        capturedPrompt = p;
+        return JSON.stringify({ pass: true, rule: '', issue: '', suggestion: '' });
+      });
+      const gate = new MessagingToneGate(provider);
+      await gate.review('Plain message', { channel: 'telegram' });
+      expect(capturedPrompt).toContain('UPSTREAM SIGNALS');
+      expect(capturedPrompt).toContain('no signals reported');
     });
   });
 
@@ -259,26 +394,31 @@ describe('MessagingToneGate', () => {
   describe('parse robustness', () => {
     it('extracts JSON from responses with surrounding prose', async () => {
       const provider = mockProvider(() =>
-        'Here is my review:\n{"pass": false, "issue": "tech leak", "suggestion": "rephrase"}\nThat is all.',
+        'Here is my review:\n{"pass": false, "rule": "B1_CLI_COMMAND", "issue": "tech leak", "suggestion": "rephrase"}\nThat is all.',
       );
       const gate = new MessagingToneGate(provider);
 
       const result = await gate.review('bad message', { channel: 'telegram' });
 
       expect(result.pass).toBe(false);
+      expect(result.rule).toBe('B1_CLI_COMMAND');
       expect(result.issue).toBe('tech leak');
       expect(result.suggestion).toBe('rephrase');
     });
 
-    it('defaults issue/suggestion to empty strings when LLM omits them', async () => {
+    it('fails open when LLM blocks but omits the rule field (drift)', async () => {
+      // Historically this test expected the gate to block with empty fields.
+      // Under the signal-vs-authority rework, a block without a rule citation
+      // is treated as reasoning drift and fails open — the authority must
+      // trace its decisions to enumerated rule ids.
       const provider = mockProvider(() => JSON.stringify({ pass: false }));
       const gate = new MessagingToneGate(provider);
 
       const result = await gate.review('message', { channel: 'telegram' });
 
-      expect(result.pass).toBe(false);
-      expect(result.issue).toBe('');
-      expect(result.suggestion).toBe('');
+      expect(result.pass).toBe(true);
+      expect(result.failedOpen).toBe(true);
+      expect(result.invalidRule).toBe(true);
     });
   });
 });
