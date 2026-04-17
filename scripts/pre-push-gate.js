@@ -130,7 +130,7 @@ try {
   const { execSync } = await import('node:child_process');
   // Get files changed since the remote tracking branch
   const remoteBranch = execSync('git rev-parse --abbrev-ref @{u} 2>/dev/null || echo origin/main', { encoding: 'utf-8' }).trim();
-  const changedFiles = execSync(`git diff --name-only ${remoteBranch}...HEAD 2>/dev/null || git diff --name-only HEAD~1`, { encoding: 'utf-8' })
+  const changedFiles = execSync(`git diff --name-only ${remoteBranch}...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null`, { encoding: 'utf-8' })
     .trim()
     .split('\n')
     .filter(Boolean);
@@ -209,8 +209,11 @@ try {
 // in upgrades/side-effects/. This enforces the /instar-dev process at push
 // time — the pre-commit hook catches it earlier per-commit, this is the
 // release-level re-check.
-
-{
+//
+// Skipped in CI: contributor branches may be based on a commit predating the
+// artifact being added to main. The enforcement point is the local pre-push
+// hook; CI can't retroactively add artifacts.
+if (!process.env.CI) {
   const FIX_PATTERNS = [
     /\bfix(es|ed|ing)?\b/i,
     /\bbug(fix)?\b/i,
