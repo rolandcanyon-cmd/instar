@@ -377,6 +377,11 @@ export class SharedStateLedger {
         provenance: payload.provenance,
         dedupKey: payload.dedupKey,
         source: payload.source,
+        // v2: commitment-kind fields and disputes pointer. Passthrough for
+        // session-asserted writes; untouched for v1 subsystem emitters that
+        // don't supply these.
+        commitment: payload.commitment,
+        disputes: payload.disputes,
       };
 
       await fs.promises.appendFile(

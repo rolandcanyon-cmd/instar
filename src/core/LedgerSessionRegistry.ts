@@ -457,6 +457,101 @@ export class LedgerSessionRegistry {
     return n;
   }
 
+  // ── Write rate + commitment counters (slice 3) ──────────────────
+  //
+  // Per-session sliding-window rate tracking for /shared-state/append.
+  // In-memory only — a server restart resets the counters, which is
+  // an acceptable soft-limit property (absolute protection is the
+  // per-agent-global ceiling in slice 5).
+  //
+  // openCommitments and passiveWaitCommitments are incremented when a
+  // commitment is accepted; slice 4's resolve path will decrement them.
+
+  private writeTimestamps: Map<string, number[]> = new Map();
+  private openCommitments: Map<string, number> = new Map();
+  private passiveWaitCommitments: Map<string, number> = new Map();
+
+  /**
+   * Check write-rate. Returns null on ok, or the error reason if over.
+   * Caller must invoke recordWrite() AFTER the write has been accepted
+   * (so a failed write doesn't count against the quota).
+   */
+  checkWriteRate(sessionId: string, perMinuteLimit: number): 'over-session-rate' | null {
+    const t = this.now();
+    const cutoff = t - 60_000;
+    const arr = this.writeTimestamps.get(sessionId) ?? [];
+    const live = arr.filter((ts) => ts > cutoff);
+    if (live.length >= perMinuteLimit) return 'over-session-rate';
+    return null;
+  }
+
+  /** Record a successful write for rate tracking. */
+  recordWrite(sessionId: string): void {
+    const t = this.now();
+    const cutoff = t - 60_000;
+    const arr = (this.writeTimestamps.get(sessionId) ?? []).filter((ts) => ts > cutoff);
+    arr.push(t);
+    this.writeTimestamps.set(sessionId, arr);
+  }
+
+  /**
+   * Check commitment-count limits. Returns null on ok, or the error
+   * reason if over. Call recordOpenCommitment() on accept.
+   */
+  checkOpenCommitments(
+    sessionId: string,
+    mechanismType: string,
+    openLimit: number,
+    passiveWaitLimit: number,
+  ): 'over-open-commitments' | 'over-passive-wait-commitments' | null {
+    const open = this.openCommitments.get(sessionId) ?? 0;
+    if (open >= openLimit) return 'over-open-commitments';
+    if (mechanismType === 'passive-wait') {
+      const pw = this.passiveWaitCommitments.get(sessionId) ?? 0;
+      if (pw >= passiveWaitLimit) return 'over-passive-wait-commitments';
+    }
+    return null;
+  }
+
+  /** Increment open-commitment counters after a commitment is accepted. */
+  recordOpenCommitment(sessionId: string, mechanismType: string): void {
+    this.openCommitments.set(sessionId, (this.openCommitments.get(sessionId) ?? 0) + 1);
+    if (mechanismType === 'passive-wait') {
+      this.passiveWaitCommitments.set(
+        sessionId,
+        (this.passiveWaitCommitments.get(sessionId) ?? 0) + 1,
+      );
+    }
+  }
+
+  /**
+   * Decrement open-commitment counters when a commitment transitions
+   * to non-open (slice 4 resolve/cancel path). Clamped at zero.
+   */
+  recordCommitmentClosed(sessionId: string, mechanismType: string): void {
+    const open = this.openCommitments.get(sessionId) ?? 0;
+    this.openCommitments.set(sessionId, Math.max(0, open - 1));
+    if (mechanismType === 'passive-wait') {
+      const pw = this.passiveWaitCommitments.get(sessionId) ?? 0;
+      this.passiveWaitCommitments.set(sessionId, Math.max(0, pw - 1));
+    }
+  }
+
+  /** Test-only: read rate-tracker state. */
+  _getRateStateForTest(sessionId: string): {
+    writesInLastMinute: number;
+    openCommitments: number;
+    passiveWaitCommitments: number;
+  } {
+    const t = this.now();
+    const arr = (this.writeTimestamps.get(sessionId) ?? []).filter((ts) => ts > t - 60_000);
+    return {
+      writesInLastMinute: arr.length,
+      openCommitments: this.openCommitments.get(sessionId) ?? 0,
+      passiveWaitCommitments: this.passiveWaitCommitments.get(sessionId) ?? 0,
+    };
+  }
+
   // ── Hook-in-progress attestation (§3 iter 2 fallback) ────────────
 
   /**

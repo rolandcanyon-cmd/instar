@@ -10178,45 +10178,32 @@ export function createRoutes(ctx: RouteContext): Router {
 
       // ── Forbid server-bound fields FIRST ─────────────────────────
       // Runs before schema validation so a client debugging a forbidden-
-      // field error sees that failure first, not a downstream schema
-      // complaint triggered by an accidentally-supplied inner shape.
-      // Carry-forward from slice 1 reviewer (minor-3): reorder for
-      // clearer error surface. Behavior unchanged on valid requests.
+      // field error sees that failure first. `commitment` is allowed
+      // ONLY when kind === 'commitment' (slice 3 opens this path).
       const body = (req.body ?? {}) as Record<string, unknown>;
-      for (const forbidden of [
-        'commitment',
-        'provenance',
-        'emittedBy',
-        'source',
-        'id',
-        't',
-      ]) {
-        if (Object.prototype.hasOwnProperty.call(body, forbidden)) {
-          res.setHeader('X-Invalid-Field', forbidden);
+      const kind = typeof body.kind === 'string' ? body.kind : '';
+      const forbiddenBase = ['provenance', 'emittedBy', 'source', 'id', 't'];
+      const forbidden = kind === 'commitment' ? forbiddenBase : [...forbiddenBase, 'commitment'];
+      for (const f of forbidden) {
+        if (Object.prototype.hasOwnProperty.call(body, f)) {
+          res.setHeader('X-Invalid-Field', f);
           res.status(400).json({
-            error: `field '${forbidden}' is server-bound and cannot be supplied`,
+            error: `field '${f}' is server-bound and cannot be supplied`,
           });
           return;
         }
       }
 
       // ── Schema validation ─────────────────────────────────────────
-      const kind = typeof body.kind === 'string' ? body.kind : '';
-      if (kind === 'commitment') {
-        res.setHeader('X-Pending-Slice', '3');
-        res.status(501).json({
-          error: 'commitment kind pending slice 3 (mechanism-ref validator)',
-        });
-        return;
-      }
       if (
         kind !== 'agreement' &&
         kind !== 'decision' &&
-        kind !== 'note'
+        kind !== 'note' &&
+        kind !== 'commitment'
       ) {
         res.setHeader('X-Invalid-Field', 'kind');
         res.status(400).json({
-          error: 'kind must be one of: agreement | decision | note',
+          error: 'kind must be one of: agreement | decision | note | commitment',
         });
         return;
       }
@@ -10282,22 +10269,183 @@ export function createRoutes(ctx: RouteContext): Router {
           ? body.supersedes
           : undefined;
 
+      // ── Commitment-kind validation (slice 3) ─────────────────────
+      // Only runs when kind === 'commitment'. Validates the inner
+      // `commitment` object: mechanism shape, deadline sanity,
+      // passive-wait-requires-deadline. Server sets refResolvedAt,
+      // refStatus, status, resolution — all server-bound.
+      const ibConfig = ctx.config.integratedBeing ?? {};
+      let commitmentOut:
+        | undefined
+        | {
+            mechanism: {
+              type: 'scheduled-job' | 'polling-sentinel' | 'external-callback' | 'passive-wait' | 'user-driven';
+              ref?: string;
+              refResolvedAt: string;
+              refStatus: 'valid' | 'invalid' | 'unverified';
+            };
+            deadline?: string;
+            status: 'open';
+          };
+      if (kind === 'commitment') {
+        const commitment = body.commitment as
+          | {
+              mechanism?: { type?: string; ref?: string };
+              deadline?: string;
+              status?: string;
+              resolution?: unknown;
+            }
+          | undefined;
+        if (!commitment || typeof commitment !== 'object') {
+          res.setHeader('X-Invalid-Field', 'commitment');
+          res.status(400).json({ error: 'commitment object required on commitment kind' });
+          return;
+        }
+        if (commitment.status !== undefined && commitment.status !== 'open') {
+          res.setHeader('X-Invalid-Field', 'commitment.status');
+          res.status(400).json({
+            error: "commitment.status must be 'open' on create; use /shared-state/resolve/:id to transition",
+          });
+          return;
+        }
+        if (commitment.resolution !== undefined) {
+          res.setHeader('X-Invalid-Field', 'commitment.resolution');
+          res.status(400).json({
+            error: "commitment.resolution cannot be supplied on create (server-bound, set via resolve)",
+          });
+          return;
+        }
+        const mech = commitment.mechanism;
+        if (!mech || typeof mech !== 'object' || typeof mech.type !== 'string') {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism');
+          res.status(400).json({ error: 'commitment.mechanism.type required' });
+          return;
+        }
+        const validMechTypes = [
+          'scheduled-job',
+          'polling-sentinel',
+          'external-callback',
+          'passive-wait',
+          'user-driven',
+        ] as const;
+        if (!validMechTypes.includes(mech.type as (typeof validMechTypes)[number])) {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism.type');
+          res.status(400).json({
+            error: `commitment.mechanism.type must be one of: ${validMechTypes.join(' | ')}`,
+          });
+          return;
+        }
+        const mechType = mech.type as (typeof validMechTypes)[number];
+        // passive-wait forbids ref; others allow optional ref with charset.
+        if (mechType === 'passive-wait' && mech.ref !== undefined) {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism.ref');
+          res.status(400).json({
+            error: "passive-wait mechanism forbids commitment.mechanism.ref",
+          });
+          return;
+        }
+        if (
+          mech.ref !== undefined &&
+          (typeof mech.ref !== 'string' ||
+            mech.ref.length === 0 ||
+            mech.ref.length > 200 ||
+            !/^[a-zA-Z0-9\-_.:]+$/.test(mech.ref))
+        ) {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism.ref');
+          res.status(400).json({
+            error: 'commitment.mechanism.ref must be [a-zA-Z0-9-_.:], max 200 chars',
+          });
+          return;
+        }
+        // Deadline validation.
+        const deadline =
+          typeof commitment.deadline === 'string' ? commitment.deadline : undefined;
+        if (mechType === 'passive-wait' && !deadline) {
+          res.setHeader('X-Invalid-Field', 'commitment.deadline');
+          res.status(400).json({
+            error: 'passive-wait commitments require a deadline',
+          });
+          return;
+        }
+        if (deadline !== undefined) {
+          const dl = Date.parse(deadline);
+          if (Number.isNaN(dl)) {
+            res.setHeader('X-Invalid-Field', 'commitment.deadline');
+            res.status(400).json({ error: 'deadline must be ISO 8601' });
+            return;
+          }
+          const now = Date.now();
+          const minMs = now + 60 * 1000;
+          const maxMs = now + 90 * 24 * 60 * 60 * 1000;
+          if (dl < minMs || dl > maxMs) {
+            res.setHeader('X-Invalid-Field', 'commitment.deadline');
+            res.status(400).json({
+              error: 'deadline must be between now+60s and now+90d',
+            });
+            return;
+          }
+        }
+        // Open-commitment + passive-wait caps.
+        const openLimit = Math.max(1, ibConfig.openCommitmentsPerSession ?? 20);
+        const passiveLimit = Math.max(
+          0,
+          ibConfig.passiveWaitCommitmentsPerSession ?? 3,
+        );
+        const capReason = ctx.ledgerSessionRegistry!.checkOpenCommitments(
+          sessionId,
+          mechType,
+          openLimit,
+          passiveLimit,
+        );
+        if (capReason) {
+          res.setHeader('X-Cap-Reason', capReason);
+          res.status(429).json({ error: 'commitment cap exceeded', reason: capReason });
+          return;
+        }
+        // Build server-bound commitment fields. refStatus: slice 3 sets
+        // 'unverified' by default; positive verification (scheduled-job
+        // lookup against scheduler registry, etc.) is a slice 5 refinement.
+        commitmentOut = {
+          mechanism: {
+            type: mechType,
+            ref: mech.ref,
+            refResolvedAt: new Date().toISOString(),
+            refStatus: 'unverified',
+          },
+          deadline,
+          status: 'open',
+        };
+      }
+
+      // ── Per-session write-rate check ─────────────────────────────
+      // Runs after validation so a 429 doesn't block us from seeing
+      // the actual schema error first.
+      const writeRate = Math.max(1, ibConfig.sessionWriteRatePerMinute ?? 30);
+      const rateReason = ctx.ledgerSessionRegistry!.checkWriteRate(sessionId, writeRate);
+      if (rateReason) {
+        res.setHeader('X-Cap-Reason', rateReason);
+        res.status(429).json({ error: 'session write rate exceeded', reason: rateReason });
+        return;
+      }
+
       // ── Append ────────────────────────────────────────────────────
       try {
         const appended = await ctx.sharedStateLedger!.append({
           emittedBy: { subsystem: 'session', instance: sessionId },
-          kind: kind as 'agreement' | 'decision' | 'note',
+          kind: kind as 'agreement' | 'decision' | 'note' | 'commitment',
           subject,
           summary,
           counterparty: {
             type: counterparty.type,
             name: counterparty.name,
-            // trustTier is server-owned per spec — client hint ignored in slice 1.
+            // trustTier is server-owned per spec — hardcoded 'untrusted'
+            // in slice 3; slice 5 adds real resolution + discrepancy emit.
             trustTier: 'untrusted',
           },
           supersedes,
           provenance: 'session-asserted',
           dedupKey,
+          ...(commitmentOut ? { commitment: commitmentOut } : {}),
         });
 
         if (!appended) {
@@ -10314,6 +10462,13 @@ export function createRoutes(ctx: RouteContext): Router {
         }
 
         ctx.ledgerSessionRegistry!.touchActivity(sessionId);
+        ctx.ledgerSessionRegistry!.recordWrite(sessionId);
+        if (commitmentOut) {
+          ctx.ledgerSessionRegistry!.recordOpenCommitment(
+            sessionId,
+            commitmentOut.mechanism.type,
+          );
+        }
         res.json({ id: appended.id, t: appended.t });
       } catch (err) {
         console.error(

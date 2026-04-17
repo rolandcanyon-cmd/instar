@@ -3,7 +3,7 @@ title: "Integrated-Being Ledger v2 — Implementation Plan"
 author: "echo"
 created: "2026-04-17"
 spec: "docs/specs/integrated-being-ledger-v2.md"
-status: "in-progress — slice 1 (foundation) starting 2026-04-17"
+status: "in-progress — slices 1+2 shipped; slice 3 (commitment kind + mechanism-ref) starting 2026-04-17"
 ---
 
 # Integrated-Being Ledger v2 — Implementation Plan

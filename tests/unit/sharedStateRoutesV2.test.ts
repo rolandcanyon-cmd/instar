@@ -256,7 +256,7 @@ describe('Shared-state v2 routes — v2Enabled=true', () => {
       expect(res.status).toBe(200);
     });
 
-    it('returns 501 on commitment kind (deferred to slice 3)', async () => {
+    it('returns 400 on commitment kind without commitment object (slice 3 opened the path)', async () => {
       const res = await request(app)
         .post('/shared-state/append')
         .set(headers())
@@ -266,8 +266,9 @@ describe('Shared-state v2 routes — v2Enabled=true', () => {
           counterparty: { type: 'self', name: 'self' },
           dedupKey: 'slice1-comm-1',
         });
-      expect(res.status).toBe(501);
-      expect(res.headers['x-pending-slice']).toBe('3');
+      // Slice 3: commitment kind now accepted, but requires `commitment` field.
+      expect(res.status).toBe(400);
+      expect(res.headers['x-invalid-field']).toBe('commitment');
     });
 
     it('returns 400 on thread-* kinds (reserved for server emitters)', async () => {
@@ -373,6 +374,284 @@ describe('Shared-state v2 routes — v2Enabled=true', () => {
       );
       expect(sessionEntries.length).toBeGreaterThan(0);
       expect(sessionEntries[0].provenance).toBe('session-asserted');
+    });
+  });
+
+  describe('commitment kind (slice 3)', () => {
+    let sid: string;
+    let tok: string;
+
+    beforeAll(async () => {
+      sid = uuid();
+      const b = await request(app).post('/shared-state/session-bind').set(AUTH).send({ sessionId: sid });
+      tok = b.body.token;
+    });
+
+    const h = () => ({
+      ...AUTH,
+      'X-Instar-Session-Id': sid,
+      'X-Instar-Session-Token': tok,
+    });
+
+    const deadlineIn = (secsFromNow: number) =>
+      new Date(Date.now() + secsFromNow * 1000).toISOString();
+
+    it('accepts a scheduled-job commitment with deadline + ref', async () => {
+      const res = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'call Dawn back when her response lands',
+          counterparty: { type: 'agent', name: 'dawn' },
+          dedupKey: 'slice3-commit-sched-1',
+          commitment: {
+            mechanism: { type: 'scheduled-job', ref: 'job-42' },
+            deadline: deadlineIn(3600),
+          },
+        });
+      expect(res.status).toBe(200);
+      expect(res.body.id).toMatch(/^[0-9a-f]{12}$/);
+    });
+
+    it('accepts a passive-wait commitment only when deadline present', async () => {
+      const noDeadline = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'wait for ping',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-pw-nodl',
+          commitment: { mechanism: { type: 'passive-wait' } },
+        });
+      expect(noDeadline.status).toBe(400);
+      expect(noDeadline.headers['x-invalid-field']).toBe('commitment.deadline');
+
+      const withDeadline = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'wait for ping',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-pw-ok',
+          commitment: {
+            mechanism: { type: 'passive-wait' },
+            deadline: deadlineIn(3600),
+          },
+        });
+      expect(withDeadline.status).toBe(200);
+    });
+
+    it('forbids ref on passive-wait', async () => {
+      const res = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'passive with forbidden ref',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-pw-ref',
+          commitment: {
+            mechanism: { type: 'passive-wait', ref: 'nope' },
+            deadline: deadlineIn(3600),
+          },
+        });
+      expect(res.status).toBe(400);
+      expect(res.headers['x-invalid-field']).toBe('commitment.mechanism.ref');
+    });
+
+    it('rejects past-dated deadline (adversarial spoofing)', async () => {
+      const res = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'deadline in the past',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-past-dl',
+          commitment: {
+            mechanism: { type: 'scheduled-job' },
+            deadline: new Date(Date.now() - 60 * 1000).toISOString(),
+          },
+        });
+      expect(res.status).toBe(400);
+      expect(res.headers['x-invalid-field']).toBe('commitment.deadline');
+    });
+
+    it('rejects deadline beyond 90 days', async () => {
+      const res = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'far-future deadline',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-far-dl',
+          commitment: {
+            mechanism: { type: 'scheduled-job' },
+            deadline: deadlineIn(91 * 24 * 60 * 60),
+          },
+        });
+      expect(res.status).toBe(400);
+    });
+
+    it('rejects bad mechanism.type', async () => {
+      const res = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'bad mech',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-bad-mech',
+          commitment: {
+            mechanism: { type: 'magic-future' },
+            deadline: deadlineIn(3600),
+          },
+        });
+      expect(res.status).toBe(400);
+      expect(res.headers['x-invalid-field']).toBe('commitment.mechanism.type');
+    });
+
+    it('rejects client-supplied commitment.status and commitment.resolution', async () => {
+      const r1 = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'tries to resolve on create',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-status-supply',
+          commitment: {
+            mechanism: { type: 'scheduled-job' },
+            deadline: deadlineIn(3600),
+            status: 'resolved',
+          },
+        });
+      expect(r1.status).toBe(400);
+
+      const r2 = await request(app)
+        .post('/shared-state/append')
+        .set(h())
+        .send({
+          kind: 'commitment',
+          subject: 'tries to resolution-stuff on create',
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: 'slice3-res-supply',
+          commitment: {
+            mechanism: { type: 'scheduled-job' },
+            deadline: deadlineIn(3600),
+            resolution: { at: new Date().toISOString(), by: 'self-asserted' },
+          },
+        });
+      expect(r2.status).toBe(400);
+    });
+
+    it('appended commitment renders with server-bound fields', async () => {
+      const res = await request(app).get('/shared-state/recent').set(AUTH);
+      const commits = (res.body.entries as any[]).filter((e) => e.kind === 'commitment');
+      expect(commits.length).toBeGreaterThan(0);
+      const latest = commits[0];
+      // Server-bound fields present:
+      expect(latest.provenance).toBe('session-asserted');
+      expect(latest.emittedBy.subsystem).toBe('session');
+      expect(latest.commitment.status).toBe('open');
+      expect(latest.commitment.mechanism.refStatus).toBe('unverified');
+      expect(typeof latest.commitment.mechanism.refResolvedAt).toBe('string');
+    });
+  });
+
+  describe('rate limits (slice 3)', () => {
+    it('429 on per-session-open-commitments cap', async () => {
+      // Fresh agent/app with a tiny open-commitments cap.
+      const p = createTempProject();
+      const cfg = baseConfig(p.stateDir);
+      cfg.integratedBeing = {
+        enabled: true,
+        v2Enabled: true,
+        openCommitmentsPerSession: 2,
+        sessionWriteRatePerMinute: 1000,
+      };
+      const l = new SharedStateLedger({ stateDir: p.stateDir, config: cfg.integratedBeing, salt: 's' });
+      const r = new LedgerSessionRegistry({ stateDir: p.stateDir, config: cfg.integratedBeing });
+      const s = new AgentServer({
+        config: cfg,
+        sessionManager: createMockSessionManager() as any,
+        state: p.state,
+        sharedStateLedger: l,
+        ledgerSessionRegistry: r,
+      });
+      const a = s.getApp();
+
+      const sid2 = uuid();
+      const b = await request(a).post('/shared-state/session-bind').set(AUTH).send({ sessionId: sid2 });
+      const tok2 = b.body.token;
+      const headers2 = { ...AUTH, 'X-Instar-Session-Id': sid2, 'X-Instar-Session-Token': tok2 };
+
+      const make = (n: number) =>
+        request(a).post('/shared-state/append').set(headers2).send({
+          kind: 'commitment',
+          subject: `c${n}`,
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: `slice3-cap-${n}`,
+          commitment: {
+            mechanism: { type: 'scheduled-job' },
+            deadline: new Date(Date.now() + 3600 * 1000).toISOString(),
+          },
+        });
+
+      expect((await make(1)).status).toBe(200);
+      expect((await make(2)).status).toBe(200);
+      const over = await make(3);
+      expect(over.status).toBe(429);
+      expect(over.headers['x-cap-reason']).toBe('over-open-commitments');
+
+      l.shutdown();
+      p.cleanup();
+    });
+
+    it('429 on per-session write rate', async () => {
+      const p = createTempProject();
+      const cfg = baseConfig(p.stateDir);
+      cfg.integratedBeing = {
+        enabled: true,
+        v2Enabled: true,
+        sessionWriteRatePerMinute: 2,
+      };
+      const l = new SharedStateLedger({ stateDir: p.stateDir, config: cfg.integratedBeing, salt: 's' });
+      const r = new LedgerSessionRegistry({ stateDir: p.stateDir, config: cfg.integratedBeing });
+      const s = new AgentServer({
+        config: cfg,
+        sessionManager: createMockSessionManager() as any,
+        state: p.state,
+        sharedStateLedger: l,
+        ledgerSessionRegistry: r,
+      });
+      const a = s.getApp();
+
+      const sid3 = uuid();
+      const b = await request(a).post('/shared-state/session-bind').set(AUTH).send({ sessionId: sid3 });
+      const tok3 = b.body.token;
+      const hh = { ...AUTH, 'X-Instar-Session-Id': sid3, 'X-Instar-Session-Token': tok3 };
+
+      const note = (n: number) =>
+        request(a).post('/shared-state/append').set(hh).send({
+          kind: 'note',
+          subject: `n${n}`,
+          counterparty: { type: 'self', name: 'self' },
+          dedupKey: `slice3-rate-${n}`,
+        });
+
+      expect((await note(1)).status).toBe(200);
+      expect((await note(2)).status).toBe(200);
+      const over = await note(3);
+      expect(over.status).toBe(429);
+      expect(over.headers['x-cap-reason']).toBe('over-session-rate');
+
+      l.shutdown();
+      p.cleanup();
     });
   });
 
