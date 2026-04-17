@@ -19,8 +19,53 @@ export interface SyncSessionHookOptions {
   dir?: string;
   /** Overwrite without prompting. */
   force?: boolean;
+  /**
+   * v2 migration mode (docs/specs/integrated-being-ledger-v2.md §"Interactions").
+   * - undefined: legacy behavior — overwrite or fail-divergent (requires --force).
+   * - 'inject': update ONLY the section between `# BEGIN integrated-being-v2` and
+   *   `# END integrated-being-v2` markers. Idempotent. Never touches other
+   *   customizations. If markers are missing, append the v2 section at end.
+   * - 'overwrite': replace the entire hook with the canonical template. Saves
+   *   the pre-migration hook to .pre-v2.<ts> for recovery.
+   */
+  v2Mode?: 'inject' | 'overwrite';
   /** Test-only override — supplies config instead of reading from disk. */
   _configOverride?: { projectDir: string; stateDir: string; port: number; projectName: string; hasTelegram?: boolean };
+}
+
+/** Marker sentinels for v2 inject-mode. Must match getSessionStartHook() output. */
+const V2_BEGIN = '# BEGIN integrated-being-v2';
+const V2_END = '# END integrated-being-v2';
+
+/**
+ * Extract the v2 section from a canonical hook template.
+ * Returns the substring including the begin/end markers; empty if markers
+ * aren't present (indicates a non-v2 template, which shouldn't happen in
+ * practice after this code ships).
+ */
+function extractV2Section(template: string): string {
+  const start = template.indexOf(V2_BEGIN);
+  const endAnchor = template.indexOf(V2_END, start);
+  if (start < 0 || endAnchor < 0) return '';
+  const endLineEnd = template.indexOf('\n', endAnchor);
+  return template.slice(start, endLineEnd < 0 ? template.length : endLineEnd);
+}
+
+/**
+ * Inject-mode: update ONLY the v2 section in an existing hook. Idempotent.
+ * If the existing hook has no markers, append the v2 section.
+ */
+function injectV2Section(existing: string, v2Section: string): string {
+  const start = existing.indexOf(V2_BEGIN);
+  const endAnchor = existing.indexOf(V2_END, start);
+  if (start >= 0 && endAnchor > start) {
+    const endLineEnd = existing.indexOf('\n', endAnchor);
+    const tail = endLineEnd < 0 ? '' : existing.slice(endLineEnd);
+    return existing.slice(0, start) + v2Section + tail;
+  }
+  // No markers — append with a separating newline if needed.
+  const sep = existing.endsWith('\n') ? '' : '\n';
+  return existing + sep + '\n' + v2Section + '\n';
 }
 
 /**
@@ -58,6 +103,46 @@ export async function syncSessionHook(
   let existing: string | null = null;
   try { existing = fs.readFileSync(hookPath, 'utf-8'); } catch { /* first install */ }
 
+  // ── v2 inject mode: update ONLY the bounded v2 section ─────────────
+  // Preserves every other customization. Idempotent.
+  if (opts.v2Mode === 'inject') {
+    const v2Section = extractV2Section(hookContent);
+    if (!v2Section) {
+      return {
+        changed: false,
+        path: hookPath,
+        reason: 'canonical template has no v2 markers (unexpected)',
+      };
+    }
+    const updated = existing === null
+      ? hookContent  // No existing hook → write the canonical template outright.
+      : injectV2Section(existing, v2Section);
+    if (updated === existing) {
+      return { changed: false, path: hookPath, reason: 'v2 section already up to date' };
+    }
+    fs.writeFileSync(hookPath, updated, { mode: 0o755 });
+    console.log(pc.green(`v2 section injected into ${hookPath}`));
+    return { changed: true, path: hookPath };
+  }
+
+  // ── v2 overwrite mode: replace entire hook, save pre-migration backup ─
+  if (opts.v2Mode === 'overwrite') {
+    if (existing !== null && existing.length > 0) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const backup = `${hookPath}.pre-v2.${stamp}`;
+      fs.writeFileSync(backup, existing, { mode: 0o644 });
+      console.log(pc.yellow(`Saved pre-migration hook to ${backup}`));
+    }
+    if (existing === hookContent) {
+      return { changed: false, path: hookPath, reason: 'already up to date' };
+    }
+    fs.writeFileSync(hookPath, hookContent, { mode: 0o755 });
+    console.log(pc.green(`Wrote ${hookPath} (overwrite mode)`));
+    return { changed: true, path: hookPath };
+  }
+
+  // ── Legacy behavior: overwrite, or fail-divergent if --force absent ──
+
   if (existing === hookContent) {
     return { changed: false, path: hookPath, reason: 'already up to date' };
   }
@@ -71,6 +156,9 @@ export async function syncSessionHook(
       ));
       console.log(pc.yellow(
         `Re-run with --force to overwrite (your custom changes will be replaced).`,
+      ));
+      console.log(pc.yellow(
+        `Or use --v2-mode=inject to update ONLY the v2 section and preserve customizations.`,
       ));
       return { changed: false, path: hookPath, reason: 'divergent — use --force' };
     }

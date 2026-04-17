@@ -375,4 +375,127 @@ describe('Shared-state v2 routes — v2Enabled=true', () => {
       expect(sessionEntries[0].provenance).toBe('session-asserted');
     });
   });
+
+  describe('session-bind-confirm (slice 2)', () => {
+    it('clears hook-in-progress flag', async () => {
+      const sid = uuid();
+      await request(app).post('/shared-state/session-bind').set(AUTH).send({ sessionId: sid });
+      // Flag should be set now.
+      expect(registry.isHookInProgress(sid)).toBe(true);
+      const res = await request(app)
+        .post('/shared-state/session-bind-confirm')
+        .set(AUTH)
+        .send({ sessionId: sid });
+      expect(res.status).toBe(200);
+      expect(res.body.confirmed).toBe(true);
+      expect(registry.isHookInProgress(sid)).toBe(false);
+    });
+
+    it('400 on missing sessionId', async () => {
+      const res = await request(app)
+        .post('/shared-state/session-bind-confirm')
+        .set(AUTH)
+        .send({});
+      expect(res.status).toBe(400);
+    });
+  });
+
+  describe('session-bind-interactive (slice 2)', () => {
+    it('403 when no hook-in-progress flag is set', async () => {
+      const sid = uuid();
+      const res = await request(app)
+        .post('/shared-state/session-bind-interactive')
+        .set(AUTH)
+        .send({ sessionId: sid });
+      expect(res.status).toBe(403);
+      expect(res.body.reason).toBe('attestation-missing');
+    });
+
+    it('403 when the flag has been cleared (e.g. via confirm)', async () => {
+      const sid = uuid();
+      // Bind + confirm — this is the happy path. Hook-in-progress flag now cleared.
+      await request(app).post('/shared-state/session-bind').set(AUTH).send({ sessionId: sid });
+      await request(app).post('/shared-state/session-bind-confirm').set(AUTH).send({ sessionId: sid });
+      const res = await request(app)
+        .post('/shared-state/session-bind-interactive')
+        .set(AUTH)
+        .send({ sessionId: sid });
+      expect(res.status).toBe(403);
+      expect(res.body.reason).toBe('attestation-missing');
+    });
+
+    it('200 after session-bind when the file-handoff failed (flag still set)', async () => {
+      // Models the real lifecycle: session-bind succeeds (registers + sets
+      // flag + mints token), hook fails to write the token file (mode mismatch,
+      // read-only FS, etc.), then the session falls back to interactive.
+      // Interactive should re-issue a fresh token against the existing
+      // registration and clear the flag.
+      const sid = uuid();
+      const bindRes = await request(app)
+        .post('/shared-state/session-bind')
+        .set(AUTH)
+        .send({ sessionId: sid });
+      const origToken = bindRes.body.token;
+
+      const res = await request(app)
+        .post('/shared-state/session-bind-interactive')
+        .set(AUTH)
+        .send({ sessionId: sid });
+      expect(res.status).toBe(200);
+      expect(res.body.token).toMatch(/^[0-9a-f]{64}$/);
+      // Re-issued token must be different from the original, and the original
+      // must no longer verify — the hash was replaced.
+      expect(res.body.token).not.toBe(origToken);
+      // Flag cleared — a replay attempt returns 403.
+      const replay = await request(app)
+        .post('/shared-state/session-bind-interactive')
+        .set(AUTH)
+        .send({ sessionId: sid });
+      expect(replay.status).toBe(403);
+      expect(replay.body.reason).toBe('attestation-missing');
+    });
+  });
+
+  describe('session-bind-rotate (slice 2)', () => {
+    it('200 with new token on valid current token', async () => {
+      const sid = uuid();
+      const bind = await request(app)
+        .post('/shared-state/session-bind')
+        .set(AUTH)
+        .send({ sessionId: sid });
+      const origToken = bind.body.token;
+
+      const rot = await request(app)
+        .post('/shared-state/session-bind-rotate')
+        .set({ ...AUTH, 'X-Instar-Session-Token': origToken })
+        .send({ sessionId: sid });
+      expect(rot.status).toBe(200);
+      expect(rot.body.token).toMatch(/^[0-9a-f]{64}$/);
+      expect(rot.body.token).not.toBe(origToken);
+    });
+
+    it('401 on wrong current token', async () => {
+      const sid = uuid();
+      await request(app).post('/shared-state/session-bind').set(AUTH).send({ sessionId: sid });
+      const rot = await request(app)
+        .post('/shared-state/session-bind-rotate')
+        .set({ ...AUTH, 'X-Instar-Session-Token': 'a'.repeat(64) })
+        .send({ sessionId: sid });
+      expect(rot.status).toBe(401);
+    });
+
+    it('400 on missing sessionId or header', async () => {
+      const r1 = await request(app)
+        .post('/shared-state/session-bind-rotate')
+        .set({ ...AUTH, 'X-Instar-Session-Token': 'x'.repeat(64) })
+        .send({});
+      expect(r1.status).toBe(400);
+
+      const r2 = await request(app)
+        .post('/shared-state/session-bind-rotate')
+        .set(AUTH)
+        .send({ sessionId: uuid() });
+      expect(r2.status).toBe(400);
+    });
+  });
 });

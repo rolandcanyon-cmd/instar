@@ -1697,13 +1697,22 @@ const migrateCmd = program
 // /shared-state/render injection after an update.
 migrateCmd
   .command('sync-session-hook')
-  .description('Sync .claude/hooks/instar/session-start.sh with the latest template (Integrated-Being v1)')
+  .description('Sync .claude/hooks/instar/session-start.sh with the latest template (Integrated-Being v1 + v2)')
   .option('-d, --dir <path>', 'Project directory')
   .option('--force', 'Overwrite a divergent local hook')
-  .action(async (opts: { dir?: string; force?: boolean }) => {
+  .option('--v2-mode <mode>', 'v2 migration mode: "inject" (update only v2 section, preserve customizations) or "overwrite" (replace entire hook, save backup)')
+  .action(async (opts: { dir?: string; force?: boolean; v2Mode?: string }) => {
     try {
+      if (opts.v2Mode && opts.v2Mode !== 'inject' && opts.v2Mode !== 'overwrite') {
+        console.error(JSON.stringify({ error: '--v2-mode must be "inject" or "overwrite"' }));
+        process.exit(2);
+      }
       const { syncSessionHook } = await import('./commands/migrate.js');
-      const result = await syncSessionHook(opts);
+      const result = await syncSessionHook({
+        dir: opts.dir,
+        force: opts.force,
+        v2Mode: opts.v2Mode as 'inject' | 'overwrite' | undefined,
+      });
       console.log(JSON.stringify(result));
     } catch (err) {
       console.error(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));

@@ -10111,6 +10111,9 @@ export function createRoutes(ctx: RouteContext): Router {
           });
           return;
         }
+        // Mark hook-in-progress so the interactive-fallback path can
+        // attest a lifecycle hook initiated this bind (spec §3).
+        ctx.ledgerSessionRegistry!.markHookInProgress(sessionId);
         res.setHeader('Cache-Control', 'no-store');
         res.json({
           sessionId: result.sessionId,
@@ -10173,8 +10176,31 @@ export function createRoutes(ctx: RouteContext): Router {
         return;
       }
 
-      // ── Schema validation ─────────────────────────────────────────
+      // ── Forbid server-bound fields FIRST ─────────────────────────
+      // Runs before schema validation so a client debugging a forbidden-
+      // field error sees that failure first, not a downstream schema
+      // complaint triggered by an accidentally-supplied inner shape.
+      // Carry-forward from slice 1 reviewer (minor-3): reorder for
+      // clearer error surface. Behavior unchanged on valid requests.
       const body = (req.body ?? {}) as Record<string, unknown>;
+      for (const forbidden of [
+        'commitment',
+        'provenance',
+        'emittedBy',
+        'source',
+        'id',
+        't',
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(body, forbidden)) {
+          res.setHeader('X-Invalid-Field', forbidden);
+          res.status(400).json({
+            error: `field '${forbidden}' is server-bound and cannot be supplied`,
+          });
+          return;
+        }
+      }
+
+      // ── Schema validation ─────────────────────────────────────────
       const kind = typeof body.kind === 'string' ? body.kind : '';
       if (kind === 'commitment') {
         res.setHeader('X-Pending-Slice', '3');
@@ -10256,26 +10282,6 @@ export function createRoutes(ctx: RouteContext): Router {
           ? body.supersedes
           : undefined;
 
-      // ── Forbid commitment / source / provenance / emittedBy fields ──
-      // Those are server-bound per spec §2. Clients that try to set them
-      // get a 400 — this prevents confusion about what's authoritative.
-      for (const forbidden of [
-        'commitment',
-        'provenance',
-        'emittedBy',
-        'source',
-        'id',
-        't',
-      ]) {
-        if (Object.prototype.hasOwnProperty.call(body, forbidden)) {
-          res.setHeader('X-Invalid-Field', forbidden);
-          res.status(400).json({
-            error: `field '${forbidden}' is server-bound and cannot be supplied`,
-          });
-          return;
-        }
-      }
-
       // ── Append ────────────────────────────────────────────────────
       try {
         const appended = await ctx.sharedStateLedger!.append({
@@ -10321,6 +10327,170 @@ export function createRoutes(ctx: RouteContext): Router {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+  );
+
+  /**
+   * POST /shared-state/session-bind-confirm
+   *
+   * Called by the session-start hook AFTER the file-based handoff has
+   * completed (token file written with mode 0o600 + .ready marker). The
+   * server clears the hook-in-progress flag, which closes the window
+   * for the session-bind-interactive fallback on this session id.
+   *
+   * Request body: { sessionId }
+   * Response 200: { confirmed: true }
+   * Response 400: malformed or missing sessionId
+   * Response 503: v2 disabled
+   */
+  router.post(
+    '/shared-state/session-bind-confirm',
+    rateLimiter(60_000, 30),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      const body = (req.body ?? {}) as { sessionId?: unknown };
+      const sessionId =
+        typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId is required' });
+        return;
+      }
+      ctx.ledgerSessionRegistry!.confirmHookDone(sessionId);
+      res.json({ confirmed: true });
+    }
+  );
+
+  /**
+   * POST /shared-state/session-bind-interactive
+   *
+   * Attestation-gated fallback for when the file-based handoff fails
+   * (e.g. filesystem mode verification error, read-only FS, race with
+   * a cleanup). The session polls the `.ready` marker, times out at 5s,
+   * then calls this endpoint.
+   *
+   * Gate conditions (spec §3 iter 2) — BOTH required:
+   *   1. The session has a hook-in-progress flag set within 30s of
+   *      its session-bind call.
+   *   2. The session has NOT already been issued a binding token via
+   *      any path (hasEverBeenBound check).
+   *
+   * The gate ensures a bearer-token holder cannot mint a binding
+   * token without first posing as the session-start hook (requires
+   * being the session's actual parent process) AND the file path
+   * having failed first. The 0o600 boundary remains primary.
+   *
+   * Request body: { sessionId }
+   * Response 200: { token, absoluteExpiresAt, idleExpiresAt }
+   * Response 400: malformed or missing sessionId
+   * Response 403: attestation failed (no hook-in-progress, or already-bound)
+   * Response 503: v2 disabled
+   */
+  router.post(
+    '/shared-state/session-bind-interactive',
+    rateLimiter(60_000, 10),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      const body = (req.body ?? {}) as { sessionId?: unknown };
+      const sessionId =
+        typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId is required' });
+        return;
+      }
+
+      const registry = ctx.ledgerSessionRegistry!;
+      // Attestation: the hook-in-progress flag alone is the gate. Its
+      // presence means (a) a session-bind call happened in the last 30s
+      // AND (b) no session-bind-confirm or prior interactive bind has
+      // cleared it. Single-use is enforced by clearing the flag on
+      // success — a replay attempts lands on "attestation-missing".
+      if (!registry.isHookInProgress(sessionId)) {
+        res.status(403).json({
+          error: 'no live hook-in-progress flag for this session',
+          reason: 'attestation-missing',
+        });
+        return;
+      }
+
+      // Re-issue the token against the existing registration (which
+      // session-bind already created). Preserves anchored absolute TTL.
+      const reissue = registry.reissueForInteractive(sessionId);
+      if (!reissue.ok) {
+        const status =
+          reissue.reason === 'revoked' || reissue.reason === 'absolute-expired'
+            ? 403
+            : reissue.reason === 'malformed'
+            ? 400
+            : 404;
+        res.status(status).json({
+          error: 'interactive re-issue failed',
+          reason: reissue.reason,
+        });
+        return;
+      }
+      // Single-use: clear the flag so replays return 403.
+      registry.confirmHookDone(sessionId);
+
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        sessionId: reissue.result.sessionId,
+        token: reissue.result.token,
+        absoluteExpiresAt: reissue.result.absoluteExpiresAt,
+        idleExpiresAt: reissue.result.idleExpiresAt,
+      });
+    }
+  );
+
+  /**
+   * POST /shared-state/session-bind-rotate
+   *
+   * Rotates a session's binding token. Requires the current valid token
+   * (anti-takeover: an attacker without the current token cannot rotate).
+   * The anchored absolute TTL is NOT extended — rotation refreshes idle
+   * TTL only. Past absolute-TTL sessions get a 403; the caller must
+   * start a fresh sessionId.
+   *
+   * Request body: { sessionId }
+   * Headers: X-Instar-Session-Token (the CURRENT valid token)
+   * Response 200: { token, absoluteExpiresAt, idleExpiresAt }
+   * Response 401: invalid current token
+   * Response 403: session revoked or absolute TTL exhausted
+   * Response 503: v2 disabled
+   */
+  router.post(
+    '/shared-state/session-bind-rotate',
+    rateLimiter(60_000, 10),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      const body = (req.body ?? {}) as { sessionId?: unknown };
+      const sessionId =
+        typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+      const currentToken = String(req.header('x-instar-session-token') ?? '').trim();
+      if (!sessionId || !currentToken) {
+        res.status(400).json({
+          error: 'sessionId (body) and X-Instar-Session-Token (header) required',
+        });
+        return;
+      }
+      const result = ctx.ledgerSessionRegistry!.rotate(sessionId, currentToken);
+      if (!result.ok) {
+        const status =
+          result.reason === 'revoked' || result.reason === 'absolute-expired'
+            ? 403
+            : 401;
+        res.status(status).json({
+          error: 'rotation failed',
+          reason: result.reason,
+        });
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        sessionId: result.result.sessionId,
+        token: result.result.token,
+        absoluteExpiresAt: result.result.absoluteExpiresAt,
+        idleExpiresAt: result.result.idleExpiresAt,
+      });
     }
   );
 

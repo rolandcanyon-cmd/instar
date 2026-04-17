@@ -363,6 +363,181 @@ describe('LedgerSessionRegistry', () => {
     });
   });
 
+  describe('rotate (slice 2)', () => {
+    it('issues a new token and invalidates the old one', () => {
+      const id = uuid();
+      const first = registry.register(id);
+      const rot = registry.rotate(id, first.token);
+      expect(rot.ok).toBe(true);
+      if (rot.ok) {
+        expect(rot.result.token).not.toBe(first.token);
+        // Old token no longer verifies.
+        const v = registry.verify(id, first.token);
+        expect(v.ok).toBe(false);
+        if (!v.ok) expect(v.reason).toBe('token-mismatch');
+        // New token does verify.
+        const v2 = registry.verify(id, rot.result.token);
+        expect(v2.ok).toBe(true);
+      }
+    });
+
+    it('refuses rotation with wrong current token', () => {
+      const id = uuid();
+      registry.register(id);
+      const rot = registry.rotate(id, 'a'.repeat(64));
+      expect(rot.ok).toBe(false);
+      if (!rot.ok) expect(rot.reason).toBe('token-mismatch');
+    });
+
+    it('preserves absolute expiry on rotation (does not extend)', () => {
+      let now = 1_000_000_000;
+      const cfg = makeConfig({ tokenAbsoluteTtlHours: 2, tokenIdleTtlHours: 1 });
+      const reg = new LedgerSessionRegistry({
+        stateDir: dir,
+        config: cfg,
+        now: () => now,
+      });
+      const id = uuid();
+      const first = reg.register(id);
+      const origAbs = new Date(first.absoluteExpiresAt).getTime();
+      now += 30 * 60 * 1000; // +30min
+      const rot = reg.rotate(id, first.token);
+      expect(rot.ok).toBe(true);
+      if (rot.ok) {
+        expect(new Date(rot.result.absoluteExpiresAt).getTime()).toBe(origAbs);
+      }
+    });
+
+    it('refuses rotation when absolute TTL has passed', () => {
+      let now = 1_000_000_000;
+      const cfg = makeConfig({ tokenAbsoluteTtlHours: 1, tokenIdleTtlHours: 2 });
+      const reg = new LedgerSessionRegistry({
+        stateDir: dir,
+        config: cfg,
+        now: () => now,
+      });
+      const id = uuid();
+      const first = reg.register(id);
+      now += 2 * 60 * 60 * 1000; // +2h, past absolute TTL
+      const rot = reg.rotate(id, first.token);
+      expect(rot.ok).toBe(false);
+      if (!rot.ok) expect(rot.reason).toBe('absolute-expired');
+    });
+  });
+
+  describe('hook-in-progress tracking (slice 2)', () => {
+    it('markHookInProgress + isHookInProgress roundtrip', () => {
+      const id = uuid();
+      expect(registry.isHookInProgress(id)).toBe(false);
+      registry.markHookInProgress(id);
+      expect(registry.isHookInProgress(id)).toBe(true);
+    });
+
+    it('flag expires after 30 seconds', () => {
+      let now = 1_000_000;
+      const reg = new LedgerSessionRegistry({
+        stateDir: dir,
+        config: makeConfig(),
+        now: () => now,
+      });
+      const id = uuid();
+      reg.markHookInProgress(id);
+      now += 31 * 1000;
+      expect(reg.isHookInProgress(id)).toBe(false);
+    });
+
+    it('confirmHookDone clears the flag', () => {
+      const id = uuid();
+      registry.markHookInProgress(id);
+      expect(registry.isHookInProgress(id)).toBe(true);
+      registry.confirmHookDone(id);
+      expect(registry.isHookInProgress(id)).toBe(false);
+    });
+
+    it('hasConfirmedHandoff reflects flag state', () => {
+      const id = uuid();
+      expect(registry.hasConfirmedHandoff(id)).toBe(false); // unregistered
+      registry.register(id); // register() also marks hook-in-progress via the route; registry.register alone doesn't.
+      expect(registry.hasConfirmedHandoff(id)).toBe(true); // registered, no pending flag
+      registry.markHookInProgress(id);
+      expect(registry.hasConfirmedHandoff(id)).toBe(false); // pending flag set
+      registry.confirmHookDone(id);
+      expect(registry.hasConfirmedHandoff(id)).toBe(true); // flag cleared
+    });
+  });
+
+  describe('reissueForInteractive (slice 2 — fallback path)', () => {
+    it('issues a new token against an existing registration', () => {
+      const id = uuid();
+      const first = registry.register(id);
+      const reissue = registry.reissueForInteractive(id);
+      expect(reissue.ok).toBe(true);
+      if (reissue.ok) {
+        expect(reissue.result.token).not.toBe(first.token);
+        // Old token no longer verifies; new one does.
+        expect(registry.verify(id, first.token).ok).toBe(false);
+        expect(registry.verify(id, reissue.result.token).ok).toBe(true);
+      }
+    });
+
+    it('preserves anchored absolute expiry', () => {
+      let now = 1_000_000_000;
+      const cfg = makeConfig({ tokenAbsoluteTtlHours: 2 });
+      const reg = new LedgerSessionRegistry({
+        stateDir: dir,
+        config: cfg,
+        now: () => now,
+      });
+      const id = uuid();
+      const first = reg.register(id);
+      const origAbs = new Date(first.absoluteExpiresAt).getTime();
+      now += 30 * 60 * 1000;
+      const reissue = reg.reissueForInteractive(id);
+      expect(reissue.ok).toBe(true);
+      if (reissue.ok) {
+        expect(new Date(reissue.result.absoluteExpiresAt).getTime()).toBe(origAbs);
+      }
+    });
+
+    it('refuses when session is unknown', () => {
+      const reissue = registry.reissueForInteractive(uuid());
+      expect(reissue.ok).toBe(false);
+      if (!reissue.ok) expect(reissue.reason).toBe('unknown-session');
+    });
+
+    it('refuses when session is revoked', () => {
+      const id = uuid();
+      registry.register(id);
+      registry.revoke(id);
+      const reissue = registry.reissueForInteractive(id);
+      expect(reissue.ok).toBe(false);
+      if (!reissue.ok) expect(reissue.reason).toBe('revoked');
+    });
+  });
+
+  describe('corrupt-hydrate degradation (slice 2 carry-forward)', () => {
+    it('reports a degradation event on malformed registry file', () => {
+      // Write garbage to the registry file path.
+      const filePath = path.join(dir, 'ledger-sessions.json');
+      fs.writeFileSync(filePath, '{not valid json', { mode: 0o600 });
+
+      const reports: Array<{ feature?: string }> = [];
+      const reporter = {
+        report: (r: { feature?: string }) => { reports.push(r); },
+      };
+
+      // Instantiate — should report + start empty.
+      const reg = new LedgerSessionRegistry({
+        stateDir: dir,
+        config: makeConfig(),
+        degradationReporter: reporter as unknown as import('../../src/monitoring/DegradationReporter.js').DegradationReporter,
+      });
+      expect(reg.listSessions().length).toBe(0);
+      expect(reports.length).toBe(1);
+      expect(reports[0].feature).toBe('LedgerSessionRegistry');
+    });
+  });
+
   describe('persistence', () => {
     it('hydrates registrations across instances', () => {
       const id = uuid();

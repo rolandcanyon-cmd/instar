@@ -24,6 +24,7 @@ import type {
   IntegratedBeingConfig,
   LedgerSessionRegistration,
 } from './types.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 // ── Constants / defaults ───────────────────────────────────────────
 
@@ -32,6 +33,8 @@ const DEFAULT_IDLE_TTL_HOURS = 24;
 const DEFAULT_RETENTION_DAYS = 7;
 const ONE_HOUR_MS = 60 * 60 * 1000;
 const ONE_DAY_MS = 24 * ONE_HOUR_MS;
+/** Hook-in-progress flag TTL. Matches spec §3 attestation window. */
+const HOOK_IN_PROGRESS_TTL_MS = 30 * 1000;
 
 const SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const TOKEN_HEX_RE = /^[0-9a-f]{64}$/;
@@ -46,7 +49,29 @@ export interface LedgerSessionRegistryOptions {
   config: IntegratedBeingConfig;
   /** Optional clock override for tests. */
   now?: () => number;
+  /** Degradation reporter for fail-open observability. */
+  degradationReporter?: DegradationReporter;
 }
+
+export interface RotateResult {
+  sessionId: string;
+  /** Freshly-issued plaintext binding token. 32-byte hex. */
+  token: string;
+  absoluteExpiresAt: string;
+  idleExpiresAt: string;
+}
+
+export type RotateFailureReason =
+  | 'unknown-session'
+  | 'token-mismatch'
+  | 'revoked'
+  | 'idle-expired'
+  | 'absolute-expired'
+  | 'malformed';
+
+export type RotateResultOrFailure =
+  | { ok: true; result: RotateResult }
+  | { ok: false; reason: RotateFailureReason };
 
 export interface RegisterResult {
   sessionId: string;
@@ -114,6 +139,17 @@ export class LedgerSessionRegistry {
   private readonly now: () => number;
 
   private registrations: Map<string, LedgerSessionRegistration>;
+  private readonly degradation: DegradationReporter;
+
+  /**
+   * Hook-in-progress flags — tracks sessions that invoked session-bind but
+   * have not yet completed the file-based handoff. Used to attest the
+   * /shared-state/session-bind-interactive fallback (spec §3):
+   * the caller must have a hook-in-progress flag set within the last 30s.
+   * In-memory only; does not survive process restart (that would defeat
+   * the attestation, since a restart equals a fresh lifecycle).
+   */
+  private hookInProgress: Map<string, number> = new Map();
 
   constructor(opts: LedgerSessionRegistryOptions) {
     this.stateDir = opts.stateDir;
@@ -121,6 +157,7 @@ export class LedgerSessionRegistry {
     this.config = opts.config;
     this.now = opts.now ?? Date.now;
     this.registrations = new Map();
+    this.degradation = opts.degradationReporter ?? DegradationReporter.getInstance();
     this.ensureDir();
     this.hydrate();
   }
@@ -159,8 +196,23 @@ export class LedgerSessionRegistry {
           label: sanitizeLabel(s.label),
         });
       }
-    } catch {
-      // Corrupt registry starts empty — tokens will need re-binding.
+    } catch (err) {
+      // Corrupt registry starts empty — all active tokens are invalidated.
+      // Degradation reporter makes this loud so operators know every live
+      // session just got bounced (carry-forward from slice 1 reviewer note).
+      this.registrations.clear();
+      try {
+        this.degradation.report({
+          feature: 'LedgerSessionRegistry',
+          primary: 'hydrate persisted registrations from ledger-sessions.json',
+          fallback: 'start with empty registry — all active tokens invalidated',
+          reason: `parse failed: ${err instanceof Error ? err.message : String(err)}`,
+          impact:
+            'All currently-bound sessions lose write capability and must re-register on next write attempt.',
+        });
+      } catch {
+        /* degradation reporter may not be initialized in some test contexts */
+      }
     }
   }
 
@@ -403,6 +455,163 @@ export class LedgerSessionRegistry {
       n++;
     }
     return n;
+  }
+
+  // ── Hook-in-progress attestation (§3 iter 2 fallback) ────────────
+
+  /**
+   * Mark a session id as "hook invoked session-bind but has not yet
+   * completed the file-based handoff". Called from the session-bind
+   * endpoint. The flag expires after {@link HOOK_IN_PROGRESS_TTL_MS}.
+   * This is the attestation that gates session-bind-interactive.
+   */
+  markHookInProgress(sessionId: string): void {
+    if (!SESSION_ID_RE.test(sessionId)) return;
+    this.hookInProgress.set(sessionId, this.now() + HOOK_IN_PROGRESS_TTL_MS);
+    this.pruneHookInProgress();
+  }
+
+  /**
+   * Called by /shared-state/session-bind-confirm when the hook has
+   * completed the mode-verified handoff. Clears the flag.
+   */
+  confirmHookDone(sessionId: string): void {
+    this.hookInProgress.delete(sessionId);
+  }
+
+  /**
+   * Returns true if the session id has a non-expired hook-in-progress
+   * flag. Pruning is lazy. Used by session-bind-interactive.
+   */
+  isHookInProgress(sessionId: string): boolean {
+    this.pruneHookInProgress();
+    const exp = this.hookInProgress.get(sessionId);
+    return typeof exp === 'number' && exp > this.now();
+  }
+
+  /**
+   * Returns true if this sessionId has already completed a successful
+   * token handoff — either a normal hook confirm, or a prior interactive
+   * re-issue. The presence of a registration alone does NOT qualify —
+   * `/shared-state/session-bind` always registers, so that check would
+   * dead-code the interactive fallback for its stated purpose (hook
+   * minted a token but couldn't deliver it via the file path).
+   *
+   * Single-use is enforced via the hook-in-progress flag: a successful
+   * session-bind-confirm OR session-bind-interactive clears the flag,
+   * so the next `isHookInProgress(sid)` check returns false.
+   */
+  hasConfirmedHandoff(sessionId: string): boolean {
+    const reg = this.registrations.get(sessionId);
+    if (!reg) return false;
+    // "Confirmed" means hook-in-progress has been cleared and at least
+    // one successful flow ran. We infer this from the absence of a
+    // pending flag for a registered session — a registered session
+    // without a pending flag must have either (a) completed confirm,
+    // or (b) been rebound interactively (which also clears the flag).
+    return !this.hookInProgress.has(sessionId);
+  }
+
+  /**
+   * Interactive rebind — used by POST /shared-state/session-bind-interactive.
+   * Requires an existing registration AND a live hook-in-progress flag
+   * (both enforced by the endpoint handler). Issues a fresh token bound
+   * to the same registration, preserving the anchored absolute expiry,
+   * refreshing idle TTL, and atomically replacing the token hash.
+   *
+   * Callers MUST verify `isHookInProgress(sid)` first and clear it via
+   * `confirmHookDone(sid)` after a successful call — single-use is the
+   * attestation contract.
+   */
+  reissueForInteractive(sessionId: string): RotateResultOrFailure {
+    if (!SESSION_ID_RE.test(sessionId)) {
+      return { ok: false, reason: 'malformed' };
+    }
+    const registration = this.registrations.get(sessionId);
+    if (!registration) return { ok: false, reason: 'unknown-session' };
+    if (registration.revoked) return { ok: false, reason: 'revoked' };
+
+    const nowMs = this.now();
+    const anchoredAbsoluteMs = new Date(registration.registeredAt).getTime()
+      + this.absoluteTtlMs();
+    if (anchoredAbsoluteMs <= nowMs) {
+      return { ok: false, reason: 'absolute-expired' };
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(token);
+    const idleExpiresAt = new Date(nowMs + this.idleTtlMs()).toISOString();
+    const absoluteExpiresAt = new Date(anchoredAbsoluteMs).toISOString();
+
+    registration.tokenHash = tokenHash;
+    registration.lastActiveAt = new Date(nowMs).toISOString();
+    registration.idleExpiresAt = idleExpiresAt;
+    registration.absoluteExpiresAt = absoluteExpiresAt;
+    this.plaintextCache.set(sessionId, token);
+    this.persist();
+
+    return {
+      ok: true,
+      result: {
+        sessionId,
+        token,
+        absoluteExpiresAt,
+        idleExpiresAt,
+      },
+    };
+  }
+
+  private pruneHookInProgress(): void {
+    const t = this.now();
+    for (const [id, exp] of this.hookInProgress) {
+      if (exp <= t) this.hookInProgress.delete(id);
+    }
+  }
+
+  // ── Rotation (§3 iter 2 — grace window path) ─────────────────────
+
+  /**
+   * Rotate a session's binding token. Requires the current valid token;
+   * the registration must not be past absolute TTL (since absolute-TTL
+   * is anchored to registeredAt, rotation can extend idle-TTL but NOT
+   * the absolute window — that's the whole point of the absolute cap).
+   *
+   * On success, the old token is invalidated immediately (hash replaced).
+   */
+  rotate(sessionId: string, currentToken: string): RotateResultOrFailure {
+    const v = this.verify(sessionId, currentToken);
+    if (!v.ok) return { ok: false, reason: v.reason };
+
+    const nowMs = this.now();
+    const registration = v.registration;
+    // Absolute expiry unchanged — anchored to registeredAt.
+    const anchoredAbsoluteMs = new Date(registration.registeredAt).getTime()
+      + this.absoluteTtlMs();
+    if (anchoredAbsoluteMs <= nowMs) {
+      return { ok: false, reason: 'absolute-expired' };
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashToken(token);
+    const idleExpiresAt = new Date(nowMs + this.idleTtlMs()).toISOString();
+    const absoluteExpiresAt = new Date(anchoredAbsoluteMs).toISOString();
+
+    registration.tokenHash = tokenHash;
+    registration.lastActiveAt = new Date(nowMs).toISOString();
+    registration.idleExpiresAt = idleExpiresAt;
+    registration.absoluteExpiresAt = absoluteExpiresAt;
+    this.plaintextCache.set(sessionId, token);
+    this.persist();
+
+    return {
+      ok: true,
+      result: {
+        sessionId,
+        token,
+        absoluteExpiresAt,
+        idleExpiresAt,
+      },
+    };
   }
 
   /** Test-only: raw registration accessor. Do NOT use in production code. */
