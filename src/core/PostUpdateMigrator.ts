@@ -21,11 +21,23 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { TreeGenerator } from '../knowledge/TreeGenerator.js';
 import { HTTP_HOOK_TEMPLATES, buildHttpHookSettings } from '../data/http-hook-templates.js';
 import { getMigrationDefaults, applyDefaults } from '../config/ConfigDefaults.js';
 import { installBuiltinSkills } from '../commands/init.js';
+import {
+  ELIGIBILITY_SCHEMA_SQL,
+  ELIGIBILITY_SCHEMA_SQL_SHA256,
+  PUSH_GATE_SH,
+  PUSH_GATE_SH_SHA256,
+  INSTAR_PR_GATE_WORKFLOW_YML,
+  INSTAR_PR_GATE_WORKFLOW_YML_SHA256,
+  PR_GATE_SETUP_MD,
+  PR_GATE_SETUP_MD_SHA256,
+} from '../data/pr-gate-artifacts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,6 +81,7 @@ export class PostUpdateMigrator {
     this.migrateScripts(result);
     this.migrateSettings(result);
     this.migrateConfig(result);
+    this.migratePrPipelineArtifacts(result);
     this.migrateGitignore(result);
     this.migrateBuiltinSkills(result);
     this.migrateSkillPortHardcoding(result);
@@ -1647,6 +1660,167 @@ The user has been talking to you (possibly for days). A generic greeting like "H
     // `git add .` path so contributors can't accidentally commit pr-gate
     // secrets from the project directory.
     this.addGitignoreEntry(projectGitignore, '.instar/secrets/pr-gate/', result, 'project .gitignore');
+  }
+
+  /**
+   * PR-REVIEW-HARDENING Phase A — ship pr-gate pipeline artifacts.
+   *
+   * Writes four shipped files:
+   *   - scripts/pr-gate/eligibility-schema.sql   (all agents)
+   *   - .claude/skills/fork-and-fix/scripts/push-gate.sh  (all agents, 0755)
+   *   - .github/workflows/instar-pr-gate.yml     (instar source repo only)
+   *   - docs/pr-gate-setup.md                    (instar source repo only)
+   *
+   * Each write is gated by sha256(content) === expectedHash. A tamperer
+   * who modifies the content string in the published JS without also
+   * updating the hash constant trips this assertion; migration aborts
+   * for that file and logs a critical error.
+   *
+   * Idempotent: files whose on-disk content already matches the shipped
+   * content are skipped (no rewrite).
+   *
+   * Phase A landing: endpoints are inert (prGate.phase='off') so these
+   * artifacts have no runtime consumer yet. Later phases activate them.
+   */
+  private migratePrPipelineArtifacts(result: MigrationResult): void {
+    // Schema — always shipped. Primary (gate-serving) agents instantiate
+    // the SQLite file from this schema in later phases.
+    this.writeShippedArtifact({
+      destPath: path.join(this.config.projectDir, 'scripts', 'pr-gate', 'eligibility-schema.sql'),
+      content: ELIGIBILITY_SCHEMA_SQL,
+      expectedSha256: ELIGIBILITY_SCHEMA_SQL_SHA256,
+      label: 'scripts/pr-gate/eligibility-schema.sql',
+      result,
+    });
+
+    // Push-gate — always shipped to every agent. Fork-and-fix skill
+    // sources it from here during push. Mode 0o755 so it's executable.
+    this.writeShippedArtifact({
+      destPath: path.join(
+        this.config.projectDir, '.claude', 'skills', 'fork-and-fix', 'scripts', 'push-gate.sh',
+      ),
+      content: PUSH_GATE_SH,
+      expectedSha256: PUSH_GATE_SH_SHA256,
+      label: '.claude/skills/fork-and-fix/scripts/push-gate.sh',
+      mode: 0o755,
+      result,
+    });
+
+    // .github/workflows and docs/pr-gate-setup are instar-source-only.
+    // Non-instar-source agents don't gain a workflow file for a gate
+    // they neither host nor are gated by.
+    if (!this.isInstarSourceRepo()) {
+      return;
+    }
+
+    this.writeShippedArtifact({
+      destPath: path.join(this.config.projectDir, '.github', 'workflows', 'instar-pr-gate.yml'),
+      content: INSTAR_PR_GATE_WORKFLOW_YML,
+      expectedSha256: INSTAR_PR_GATE_WORKFLOW_YML_SHA256,
+      label: '.github/workflows/instar-pr-gate.yml',
+      result,
+    });
+
+    this.writeShippedArtifact({
+      destPath: path.join(this.config.projectDir, 'docs', 'pr-gate-setup.md'),
+      content: PR_GATE_SETUP_MD,
+      expectedSha256: PR_GATE_SETUP_MD_SHA256,
+      label: 'docs/pr-gate-setup.md',
+      result,
+    });
+  }
+
+  /**
+   * Write a shipped artifact with content-hash verification. Idempotent:
+   * skips write if on-disk content already matches. Aborts with a logged
+   * error if sha256(content) !== expectedSha256 (detects post-publish
+   * tamper of one side without the other).
+   */
+  private writeShippedArtifact(opts: {
+    destPath: string;
+    content: string;
+    expectedSha256: string;
+    label: string;
+    mode?: number;
+    result: MigrationResult;
+  }): void {
+    const actual = crypto.createHash('sha256').update(opts.content).digest('hex');
+    if (actual !== opts.expectedSha256) {
+      const msg = `${opts.label}: shipped content hash mismatch — expected ${opts.expectedSha256}, got ${actual}. Migration aborted for this file.`;
+      opts.result.errors.push(msg);
+      console.error(`[PR-GATE CRITICAL] ${msg}`);
+      return;
+    }
+
+    try {
+      if (fs.existsSync(opts.destPath)) {
+        const existing = fs.readFileSync(opts.destPath, 'utf-8');
+        if (existing === opts.content) {
+          opts.result.skipped.push(`${opts.label} (already up to date)`);
+          return;
+        }
+      }
+
+      fs.mkdirSync(path.dirname(opts.destPath), { recursive: true });
+      const writeOpts = opts.mode !== undefined ? { mode: opts.mode } : undefined;
+      fs.writeFileSync(opts.destPath, opts.content, writeOpts);
+      opts.result.upgraded.push(opts.label);
+    } catch (err) {
+      opts.result.errors.push(`${opts.label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Detect whether this agent lives in the JKHeadley/instar source repo.
+   * Two-signal check: normalized `git remote get-url origin` (or upstream
+   * if origin is a fork) points at github.com/JKHeadley/instar, AND
+   * package.json.name === 'instar'. Both must match — the package-name
+   * check prevents writing the workflow to a fork that happens to have
+   * a different package name.
+   *
+   * Silent false on any error (no git, no package.json, parse failure):
+   * non-instar agents should NOT have workflow/docs files dropped on them.
+   */
+  private isInstarSourceRepo(): boolean {
+    const remoteIsInstar = (remote: string): boolean => {
+      const normalized = remote
+        .trim()
+        .replace(/^https:\/\//, '')
+        .replace(/^http:\/\//, '')
+        .replace(/^git@/, '')
+        .replace(/\.git$/, '')
+        .replace(':', '/')
+        .toLowerCase();
+      return /^github\.com\/jkheadley\/instar(\/|$)/.test(normalized);
+    };
+
+    const getRemote = (name: string): string | null => {
+      try {
+        return execSync(`git remote get-url ${name}`, {
+          cwd: this.config.projectDir,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          encoding: 'utf-8',
+        });
+      } catch {
+        return null;
+      }
+    };
+
+    const origin = getRemote('origin');
+    const upstream = getRemote('upstream');
+    const remoteOk =
+      (origin !== null && remoteIsInstar(origin)) ||
+      (upstream !== null && remoteIsInstar(upstream));
+    if (!remoteOk) return false;
+
+    try {
+      const pkgPath = path.join(this.config.projectDir, 'package.json');
+      if (!fs.existsSync(pkgPath)) return false;
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { name?: string };
+      return pkg.name === 'instar';
+    } catch {
+      return false;
+    }
   }
 
   /**
