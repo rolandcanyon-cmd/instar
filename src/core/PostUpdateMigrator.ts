@@ -82,6 +82,7 @@ export class PostUpdateMigrator {
     this.migrateSettings(result);
     this.migrateConfig(result);
     this.migratePrPipelineArtifacts(result);
+    this.migrateBackupManifest(result);
     this.migrateGitignore(result);
     this.migrateBuiltinSkills(result);
     this.migrateSkillPortHardcoding(result);
@@ -1660,6 +1661,98 @@ The user has been talking to you (possibly for days). A generic greeting like "H
     // `git add .` path so contributors can't accidentally commit pr-gate
     // secrets from the project directory.
     this.addGitignoreEntry(projectGitignore, '.instar/secrets/pr-gate/', result, 'project .gitignore');
+  }
+
+  /**
+   * PR-REVIEW-HARDENING Phase A — ensure pr-gate state paths are backed up.
+   *
+   * Uses the `config.backup.includeFiles` plumbing shipped in commit 2
+   * (see src/core/BackupManager.ts + src/config/ConfigDefaults.ts). The
+   * BackupManager's constructor unions these entries with
+   * DEFAULT_CONFIG.includeFiles at snapshot time — this migrator just
+   * persists the extra entries into the user's config.json so they
+   * survive process restarts and git-sync.
+   *
+   * Paths added to `config.backup.includeFiles`:
+   *   - .instar/state/pr-pipeline.jsonl*       (pipeline event log + rotations)
+   *   - .instar/state/pr-gate/phase-a-sha.json (grandfathering-boundary SHA)
+   *   - .instar/state/pr-debounce.jsonl        (PR-wave debounce window)
+   *   - .instar/state/pr-debounce-archive.jsonl
+   *   - .instar/state/pr-cost-ledger.jsonl     (daily cost accounting)
+   *   - .instar/state/security.jsonl*          (auth + revocation events)
+   *
+   * Set-union semantics preserve user-added entries. Idempotent on
+   * re-run. Atomic write (temp → fsync → rename).
+   *
+   * Safety assertion: no entry under .instar/secrets/ is ever allowed
+   * into the merged list. BackupManager.BLOCKED_PATH_PREFIXES (commit 1)
+   * is the authoritative enforcement; this migrator-level assertion is
+   * defense-in-depth and logs a warning if violated.
+   */
+  private migrateBackupManifest(result: MigrationResult): void {
+    const PR_GATE_BACKUP_ENTRIES = [
+      '.instar/state/pr-pipeline.jsonl*',
+      '.instar/state/pr-gate/phase-a-sha.json',
+      '.instar/state/pr-debounce.jsonl',
+      '.instar/state/pr-debounce-archive.jsonl',
+      '.instar/state/pr-cost-ledger.jsonl',
+      '.instar/state/security.jsonl*',
+    ];
+
+    const configPath = path.join(this.config.stateDir, 'config.json');
+    if (!fs.existsSync(configPath)) {
+      result.skipped.push('config.backup.includeFiles (config.json not found)');
+      return;
+    }
+
+    let config: Record<string, unknown>;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (err) {
+      result.errors.push(`migrateBackupManifest read: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const backup = (config.backup ?? {}) as { includeFiles?: unknown };
+    const existing = Array.isArray(backup.includeFiles)
+      ? (backup.includeFiles as unknown[]).filter((e): e is string => typeof e === 'string')
+      : [];
+
+    const merged = Array.from(new Set<string>([...existing, ...PR_GATE_BACKUP_ENTRIES]));
+
+    for (const entry of merged) {
+      if (path.normalize(entry).startsWith('.instar/secrets/')) {
+        result.errors.push(
+          `migrateBackupManifest: includeFiles contains secrets-prefix entry "${entry}" — BackupManager will refuse it at snapshot time, but the entry should not be here`,
+        );
+      }
+    }
+
+    const added = merged.filter((e) => !existing.includes(e));
+    if (added.length === 0) {
+      result.skipped.push('config.backup.includeFiles (already up to date)');
+      return;
+    }
+
+    const nextConfig = { ...config, backup: { ...backup, includeFiles: merged } };
+
+    try {
+      const tmpPath = `${configPath}.migrate-backup-${process.pid}-${Date.now()}.tmp`;
+      const serialized = JSON.stringify(nextConfig, null, 2) + '\n';
+      const fd = fs.openSync(tmpPath, 'w', 0o600);
+      try {
+        fs.writeSync(fd, serialized);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmpPath, configPath);
+      result.upgraded.push(
+        `config.backup.includeFiles: added ${added.length} pr-gate state path(s)`,
+      );
+    } catch (err) {
+      result.errors.push(`migrateBackupManifest write: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
