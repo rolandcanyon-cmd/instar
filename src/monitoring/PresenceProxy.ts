@@ -18,6 +18,7 @@ import * as crypto from 'crypto';
 import { execSync } from 'child_process';
 import type { IntelligenceProvider, IntelligenceOptions } from '../core/types.js';
 import type { MessageLoggedEvent } from '../messaging/shared/MessagingEventBus.js';
+import { isSystemOrProxyMessage } from '../messaging/shared/isSystemOrProxyMessage.js';
 import { detectContextExhaustion } from './QuotaExhaustionDetector.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -1200,18 +1201,11 @@ IMPORTANT BIAS: Default to "working" or "waiting" unless there is STRONG evidenc
     }
   }
 
-  /** System/delivery messages that should NOT be treated as real agent responses */
+  /** System/delivery messages that should NOT be treated as real agent responses.
+   *  Thin wrapper over the shared classifier — kept as a method so existing
+   *  instance-method callsites don't change. */
   private isSystemMessage(text: string): boolean {
-    if (!text) return true;
-    const t = text.trim();
-    // Delivery confirmations
-    if (t === '✓ Delivered' || t.startsWith('✓ Delivered')) return true;
-    // Session lifecycle messages
-    if (t.startsWith('🔄 Session restarting') || t === 'Session respawned.' || t === 'Session terminated.') return true;
-    if (t.startsWith('Send a new message to start')) return true;
-    // Proxy messages (double-check)
-    if (t.startsWith('🔭')) return true;
-    return false;
+    return isSystemOrProxyMessage(text);
   }
 
   private checkRateLimit(state: PresenceState): boolean {

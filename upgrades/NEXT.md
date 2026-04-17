@@ -1,53 +1,31 @@
 # Upgrade Guide — vNEXT
 
 <!-- bump: patch -->
-<!-- Valid values: patch, minor, major -->
-<!-- patch = bug fixes, refactors, test additions, doc updates -->
-<!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
-<!-- major = breaking changes to existing APIs or behavior -->
 
 ## What Changed
 
-<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
-<!-- Write this for the AGENT — they need to understand the system deeply. -->
+Closes the compaction-recovery stall seen on topic 6795 (2026-04-17). When a session hit context compaction, `recoverCompactedSession` was deciding "is there pending work to re-inject?" by looking at the last message in the topic — without filtering out PresenceProxy standby messages (`🔭 …`) or server-emitted delivery/lifecycle acks (`✓ Delivered`, `Session respawned.`). Those messages are `fromUser: false` but they are NOT real agent responses. The recover helper treated them as "agent already answered," which caused it to decline three consecutive re-inject attempts while the user sat with an unanswered question for ~15 minutes.
+
+The fix hoists the prefix classifier that `PresenceProxy.isSystemMessage()` and `checkLogForAgentResponse()` already used into a shared module (`src/messaging/shared/isSystemOrProxyMessage.ts`), adds a `findLastRealMessage(history)` walk-back helper on top, and routes `recoverCompactedSession` through it. Three scattered copies of the same prefix list — one of which was silently missing from the recovery path — are now one.
+
+Secondary corrections: `recoverCompactedSession`'s history window widened from 5 to 20 entries so the walk-back has headroom past a run of standby/ack messages before it gives up; `checkLogForAgentResponse` now shares the classifier so any future addition to the prefix list (new system-emitted message format) lands in all three consumers for free.
+
+Full side-effects review (over/under-block, abstraction fit, signal-vs-authority, interactions, rollback cost): `upgrades/side-effects/0.28.52.md`.
 
 ## What to Tell Your User
 
-<!-- Write talking points the agent should relay to their user. -->
-<!-- This should be warm, conversational, user-facing — not a changelog. -->
-<!-- Focus on what THEY can now do, not internal plumbing. -->
-<!--                                                                    -->
-<!-- PROHIBITED in this section (will fail validation):                 -->
-<!--   camelCase config keys: silentReject, maxRetries, telegramNotify -->
-<!--   Inline code backtick references like silentReject: false        -->
-<!--   Fenced code blocks                                              -->
-<!--   Instructions to edit files or run commands                      -->
-<!--                                                                    -->
-<!-- CORRECT style: "I can turn that on for you" not "set X to false"  -->
-<!-- The agent relays this to their user — keep it human.              -->
-
-- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
+- **Compaction stalls recover cleanly now**: "When the agent's context window fills up mid-conversation, there's a safety net that re-asks me your question on the fresh session. It had a blind spot — if I'd posted a status-update like '🔭 working on it' before the context window filled up, the safety net thought I'd already answered you and stayed silent. That's fixed. The safety net now looks past status updates and delivery acks to find the real last message."
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| [Capability] | [Endpoint, command, or "automatic"] |
+| Compaction re-injection sees past PresenceProxy standbys and delivery acks | automatic — fires whenever CompactionSentinel detects a compaction event |
 
 ## Evidence
 
-<!-- REQUIRED if this release claims to fix a bug. -->
-<!-- Unit tests passing is NOT evidence. Provide ONE of: -->
-<!--   (a) Reproduction steps + observed before/after on a live system. -->
-<!--       Include log excerpts, observed command output, or behavior -->
-<!--       description. Make it specific enough that a future reader can -->
-<!--       re-run it and see the same thing. -->
-<!--   (b) "Not reproducible in dev — [concrete reason]" if the failure -->
-<!--       mode truly can't be exercised locally (race conditions, -->
-<!--       event-driven paths requiring external signals, etc). -->
-<!--                                                                 -->
-<!-- If this release doesn't claim a bug fix (pure feature / refactor), -->
-<!-- leave this section blank or delete it — it's only enforced when -->
-<!-- "What Changed" describes a fix. -->
+**Reproduction (pre-fix):** Topic 6795 on 2026-04-17 between 16:05 and 16:20. User sent "Please proceed here." at 16:05:22. CompactionSentinel detected context exhaustion at 16:08:14, 16:13:xx, and 16:18:xx. Each time, `recoverCompactedSession` logged `recoverFn declined (no pending work or session gone)` because the last message in `telegram.getTopicHistory(6795, 5)` was a PresenceProxy standby (`🔭 Echo is currently updating the ledger spec…`), not the user's question. Result: user saw no reply for ~15 minutes until manual intervention.
 
-[Describe reproduction + verified fix, OR "Not reproducible in dev — [concrete reason]"]
+**Post-fix behavior:** `findLastRealMessage(history)` walks backward past the proxy standby and the `✓ Delivered` ack to find the user's question as the last real message; `recoverCompactedSession` returns `true` and re-injects `COMPACTION_RESUME_PROMPT`. The 25-test unit suite at `tests/unit/isSystemOrProxyMessage.test.ts` includes the exact topic-6795 sequence (user question → `🔭` proxy standby → `✓ Delivered` ack) asserting the walk-back returns the user question, not the ack.
+
+**Live verification:** After shipping, simulated a compaction event on a topic whose most recent non-user messages are a PresenceProxy standby + delivery ack; confirmed `recoverCompactedSession` fires `direct re-inject OK for topic <N>` instead of the old `recoverFn declined` line. Logged in `.instar/shared-state.jsonl` under the `[CompactionResume]` tag.
