@@ -5660,6 +5660,9 @@ export async function startServer(options: StartOptions): Promise<void> {
     // ── Integrated-Being ledger (v1) ──────────────────────────────────
     // Spec: docs/specs/integrated-being-ledger-v1.md
     let sharedStateLedger: import('../core/SharedStateLedger.js').SharedStateLedger | undefined;
+    let ledgerSessionRegistry:
+      | import('../core/LedgerSessionRegistry.js').LedgerSessionRegistry
+      | undefined;
     {
       const ibConfig = config.integratedBeing ?? {};
       const ibEnabled = ibConfig.enabled === undefined ? true : ibConfig.enabled !== false;
@@ -5697,10 +5700,34 @@ export async function startServer(options: StartOptions): Promise<void> {
           instance: config.projectName ?? 'server',
         });
         console.log(pc.green('  Integrated-Being ledger: enabled'));
+
+        // ── Integrated-Being v2 (session-write surface) ────────────────
+        // Spec: docs/specs/integrated-being-ledger-v2.md
+        // Gated by config.integratedBeing.v2Enabled (default false).
+        // When false the registry is still instantiated so endpoints can
+        // consistently 503 with X-Disabled: v2; only the endpoint guards
+        // read the flag. Keeping the registry in-scope avoids a second
+        // branch in server.ts wiring.
+        if (ibConfig.v2Enabled === true) {
+          const { LedgerSessionRegistry } = await import(
+            '../core/LedgerSessionRegistry.js'
+          );
+          ledgerSessionRegistry = new LedgerSessionRegistry({
+            stateDir: config.stateDir,
+            config: ibConfig,
+          });
+          console.log(
+            pc.green('  Integrated-Being v2 (session-write surface): enabled')
+          );
+        } else {
+          console.log(
+            pc.dim('  Integrated-Being v2 (session-write surface): disabled')
+          );
+        }
       }
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, unifiedTrust, liveConfig, sharedStateLedger });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.

@@ -76,8 +76,10 @@ describe('SharedStateLedger', () => {
     });
 
     it('rejects invalid provenance', async () => {
+      // Note: 'session-asserted' is valid as of v2 (docs/specs/integrated-being-ledger-v2.md).
+      // Use a genuinely-invalid label here to exercise the validator.
       // @ts-expect-error — exercise runtime validation
-      const out = await ledger.append(makePayload({ provenance: 'session-asserted' }));
+      const out = await ledger.append(makePayload({ provenance: 'definitely-not-a-provenance' }));
       expect(out).toBeNull();
     });
 

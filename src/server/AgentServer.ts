@@ -129,6 +129,8 @@ export class AgentServer {
     liveConfig?: { set(path: string, value: unknown): void };
     /** Integrated-Being shared-state ledger (v1). Null/undefined when disabled. */
     sharedStateLedger?: import('../core/SharedStateLedger.js').SharedStateLedger;
+    /** Integrated-Being LedgerSessionRegistry (v2). Null/undefined when v2Enabled=false. */
+    ledgerSessionRegistry?: import('../core/LedgerSessionRegistry.js').LedgerSessionRegistry;
   }) {
     this.config = options.config;
     this.startTime = new Date();
@@ -337,6 +339,7 @@ export class AgentServer {
       unifiedTrust: options.unifiedTrust ?? null,
       threadlineReplyWaiters: options.threadlineReplyWaiters ?? new Map(),
       sharedStateLedger: options.sharedStateLedger ?? null,
+      ledgerSessionRegistry: options.ledgerSessionRegistry ?? null,
       startTime: this.startTime,
     };
     this.routeContext = routeCtx;

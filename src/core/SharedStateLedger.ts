@@ -46,6 +46,8 @@ const VALID_SUBSYSTEMS: readonly LedgerEntrySubsystem[] = [
   'compaction-sentinel',
   'dispatch',
   'coherence-gate',
+  // v2: session-asserted writes via POST /shared-state/append.
+  'session',
 ];
 const VALID_KINDS: readonly LedgerEntryKind[] = [
   'commitment',
@@ -59,6 +61,8 @@ const VALID_KINDS: readonly LedgerEntryKind[] = [
 const VALID_PROVENANCE: readonly LedgerProvenance[] = [
   'subsystem-asserted',
   'subsystem-inferred',
+  // v2: session-asserted writes authenticated by LedgerSessionRegistry.
+  'session-asserted',
 ];
 
 // proper-lockfile defaults: retries 3 w/ 50ms minTimeout is too tight when many
