@@ -19,6 +19,17 @@ import type { BackupSnapshot, BackupConfig } from './types.js';
 const SNAPSHOT_ID_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{6}Z(-\d+)?$/;
 const BLOCKED_FILES = new Set(['config.json', 'secrets', 'machine']);
 
+// Prefix-based blocklist with path.normalize().startsWith() semantics.
+// BLOCKED_FILES has equality semantics only — a user-added `includeFiles` entry
+// like `.instar/secrets/pr-gate/tokens.json` would pass its basename (tokens.json)
+// and full-entry (.instar/secrets/...) checks, then ship secrets into a backup
+// snapshot that git-sync replicates to paired machines. This prefix set is the
+// defense against that failure mode. Any entry under one of these prefixes is
+// skipped during snapshot creation regardless of config source.
+const BLOCKED_PATH_PREFIXES = new Set([
+  '.instar/secrets/',
+]);
+
 const DEFAULT_CONFIG: BackupConfig = {
   enabled: true,
   maxSnapshots: 20,
@@ -169,6 +180,19 @@ export class BackupManager {
       const baseName = path.basename(entry).replace(/\/$/, '');
       if (BLOCKED_FILES.has(baseName) || BLOCKED_FILES.has(entry)) {
         console.warn(`[BackupManager] Skipping blocked file: ${entry}`);
+        continue;
+      }
+      // Prefix-based secrets guard (see BLOCKED_PATH_PREFIXES comment above).
+      const normalized = path.normalize(entry);
+      let prefixBlocked = false;
+      for (const prefix of BLOCKED_PATH_PREFIXES) {
+        if (normalized.startsWith(prefix)) {
+          prefixBlocked = true;
+          break;
+        }
+      }
+      if (prefixBlocked) {
+        console.warn(`[BackupManager] Skipping blocked-prefix path: ${entry}`);
         continue;
       }
 

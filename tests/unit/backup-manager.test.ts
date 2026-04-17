@@ -156,6 +156,57 @@ describe('BackupManager', () => {
 
       expect(snapshot.files.some(f => f.startsWith('machine/'))).toBe(false);
     });
+
+    // ── BLOCKED_PATH_PREFIXES ─────────────────────────────────────
+    //
+    // The equality-semantic BLOCKED_FILES set cannot catch arbitrary paths
+    // under .instar/secrets/ — it only blocks on literal matches like
+    // 'secrets' or 'config.json'. A user or migrator adding an entry like
+    // '.instar/secrets/pr-gate/tokens.json' would slip past. The
+    // BLOCKED_PATH_PREFIXES set closes that hole with startsWith semantics.
+    it('never backs up paths under .instar/secrets/ prefix even if in includeFiles', () => {
+      fs.mkdirSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate'), { recursive: true });
+      fs.writeFileSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate', 'tokens.json'), '{"t": "sekrit"}');
+      fs.writeFileSync(path.join(stateDir, '.instar', 'secrets', 'canary-keys.json'), '{"k": "x"}');
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const manager = new BackupManager(stateDir, {
+        includeFiles: ['AGENT.md', '.instar/secrets/pr-gate/tokens.json', '.instar/secrets/canary-keys.json'],
+      });
+      const snapshot = manager.createSnapshot('manual');
+
+      expect(snapshot.files).toContain('AGENT.md');
+      expect(snapshot.files.some(f => f.includes('.instar/secrets/'))).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping blocked-prefix path: .instar/secrets/pr-gate/tokens.json'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping blocked-prefix path: .instar/secrets/canary-keys.json'));
+    });
+
+    it('prefix blocklist handles redundant path segments via path.normalize', () => {
+      fs.mkdirSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate'), { recursive: true });
+      fs.writeFileSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate', 'server-secrets.json'), '{}');
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const manager = new BackupManager(stateDir, {
+        includeFiles: ['AGENT.md', '.instar/./secrets/pr-gate/server-secrets.json'],
+      });
+      const snapshot = manager.createSnapshot('manual');
+
+      expect(snapshot.files.some(f => f.includes('.instar/secrets/'))).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('DEFAULT_CONFIG.includeFiles contains no entries under .instar/secrets/', () => {
+      // Defense in depth: even if a bug adds a secrets-path entry to the
+      // defaults, this test catches it before any agent snapshots secrets.
+      const manager = new BackupManager(stateDir);
+      // Access the effective defaults via a snapshot of an empty stateDir —
+      // we don't care what files are there, we care that no default path
+      // is under .instar/secrets/.
+      const defaults = (manager as unknown as { config: { includeFiles: string[] } }).config.includeFiles;
+      for (const entry of defaults) {
+        expect(path.normalize(entry).startsWith('.instar/secrets/')).toBe(false);
+      }
+    });
   });
 
   describe('listSnapshots', () => {
