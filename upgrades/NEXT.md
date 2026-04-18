@@ -1,59 +1,104 @@
 # Upgrade guide — parallel-dev isolation + per-agent messaging style
 
-This release lands three connected changes: the composition-root wiring that
-turns on per-topic worktree isolation when configured, script fixes discovered
-during the live Day-2 rollout, and a generic per-agent messaging-style rule
-in the outbound tone gate.
+This release lands the composition-root wiring that turns on per-topic
+worktree isolation when configured, script fixes discovered during the live
+Day-2 rollout, and a generic per-agent messaging-style rule in the outbound
+tone gate.
 
-## Parallel-dev isolation — composition-root wiring
+## Summary of New Capabilities
 
-`WorktreeManager` + `WorktreeKeyVault` are now instantiated by the server
-startup when `InstarConfig.parallelDev.phase !== 'off'`. The wiring is
-extracted into a small `wireParallelDev()` helper for unit-testability.
-`sessionManager.setWorktreeManager(...)` is called when the helper returns a
-manager, so spawning a session for a topic now resolves an isolated
-per-topic worktree instead of the shared main checkout.
+- **Parallel-dev isolation is now flippable via config.** Set
+  `parallelDev: { phase: "shadow" }` in `.instar/config.json` and topic
+  sessions spawn into per-topic worktrees with Ed25519-signed commit
+  trailers. Default stays "off" — behavior unchanged for deployments that
+  don't opt in.
+- **Outbound messages now honor a per-agent style preference.** A new
+  `messagingStyle` free-text config field describes how the agent should
+  write for its user — e.g. `"ELI10, short sentences, plain words"` or
+  `"Technical and terse"`. The `MessagingToneGate` blocks significant
+  mismatches via a new `B11_STYLE_MISMATCH` rule. When `messagingStyle` is
+  unset, the rule does not apply.
+- **Two live-rollout script fixes** for parallel-dev ops tooling: the Day-2
+  migration script scans stash labels instead of requiring the
+  incident-snapshot at `@{0}`, and the GH ruleset installer now pipes JSON
+  bodies correctly and supports non-Enterprise plans.
 
-- **Default**: `parallelDev` is absent → behavior unchanged.
-- **Turn on "shadow"**: set `parallelDev: { phase: "shadow" }` in
-  `.instar/config.json`. Sessions begin spawning in per-topic worktrees
-  under `<stateDir>/worktrees/<topic-slug>/`. Commits get signed trailers.
-  The GitHub push-gate stays advisory until the operator flips
-  `PUBLIC_KEY_PEM` to active.
-- **Turn on "enforce"**: flip after sessions have been signing commits
-  reliably for a bit and the operator has installed a working OIDC verifier.
+## What Changed
 
-## Parallel-dev scripts — live-rollout fixes
+### `src/core/ParallelDevWiring.ts` (new)
 
-Two scripts had blockers that only surfaced when running the real Day-2
-migration + ruleset install:
+Small composition helper `wireParallelDev()` that reads
+`InstarConfig.parallelDev`, loads keys from the `WorktreeKeyVault`, and
+returns a ready-to-use `WorktreeManager` plus the shim-root path for
+`SessionManager`. Returns `null` when phase is `"off"` so the composition
+root can skip wiring entirely.
 
-- `scripts/migrate-incident-2026-04-17.mjs` — now scans the stash list by
-  label instead of requiring the incident-snapshot at `@{0}`. Other sessions
-  legitimately push newer stashes; position drift is not a tamper signal.
-- `scripts/gh-ruleset-install.mjs` — now pipes nested ruleset bodies as
-  real JSON via `gh api --input -` (the previous `--field` form
-  stringified nested objects and GitHub rejected every call). Adds
-  `--mode disabled` and `--skip-trust-root` flags for non-Enterprise plans
-  where `evaluate` mode and `file_path_restriction` rules aren't available.
+### `src/commands/server.ts`
 
-## Messaging tone gate — per-agent style rule
+Calls `wireParallelDev(...)` before instantiating `AgentServer`. When a
+manager comes back, the server is handed the manager + OIDC-enrolled repo
+list, and `sessionManager.setWorktreeManager(manager, shimRoot)` flips
+session spawn onto worktree isolation.
 
-A new `InstarConfig.messagingStyle` free-text field describes how outbound
-agent-to-user messages should be written for this agent's user. The
-`MessagingToneGate` now carries a `B11_STYLE_MISMATCH` rule that blocks
-messages significantly mismatching the configured style. Every agent sets
-its own style string without code changes:
+### `src/core/MessagingToneGate.ts`
 
-- `"ELI10 — short sentences, plain words, no acronyms"`
-- `"Technical and terse"`
-- `"Formal business-memo tone"`
+Adds `B11_STYLE_MISMATCH` to `VALID_RULES` and a new
+`ToneReviewContext.targetStyle?: string` plumbing field. A new
+`renderTargetStyle()` method emits the style block into the LLM prompt
+inside a `STYLE_BOUNDARY` so it's treated as configuration, not
+instructions. The existing fail-open-on-LLM-error semantics are preserved.
 
-When `messagingStyle` is unset (the default), the rule does not apply —
-behavior is identical to before this change.
+### `src/core/types.ts`
+
+Adds `InstarConfig.parallelDev?: ParallelDevConfig` and
+`InstarConfig.messagingStyle?: string`.
+
+### `src/server/routes.ts`
+
+One-line change: the tone gate's `review()` call now receives
+`targetStyle: ctx.config.messagingStyle` so the per-agent style reaches the
+authority.
+
+### `scripts/migrate-incident-2026-04-17.mjs`
+
+Stash verification now scans the full list for the expected label instead
+of requiring it at `@{0}`. Integrity invariant — the label must still be
+present and unchanged — is preserved.
+
+### `scripts/gh-ruleset-install.mjs`
+
+Switches from `gh api --field` (stringifies nested JSON → 422) to
+`gh api --input -` with a real JSON body. Adds `--mode disabled` and
+`--skip-trust-root` for operators on Team/Pro plans where the
+`file_path_restriction` rule and `evaluate` mode are not available.
+
+## What to Tell Your User
+
+Two new knobs are available in `.instar/config.json`. Both are optional and
+default to "off" — existing deployments keep working unchanged.
+
+- **`parallelDev`** — controls whether topic sessions spawn in isolated
+  git worktrees. Phase `"off"` is the default. Phase `"shadow"` turns on
+  the per-topic worktrees and signs commits locally. Phase `"enforce"`
+  also turns on the GitHub-side push gate; don't flip to enforce until a
+  working OIDC verifier is configured on the server.
+- **`messagingStyle`** — a free-text description of how the agent should
+  write for this user. The outbound tone gate uses this as the criterion
+  for blocking significantly mismatched messages. Every agent sets its own
+  string; there is no universal default.
+
+If you're an instar agent whose user has just asked for a different
+communication style ("write to me like I'm a 10-year-old" / "be terse and
+technical" / "formal business tone"), you can set `messagingStyle`
+accordingly and the outbound path will enforce it automatically — no code
+changes required.
+
+If you want the agent to start isolating parallel sessions so they can't
+step on each other's uncommitted work, flip `parallelDev.phase` to
+`"shadow"` and restart the server.
 
 ## Migration notes
 
-No migration required. All new behavior is opt-in via config. Existing
-deployments keep working unchanged until an operator sets `parallelDev`
-or `messagingStyle`.
+None. All new behavior is opt-in via config. Existing deployments keep
+working unchanged until an operator sets `parallelDev` or `messagingStyle`
+explicitly.
