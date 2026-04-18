@@ -4227,17 +4227,21 @@ export async function startServer(options: StartOptions): Promise<void> {
     //   3. POST /internal/compaction-resume (compaction-recovery.sh hook)
     // After compaction the agent needs three things: orientation, user-facing
     // transparency, and a clear handoff back to whatever they were doing.
-    // (1) "read previous messages" ensures re-orientation on the current thread
-    //     before responding — if the agent just replies from a blank slate it
-    //     will answer the wrong question.
-    // (2) "let the user know compaction occurred" keeps the user informed so
-    //     a sudden shift in tone or awareness isn't mysterious.
-    // (3) "continue where you left off" tells the agent not to re-ask or
-    //     re-litigate, just pick up.
-    const COMPACTION_RESUME_PROMPT =
-      'Your session just went through context compaction. Read the recent messages in this topic to re-orient, briefly let the user know compaction occurred, then continue where you left off.';
-
+    //
+    // The payload embeds the same context block the session-spawn path uses
+    // (topicMemory.formatContextForSession → summary + recent messages + a
+    // search hint for deeper lookup). Before this, the prompt was a single
+    // sentence asking the agent to "read recent messages" on its own — which
+    // let it fabricate a plausible-sounding status summary instead of
+    // answering the actual intent of the user's last message. Giving it the
+    // same shape of context it had at first spawn removes the reason to
+    // hallucinate.
     const { isSystemOrProxyMessage, findLastRealMessage } = await import('../messaging/shared/isSystemOrProxyMessage.js');
+    const {
+      buildCompactionResumePayload,
+      formatInlineHistory,
+      prepareInjectionText,
+    } = await import('../messaging/shared/compactionResumePayload.js');
 
     const recoverCompactedSession = async (sessionName: string, triggerLabel: string): Promise<boolean> => {
       if (!sessionManager.isSessionAlive(sessionName)) return false;
@@ -4256,8 +4260,27 @@ export async function startServer(options: StartOptions): Promise<void> {
           const lastReal = findLastRealMessage(history);
           if (lastReal?.fromUser) {
             console.log(`[CompactionResume] (${triggerLabel}) topic ${topicId} session "${sessionName}" has unanswered message — recovering`);
+
+            // Prefer topicMemory (summary + recent messages + search hint);
+            // fall back to inline JSONL history when the SQLite store isn't
+            // ready. Matches the session-spawn precedence in this file.
+            let contextBlock = '';
+            if (topicMemory?.isReady()) {
+              try {
+                contextBlock = topicMemory.formatContextForSession(topicId, 20);
+              } catch (err) {
+                console.warn(`[CompactionResume] (${triggerLabel}) topicMemory failed, falling back to inline history:`, err);
+              }
+            }
+            if (!contextBlock) {
+              const topicName = telegram.getTopicName?.(topicId) ?? undefined;
+              contextBlock = formatInlineHistory(history, { topicName, label: 'TOPIC CONTEXT' });
+            }
+
+            const payload = buildCompactionResumePayload(contextBlock);
+            const injectText = prepareInjectionText(payload, triggerLabel, topicId);
             // Direct injection with topic tag so InputGuard accepts it.
-            const tagged = `[telegram:${topicId}] ${COMPACTION_RESUME_PROMPT}`;
+            const tagged = `[telegram:${topicId}] ${injectText}`;
             const ok = sessionManager.injectMessage(sessionName, tagged);
             if (ok) {
               console.log(`[CompactionResume] (${triggerLabel}) direct re-inject OK for topic ${topicId}`);
@@ -4491,24 +4514,33 @@ export async function startServer(options: StartOptions): Promise<void> {
         const channelId = _slack.getChannelForSession(sessionName);
         if (!channelId) return false;
         const slackLogPath = path.join(config.stateDir, 'slack-messages.jsonl');
-        let lastUserMsg: { text?: string } | null = null;
+        // Load up to the last 20 messages for this channel so we can both
+        // verify the most recent entry is unanswered (last real message is
+        // user) AND build an inline history block for the resume payload.
+        interface SlackLogEntry { text?: string; fromUser?: boolean; timestamp?: string; senderName?: string; channelId?: string }
+        const channelMessages: SlackLogEntry[] = [];
         try {
           const content = fs.readFileSync(slackLogPath, 'utf-8');
-          const lines = content.trim().split('\n').slice(-10);
-          for (let i = lines.length - 1; i >= 0; i--) {
+          const lines = content.trim().split('\n');
+          for (let i = lines.length - 1; i >= 0 && channelMessages.length < 20; i--) {
             try {
-              const msg = JSON.parse(lines[i]);
+              const msg = JSON.parse(lines[i]) as SlackLogEntry;
               if (msg.channelId === channelId) {
-                if (msg.fromUser) lastUserMsg = msg;
-                break;
+                channelMessages.unshift(msg);
               }
             } catch { /* skip malformed */ }
           }
         } catch { /* no log */ }
-        if (!lastUserMsg) return false;
+        if (channelMessages.length === 0) return false;
+        const lastReal = findLastRealMessage(channelMessages);
+        if (!lastReal?.fromUser) return false;
         console.log(`[CompactionResume] (${triggerLabel}) Slack channel ${channelId} has unanswered message — recovering`);
+
+        const contextBlock = formatInlineHistory(channelMessages, { label: 'SLACK CHANNEL CONTEXT' });
+        const payload = buildCompactionResumePayload(contextBlock);
+        const injectText = prepareInjectionText(payload, triggerLabel, channelId);
         // Direct injection — bypass triage (see comment on recoverCompactedSession).
-        const ok = sessionManager.injectMessage(sessionName, COMPACTION_RESUME_PROMPT);
+        const ok = sessionManager.injectMessage(sessionName, injectText);
         if (ok) {
           console.log(`[CompactionResume] (${triggerLabel}) Slack direct re-inject OK for channel ${channelId}`);
           return true;
