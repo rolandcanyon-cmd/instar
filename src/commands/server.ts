@@ -5269,7 +5269,14 @@ export async function startServer(options: StartOptions): Promise<void> {
     messageRouter.setSummarySentinel(summarySentinel);
 
     // On-demand session spawning for message delivery (Phase 5)
-    const spawnManager = new SpawnRequestManager({
+    // §4.4: spawn knobs are read from config.threadline.spawn — see
+    // ThreadlineSpawnConfig in core/types.ts. All fields are optional and
+    // fall through to manager-level defaults if absent.
+    const spawnConfig = config.threadline?.spawn;
+    // Forward-declared `let` so the onDrainReady callback can reference the
+    // manager it belongs to (for re-entrant evaluate() calls during drain).
+    let spawnManager: SpawnRequestManager;
+    spawnManager = new SpawnRequestManager({
       maxSessions: config.sessions.maxSessions ?? 5,
       getActiveSessions: () => sessionManager.listRunningSessions(),
       spawnSession: async (prompt, opts) => {
@@ -5278,7 +5285,9 @@ export async function startServer(options: StartOptions): Promise<void> {
           prompt,
           model: opts?.model as import('../core/types.js').ModelTier | undefined,
           maxDurationMinutes: opts?.maxDurationMinutes,
-          triggeredBy: 'spawn-request',
+          // §4.5: honor SpawnRequestManager's provenance tag so drain-spawned
+          // sessions are distinguishable from inline-spawned ones in logs/stream.
+          triggeredBy: opts?.triggeredBy ?? 'spawn-request',
         });
         return session.id;
       },
@@ -5291,7 +5300,71 @@ export async function startServer(options: StartOptions): Promise<void> {
       onEscalate: (request, reason) => {
         notify('IMMEDIATE', 'messaging', `Spawn escalation: ${reason}\n  Requester: ${request.requester.agent}\n  Target: ${request.target.agent}`);
       },
+      // §4.5: emit degradation breadcrumbs on edge transitions.
+      onDegradation: (event) => {
+        try {
+          const reporter = DegradationReporter.getInstance();
+          if (event.kind === 'spawn-penalty-tripped') {
+            reporter.report({
+              feature: 'Threadline.SpawnPenalty',
+              primary: `Open spawn slot for peer "${event.agent}"`,
+              fallback: `Spawn blocked for ${Math.round(event.penaltyMs / 1000)}s after ${event.consecutiveFailures} consecutive agent-attributable failures`,
+              reason: `Peer "${event.agent}" tripped the consecutive-failure penalty (3 strikes)`,
+              impact: 'Peer cannot spawn sessions until penalty clears. Successful inbound spawn from a different peer is unaffected.',
+            });
+          } else if (event.kind === 'spawn-infra-degraded') {
+            reporter.report({
+              feature: 'Threadline.SpawnInfraDegraded',
+              primary: `Full queue admission (cap 10) for peer "${event.agent}"`,
+              fallback: `Degraded admission (cap ${spawnConfig?.degradedMaxQueuedPerAgent ?? 1}) for ${Math.round(event.degradationMs / 60_000)}min`,
+              reason: `Peer "${event.agent}" tripped the infra-failure soft limiter (${event.failureCount} non-attributable failures in 10min)`,
+              impact: 'Peer\'s queue depth is capped; older messages are dropped. No blame attribution.',
+            });
+          }
+        } catch (err) {
+          console.warn(`[spawn-manager] degradation reporter failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
+      // §4.4: optional knobs from config.
+      cooldownMs: spawnConfig?.cooldownMs,
+      maxDrainsPerTick: spawnConfig?.maxDrainsPerTick,
+      maxEnvelopeBytes: spawnConfig?.maxEnvelopeBytes,
+      maxGlobalQueued: spawnConfig?.maxGlobalQueued,
+      degradedMaxQueuedPerAgent: spawnConfig?.degradedMaxQueuedPerAgent,
+      // §4.4 commit 2 + §4.5: drain-loop consumer wiring.
+      // When the drain loop finds an agent ready (cooldown cleared + queued
+      // messages present), this callback re-invokes evaluate() with a
+      // synthetic SpawnRequest tagged `triggeredBy: 'spawn-request-drain'`.
+      // The real queued context is reattached by SpawnRequestManager.evaluate
+      // via its internal drainQueue() call. Stub session/machine values:
+      // requester.session/machine isn't preserved per-message — those fields
+      // are only used in the spawn prompt template for display.
+      onDrainReady: async (agent: string) => {
+        try {
+          const result = await spawnManager.evaluate({
+            requester: { agent, session: 'drain', machine: 'drain' },
+            target: { agent: config.projectName, machine: os.hostname() },
+            reason: `Drain re-attempt for queued messages from ${agent}`,
+            priority: 'medium',
+            triggeredBy: 'spawn-request-drain',
+          });
+          if (!result.approved) {
+            console.log(`[spawn-manager] drain re-attempt for ${agent} not approved: ${result.reason}`);
+          }
+        } catch (err) {
+          console.warn(`[spawn-manager] drain re-attempt for ${agent} threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
     });
+
+    // §4.4 kill switch: drain loop runs unless explicitly disabled in config.
+    // Wired here so emergency rollback is a config flip, not a code change.
+    if (spawnConfig?.drainEnabled !== false) {
+      spawnManager.start();
+      console.log(`[spawn-manager] drain loop started (tick=${spawnManager.getDrainTickMs()}ms)`);
+    } else {
+      console.log('[spawn-manager] drain loop disabled by config.threadline.spawn.drainEnabled=false');
+    }
 
     // Threadline Router — handles threaded cross-agent conversations via relay
     const threadlineRouter = new ThreadlineRouter(
@@ -5606,7 +5679,12 @@ export async function startServer(options: StartOptions): Promise<void> {
             delivery: { status: 'delivered' as const, attempts: 1, lastAttempt: new Date().toISOString() },
           } as unknown as import('../messaging/types.js').MessageEnvelope;
 
-          const relayContext = { senderFingerprint, senderName, trustLevel };
+          const relayContext = {
+            trust: { kind: 'plaintext-tofu' as const, senderFingerprint },
+            senderFingerprint,
+            senderName,
+            trustLevel,
+          };
           let result = await threadlineRouter.handleInboundMessage(envelope, relayContext);
 
           // Fallback for threadId-less messages
@@ -6130,6 +6208,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       await notificationBatcher.flushAll(); // Drain pending notifications before exit
       notificationBatcher.stop();
       retryManager.stop();
+      spawnManager.dispose(); // §4.4: stop drain loop + clear DRR state
       summarySentinel.stop();
       memoryMonitor.stop();
       caffeinateManager.stop();
