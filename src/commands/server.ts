@@ -6078,6 +6078,17 @@ export async function startServer(options: StartOptions): Promise<void> {
                 scheduleRetry(index + 1);
               } else {
                 console.error('[tunnel] All retries exhausted. Tunnel unavailable until server restart.');
+                if (telegram) {
+                  try {
+                    const lifelineId = telegram.getLifelineTopicId?.();
+                    if (lifelineId) {
+                      await telegram.sendToTopic(
+                        lifelineId,
+                        '⚠️ Tunnel failed after all retries. Dashboard link is unavailable until the server is restarted.',
+                      ).catch(() => {});
+                    }
+                  } catch { /* best-effort notification */ }
+                }
               }
             }
           }, retryIntervals[index] * 60_000);

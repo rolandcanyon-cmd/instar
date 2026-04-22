@@ -1,53 +1,21 @@
 # Upgrade Guide — vNEXT
 
 <!-- bump: patch -->
-<!-- Valid values: patch, minor, major -->
-<!-- patch = bug fixes, refactors, test additions, doc updates -->
-<!-- minor = new features, new APIs, new capabilities (backwards-compatible) -->
-<!-- major = breaking changes to existing APIs or behavior -->
 
 ## What Changed
 
-<!-- Describe what changed technically. What new features, APIs, behavioral changes? -->
-<!-- Write this for the AGENT — they need to understand the system deeply. -->
+When the cloudflared quick tunnel fails all 5 initial startup attempts plus all 3 background retries (scheduled at 5m / 10m / 20m), the server now posts a notification to the Telegram Lifeline topic telling the user the tunnel is permanently unavailable until the server is restarted. Previously this event was a console-only `[tunnel] All retries exhausted` line that nobody reads in a running server, so the dashboard link silently never appeared and the user had no way to know recovery required a restart. The notification is a best-effort `sendToTopic` call on `TelegramAdapter`; if Telegram itself is failing the call is swallowed so it cannot throw out of startup. No retry cadence or other tunnel logic changed — this is a pure additive signal on an existing failure branch in `src/commands/server.ts`.
 
 ## What to Tell Your User
 
-<!-- Write talking points the agent should relay to their user. -->
-<!-- This should be warm, conversational, user-facing — not a changelog. -->
-<!-- Focus on what THEY can now do, not internal plumbing. -->
-<!--                                                                    -->
-<!-- PROHIBITED in this section (will fail validation):                 -->
-<!--   camelCase config keys: silentReject, maxRetries, telegramNotify -->
-<!--   Inline code backtick references like silentReject: false        -->
-<!--   Fenced code blocks                                              -->
-<!--   Instructions to edit files or run commands                      -->
-<!--                                                                    -->
-<!-- CORRECT style: "I can turn that on for you" not "set X to false"  -->
-<!-- The agent relays this to their user — keep it human.              -->
-
-- **[Feature name]**: "[Brief, friendly description of what this means for the user]"
+- **Tunnel failures stop being silent**: "If the dashboard link doesn't show up after I start, I'll send you a note so you know to restart me — no more guessing why the link never appeared."
 
 ## Summary of New Capabilities
 
 | Capability | How to Use |
 |-----------|-----------|
-| [Capability] | [Endpoint, command, or "automatic"] |
+| Tunnel-exhaustion Lifeline notification | automatic |
 
 ## Evidence
 
-<!-- REQUIRED if this release claims to fix a bug. -->
-<!-- Unit tests passing is NOT evidence. Provide ONE of: -->
-<!--   (a) Reproduction steps + observed before/after on a live system. -->
-<!--       Include log excerpts, observed command output, or behavior -->
-<!--       description. Make it specific enough that a future reader can -->
-<!--       re-run it and see the same thing. -->
-<!--   (b) "Not reproducible in dev — [concrete reason]" if the failure -->
-<!--       mode truly can't be exercised locally (race conditions, -->
-<!--       event-driven paths requiring external signals, etc). -->
-<!--                                                                 -->
-<!-- If this release doesn't claim a bug fix (pure feature / refactor), -->
-<!-- leave this section blank or delete it — it's only enforced when -->
-<!-- "What Changed" describes a fix. -->
-
-[Describe reproduction + verified fix, OR "Not reproducible in dev — [concrete reason]"]
+Not reproducible in dev — the failure mode requires 8 consecutive cloudflared quick-tunnel start failures on a live host (5 initial + 3 background retries at 5/10/20 min). The fix site is the `else` branch of `scheduleRetry` in `src/commands/server.ts` immediately after the pre-existing `console.error('[tunnel] All retries exhausted …')` line. Verification plan: the next time a host's outbound to cloudflared is blocked long enough to burn all retries, the Lifeline topic will receive a message; the console log remains as a secondary signal. The added code block is guarded by `telegram?.getLifelineTopicId?.()` and wrapped in `try/catch` with `.catch(() => {})`, so it cannot throw out of server startup even if Telegram is simultaneously unhealthy.
