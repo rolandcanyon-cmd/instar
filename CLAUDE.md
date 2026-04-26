@@ -23,7 +23,10 @@ pnpm test:integration # Integration tests (spawns real sessions)
 ```
 src/
   core/           # SessionManager, StateManager, Config, FeedbackManager,
-                  # UpdateChecker, RelationshipManager, SleepWakeDetector, types
+                  # UpdateChecker, RelationshipManager, SleepWakeDetector,
+                  # SourceTreeGuard (blocks destructive managers against the instar
+                  # source tree; throws SourceTreeGuardError before any mutation),
+                  # types
   scheduler/      # Cron-based job scheduling with quota awareness
   monitoring/     # Health checks, QuotaTracker (threshold-based load shedding),
                   # CrashLoopPauser (auto-pause runaway jobs),
@@ -46,6 +49,8 @@ src/
                   # `helper-failed` events; consumers handle retry/messaging)
   messaging/      # TelegramAdapter (long-polling, JSONL history),
                   # WhatsAppAdapter, SlackAdapter, iMessage (platform adapters);
+                  # TelegramMarkdownFormatter (GFM→HTML for Telegram; disabled by
+                  # default via telegramFormatMode: 'legacy-passthrough'),
                   # MessageRouter (topic → adapter routing),
                   # DeliveryRetryManager (retry on failed delivery),
                   # SpawnRequestManager (cross-session spawn coordination),
