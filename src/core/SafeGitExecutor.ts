@@ -149,6 +149,39 @@ const GIT_ENV_DENYLIST: ReadonlySet<string> = new Set([
   'GIT_DISCOVERY_ACROSS_FILESYSTEM',
 ]);
 
+// Cache of host's git identity, read once from gitconfig (only if env vars
+// don't supply it). Identity is not an alias-attack vector — it's just
+// who-am-I. Neutralizing gitconfig kills it, so we re-inject as env vars
+// in sanitizeEnv. We always check env vars first on every call, so tests
+// that set GIT_AUTHOR_*/GIT_COMMITTER_* can short-circuit the gitconfig read.
+let _cachedConfigIdentity: { name?: string; email?: string } | null = null;
+function getHostGitIdentity(): { name?: string; email?: string } {
+  // Env vars always win — checked on every call so tests setting them can
+  // bypass the gitconfig read entirely.
+  const fromEnv: { name?: string; email?: string } = {};
+  if (process.env.GIT_AUTHOR_NAME || process.env.GIT_COMMITTER_NAME) {
+    fromEnv.name = process.env.GIT_AUTHOR_NAME || process.env.GIT_COMMITTER_NAME;
+  }
+  if (process.env.GIT_AUTHOR_EMAIL || process.env.GIT_COMMITTER_EMAIL) {
+    fromEnv.email = process.env.GIT_AUTHOR_EMAIL || process.env.GIT_COMMITTER_EMAIL;
+  }
+  if (fromEnv.name && fromEnv.email) return fromEnv;
+  // Fall back to host gitconfig — read once and cache.
+  if (!_cachedConfigIdentity) {
+    _cachedConfigIdentity = {};
+    try {
+      _cachedConfigIdentity.name = execFileSync('git', ['config', '--global', 'user.name'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim() || undefined;
+    } catch { /* not configured */ }
+    try {
+      _cachedConfigIdentity.email = execFileSync('git', ['config', '--global', 'user.email'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim() || undefined;
+    } catch { /* not configured */ }
+  }
+  return {
+    name: fromEnv.name ?? _cachedConfigIdentity.name,
+    email: fromEnv.email ?? _cachedConfigIdentity.email,
+  };
+}
+
 function sanitizeEnv(callerEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   // Start from a copy of process.env, then strip the denylist, then strip
   // anything the caller supplied that's on the denylist or that matches
@@ -163,6 +196,15 @@ function sanitizeEnv(callerEnv?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
       delete merged[k];
     }
   }
+  // Preserve host git identity before we neutralize global config — without
+  // this, every commit through SafeGitExecutor would fail with "Author
+  // identity unknown" because the global config is at /dev/null. Identity is
+  // not an alias-attack vector; alias rebinding is.
+  const id = getHostGitIdentity();
+  if (id.name && !merged.GIT_AUTHOR_NAME) merged.GIT_AUTHOR_NAME = id.name;
+  if (id.email && !merged.GIT_AUTHOR_EMAIL) merged.GIT_AUTHOR_EMAIL = id.email;
+  if (id.name && !merged.GIT_COMMITTER_NAME) merged.GIT_COMMITTER_NAME = id.name;
+  if (id.email && !merged.GIT_COMMITTER_EMAIL) merged.GIT_COMMITTER_EMAIL = id.email;
   // Inject unconditional config disables.
   merged.GIT_CONFIG_GLOBAL = '/dev/null';
   merged.GIT_CONFIG_SYSTEM = '/dev/null';
@@ -216,9 +258,23 @@ interface ExtractedTargets {
  */
 function extractVerbAndTargets(
   args: readonly string[],
-  cwd: string,
+  cwd: string | undefined,
 ): ExtractedTargets {
-  const targets: string[] = [canonicalize(cwd)];
+  // If cwd is not given but the args contain a `-C <dir>` redirect, default
+  // to that directory rather than process.cwd(). This preserves the
+  // semantics of `execFileSync('git', ['-C', dir, ...])` calls that pre-date
+  // the migration to SafeGitExecutor and didn't pass an explicit cwd.
+  let effectiveCwd = cwd;
+  if (effectiveCwd === undefined) {
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '-C') {
+        effectiveCwd = args[i + 1];
+        break;
+      }
+    }
+    effectiveCwd = effectiveCwd ?? process.cwd();
+  }
+  const targets: string[] = [canonicalize(effectiveCwd)];
   let i = 0;
   while (i < args.length) {
     const a = args[i];
@@ -511,12 +567,12 @@ function captureCallerFrame(): string {
 // ── Public types ────────────────────────────────────────────────────
 
 export interface SafeGitOptions {
-  /** Required. The directory the git command will mutate. */
-  cwd: string;
+  /** The directory the git command will mutate. Defaults to process.cwd(). */
+  cwd?: string;
   /** Caller label for error messages and audit log. */
   operation: string;
-  /** stdio passthrough, default 'pipe'. */
-  stdio?: 'pipe' | 'inherit' | 'ignore';
+  /** stdio passthrough, default 'pipe'. Accepts the same shapes execFileSync does. */
+  stdio?: 'pipe' | 'inherit' | 'ignore' | Array<'pipe' | 'inherit' | 'ignore' | number | null | undefined>;
   /** Encoding for return value, default 'utf-8'. */
   encoding?: BufferEncoding;
   /** Timeout in ms, default 30000. */
@@ -681,6 +737,29 @@ export class SafeGitExecutor {
     }
     audit('git', opts.operation, verb, targets[0], 'allowed');
     return stdout || '';
+  }
+
+  /**
+   * Verb-aware dispatcher. Routes to readSync for known read-only verbs and to
+   * execSync otherwise. Use this from generic git() helpers that take dynamic
+   * args and don't know at the call site whether the verb is destructive.
+   */
+  static run(args: readonly string[], opts: SafeGitOptions): string {
+    const verb = args[0];
+    if (verb && READONLY_GIT_VERBS.has(verb)) {
+      const verbArgs = args.slice(1);
+      const shape = isReadOnlyShape(verb, verbArgs);
+      if (shape !== false) return SafeGitExecutor.readSync(args, opts);
+    }
+    if (verb && !DESTRUCTIVE_GIT_VERBS.has(verb)) {
+      return SafeGitExecutor.readSync(args, opts);
+    }
+    if (verb) {
+      const verbArgs = args.slice(1);
+      const shape = isReadOnlyShape(verb, verbArgs);
+      if (shape === true) return SafeGitExecutor.readSync(args, opts);
+    }
+    return SafeGitExecutor.execSync(args, opts);
   }
 }
 
