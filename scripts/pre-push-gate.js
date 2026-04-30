@@ -203,7 +203,6 @@ try {
   // Git commands may fail in CI or detached HEAD — skip gracefully
 }
 
-<<<<<<< HEAD
 // ── 5. Side-effects review artifact ───────────────────────────────────
 // If the upgrade notes claim a fix or feature (anything that would require
 // an Evidence section), a matching side-effects review artifact must exist
