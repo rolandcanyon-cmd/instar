@@ -21,6 +21,7 @@ import type { AgentMessage } from '../../src/core/AgentBus.js';
 import type { JobClaimPayload } from '../../src/scheduler/JobClaimManager.js';
 import type { SessionManager } from '../../src/core/SessionManager.js';
 import type { JobSchedulerConfig } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ function createTempDir(): string {
 }
 
 function cleanup(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/integration/scheduler-claim-integration.test.ts:33' });
 }
 
 function createJobsFile(dir: string, jobs: any[]): string {
@@ -160,19 +161,19 @@ describe('scheduler skips jobs claimed by remote machines', () => {
     cleanup(tmpDir);
   });
 
-  it('skips job when remote machine holds active claim', () => {
+  it('skips job when remote machine holds active claim', async () => {
     simulateRemoteClaim(bus, 'm_dawn_macbook', 'daily-sync', 'claim_remote');
 
-    const result = scheduler.triggerJob('daily-sync', 'manual');
+    const result = await scheduler.triggerJob('daily-sync', 'manual');
 
     expect(result).toBe('skipped');
     expect(sessionManager.spawnSession).not.toHaveBeenCalled();
   });
 
-  it('records claimed skip reason in skip ledger', () => {
+  it('records claimed skip reason in skip ledger', async () => {
     simulateRemoteClaim(bus, 'm_dawn_macbook', 'daily-sync', 'claim_remote');
 
-    scheduler.triggerJob('daily-sync', 'manual');
+    await scheduler.triggerJob('daily-sync', 'manual');
 
     const ledger = scheduler.getSkipLedger();
     const skips = ledger.getSkips({ slug: 'daily-sync' });
@@ -180,8 +181,8 @@ describe('scheduler skips jobs claimed by remote machines', () => {
     expect(skips[0].reason).toBe('claimed');
   });
 
-  it('triggers job when no remote claim exists', () => {
-    const result = scheduler.triggerJob('daily-sync', 'manual');
+  it('triggers job when no remote claim exists', async () => {
+    const result = await scheduler.triggerJob('daily-sync', 'manual');
 
     expect(result).toBe('triggered');
     expect(sessionManager.spawnSession).toHaveBeenCalled();
@@ -258,7 +259,7 @@ describe('scheduler broadcasts claims before spawning', () => {
     const sentMessages: AgentMessage[] = [];
     bus.on('sent', (msg) => sentMessages.push(msg));
 
-    scheduler.triggerJob('daily-sync', 'manual');
+    await scheduler.triggerJob('daily-sync', 'manual');
 
     // Allow async claim broadcast to settle
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -269,7 +270,7 @@ describe('scheduler broadcasts claims before spawning', () => {
   });
 
   it('claim timeout is based on expectedDurationMinutes', async () => {
-    scheduler.triggerJob('daily-sync', 'manual');
+    await scheduler.triggerJob('daily-sync', 'manual');
 
     // Allow async claim broadcast to settle
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -325,8 +326,8 @@ describe('scheduler without claim manager (single machine)', () => {
     cleanup(tmpDir);
   });
 
-  it('triggers jobs normally without claim manager', () => {
-    const result = scheduler.triggerJob('daily-sync', 'manual');
+  it('triggers jobs normally without claim manager', async () => {
+    const result = await scheduler.triggerJob('daily-sync', 'manual');
     expect(result).toBe('triggered');
   });
 });

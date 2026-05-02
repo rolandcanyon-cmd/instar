@@ -366,7 +366,7 @@ describe('WhatsApp Message Routing E2E', () => {
       );
       expect(closeSection).toContain('creds.json');
       expect(closeSection).toContain('5 * 60 * 1000');
-      expect(closeSection).toContain('rmSync');
+      expect(closeSection).toMatch(/(safeRmSync|rmSync)/);
     });
 
     it('_pairingCodeRequested flag prevents duplicate requests', () => {
@@ -511,7 +511,22 @@ describe('WhatsApp Message Routing E2E', () => {
       const fnEnd = src.indexOf('\n}', fnStart + 50);
       const fnBody = src.substring(fnStart, fnEnd);
       expect(fnBody).toContain('whatsapp-reply.sh');
-      expect(fnBody).toContain('/whatsapp/send/');
+      // Since the 408 ambiguous-outcome fix, the inlined bash was hoisted
+      // out of init.ts into src/templates/scripts/whatsapp-reply.sh and
+      // installWhatsAppRelay now reads it via loadRelayTemplate().
+      // Verify both halves of that contract:
+      //   - init.ts actually delegates to loadRelayTemplate('whatsapp-reply.sh', ...)
+      //   - the template on disk contains the /whatsapp/send/ URL path
+      expect(fnBody).toMatch(/loadRelayTemplate\(['"]whatsapp-reply\.sh['"]/);
+      const templatePath = path.join(
+        path.dirname(initPath),
+        '..',
+        'templates',
+        'scripts',
+        'whatsapp-reply.sh',
+      );
+      const template = fs.readFileSync(templatePath, 'utf-8');
+      expect(template).toContain('/whatsapp/send/');
     });
 
     it('CLAUDE.md gets WhatsApp Relay section when WhatsApp is configured', () => {

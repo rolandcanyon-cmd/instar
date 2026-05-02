@@ -11,6 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { AgentTrustManager } from '../../src/threadline/AgentTrustManager.js';
 import type { AgentTrustLevel } from '../../src/threadline/AgentTrustManager.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -18,7 +19,7 @@ function createTempDir(): { dir: string; cleanup: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trust-test-'));
   return {
     dir,
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/AgentTrustManager-fingerprint.test.ts:22' }),
   };
 }
 
@@ -57,9 +58,9 @@ describe('AgentTrustManager — Fingerprint API', () => {
   // ── getOrCreateProfileByFingerprint ────────────────────────────
 
   describe('getOrCreateProfileByFingerprint', () => {
-    it('creates a new profile with default untrusted level', () => {
+    it('creates a new profile with default verified level (relay agents)', () => {
       const profile = manager.getOrCreateProfileByFingerprint('fp-new', 'NewAgent');
-      expect(profile.level).toBe('untrusted');
+      expect(profile.level).toBe('verified');
       expect(profile.fingerprint).toBe('fp-new');
     });
 
@@ -129,11 +130,12 @@ describe('AgentTrustManager — Fingerprint API', () => {
 
     it('rejects upgrade from non-authorized source', () => {
       manager.getOrCreateProfileByFingerprint('fp-reject', 'Agent');
+      // Profile starts at 'verified' (relay default). Upgrade to 'trusted' from non-user source should fail.
       const success = manager.setTrustLevelByFingerprint(
         'fp-reject', 'trusted', 'setup-default', 'should fail'
       );
       expect(success).toBe(false);
-      expect(manager.getTrustLevelByFingerprint('fp-reject')).toBe('untrusted');
+      expect(manager.getTrustLevelByFingerprint('fp-reject')).toBe('verified');
     });
   });
 

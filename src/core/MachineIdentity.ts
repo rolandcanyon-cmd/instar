@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { MachineIdentity, MachineRegistry, MachineRegistryEntry, MachineRole, MachineCapability } from './types.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -278,6 +279,24 @@ export class MachineIdentityManager {
   }
 
   /**
+   * Ensure this machine has a registry entry, registering it with the given
+   * role if missing. Safe to call on every startup — it's a no-op when the
+   * machine is already present. Without this, a registry wiped by sync
+   * corruption or a manual cleanup would brick the coordinator on boot,
+   * since `updateRole` hard-throws on unknown machines.
+   */
+  ensureSelfRegistered(identity: MachineIdentity, role: MachineRole = 'standby'): boolean {
+    const registry = this.loadRegistry();
+    if (registry.machines[identity.machineId]) return false;
+
+    console.warn(
+      `[MachineIdentity] Machine ${identity.machineId} (${identity.name}) missing from registry — self-registering with role "${role}".`
+    );
+    this.registerMachine(identity, role);
+    return true;
+  }
+
+  /**
    * Register a machine in the registry.
    */
   registerMachine(identity: MachineIdentity, role: MachineRole = 'standby'): void {
@@ -367,7 +386,7 @@ export class MachineIdentityManager {
   removeLocalIdentity(): void {
     for (const file of [this.identityPath, this.signingKeyPath, this.encryptionKeyPath]) {
       if (fs.existsSync(file)) {
-        fs.unlinkSync(file);
+        SafeFsExecutor.safeUnlinkSync(file, { operation: 'src/core/MachineIdentity.ts:389' });
       }
     }
   }

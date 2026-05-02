@@ -26,6 +26,7 @@ import { createSessionProbes } from '../../src/monitoring/probes/SessionProbe.js
 import { createSchedulerProbes } from '../../src/monitoring/probes/SchedulerProbe.js';
 import { createMessagingProbes } from '../../src/monitoring/probes/MessagingProbe.js';
 import { createLifelineProbes } from '../../src/monitoring/probes/LifelineProbe.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -155,7 +156,7 @@ describe('E2E: SystemReviewer Complete Lifecycle', () => {
 
   afterEach(() => {
     reviewer.stop();
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/e2e/system-reviewer-e2e.test.ts:159' });
   });
 
   it('full lifecycle: register → review → history → trend', async () => {
@@ -262,7 +263,7 @@ describe('E2E: SystemReviewer API Routes', () => {
 
   afterEach(() => {
     reviewer.stop();
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/e2e/system-reviewer-e2e.test.ts:267' });
   });
 
   // ── POST /system-reviews ──────────────────────────────────────────
@@ -536,7 +537,7 @@ describe('E2E: SystemReviewer Persistence Across Restarts', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/e2e/system-reviewer-e2e.test.ts:542' });
   });
 
   it('simulates server restart: reviews persist and trend continues', async () => {
@@ -624,7 +625,7 @@ describe('E2E: Real Probe Factories with SystemReviewer', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/e2e/system-reviewer-e2e.test.ts:631' });
   });
 
   it('session probes report accurate diagnostics through full pipeline', async () => {
@@ -715,7 +716,7 @@ describe('E2E: Real Probe Factories with SystemReviewer', () => {
     expect(queueResult?.passed).toBe(true);
 
     reviewer.stop();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/e2e/system-reviewer-e2e.test.ts:723' });
   });
 
   it('messaging probes report connection state through full pipeline', async () => {
@@ -753,7 +754,7 @@ describe('E2E: Real Probe Factories with SystemReviewer', () => {
     expect(topicResult?.description).toContain('3 topic');
 
     reviewer.stop();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/e2e/system-reviewer-e2e.test.ts:762' });
   });
 
   it('lifeline probes detect degraded state through full pipeline', async () => {
@@ -814,7 +815,7 @@ describe('E2E: SystemReviewer Event Flow', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/e2e/system-reviewer-e2e.test.ts:824' });
   });
 
   it('events fire in correct order during review lifecycle', async () => {

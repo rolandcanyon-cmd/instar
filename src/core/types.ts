@@ -53,6 +53,15 @@ export interface SessionManagerConfig {
   authToken?: string;
   /** Server port — used to construct INSTAR_SERVER_URL for HTTP hooks */
   port?: number;
+  /** Anthropic API key for spawned sessions (e.g., 'x' for meridian proxy) */
+  anthropicApiKey?: string;
+  /** Anthropic base URL for spawned sessions (e.g., 'http://127.0.0.1:3456' for meridian) */
+  anthropicBaseUrl?: string;
+  /** Minutes of idle-at-prompt before a non-protected session is killed (default: 15) */
+  idlePromptKillMinutes?: number;
+  /** Absolute maximum session duration in minutes — safety net for sessions
+   *  without an explicit timeout (default: 240) */
+  defaultMaxDurationMinutes?: number;
 }
 
 // ── Job Scheduling ──────────────────────────────────────────────────
@@ -211,6 +220,15 @@ export interface JobSchedulerConfig {
     /** Above this: no jobs */
     shutdown: number;
   };
+  /** Grace period (ms) before first missed-job evaluation, allowing HTTP server to start.
+   *  Defaults to 5000ms. Set to 0 to disable. */
+  startupGraceMs?: number;
+  /** Number of gate retry attempts before skipping. Defaults to 3. */
+  gateRetries?: number;
+  /** Delay between gate retries in ms. Defaults to 5000. */
+  gateRetryDelayMs?: number;
+  /** Auth token exposed to gate shell commands as $INSTAR_AUTH_TOKEN so gates can call authenticated localhost endpoints. */
+  authToken?: string;
 }
 
 // ── User Management ─────────────────────────────────────────────────
@@ -491,9 +509,22 @@ export type SkipReason =
   | 'disabled'        // Job has enabled: false
   | 'paused'          // Scheduler is paused
   | 'quota'           // Quota constraints
+  | 'memory-pressure' // Memory gate blocked the job (distinct from quota)
   | 'capacity'        // No available session slots (queued instead of skipped, but tracked)
   | 'claimed'         // Another machine already claimed this job (Phase 4C — Gap 5)
-  | 'machine-scope';  // Job is scoped to a different machine
+  | 'machine-scope'   // Job is scoped to a different machine
+  | 'gate';           // Gate command returned non-zero (nothing to do)
+
+/**
+ * Result of a canRunJob gate check. The callback may return a plain boolean
+ * (legacy) or this richer form so the scheduler can log/track the actual
+ * gating reason instead of always reporting 'quota'.
+ */
+export interface CanRunJobResult {
+  allowed: boolean;
+  reason?: SkipReason;
+  detail?: string;
+}
 
 export interface SkipEvent {
   slug: string;
@@ -545,7 +576,7 @@ export interface FeedbackItem {
   /** Unique feedback ID */
   id: string;
   /** Feedback type */
-  type: 'bug' | 'feature' | 'improvement' | 'question' | 'other';
+  type: 'bug' | 'feature' | 'improvement' | 'question' | 'hallucination' | 'other';
   /** Short title/summary */
   title: string;
   /** Detailed description */
@@ -1453,6 +1484,27 @@ export interface InstarConfig {
   threadline?: ThreadlineConfig;
   /** Dashboard configuration */
   dashboard?: DashboardConfig;
+  /**
+   * Telegram markdown formatter mode. Default `'legacy-passthrough'` —
+   * byte-for-byte identical to pre-PR2 behavior (formatter bypassed; callsite
+   * parse_mode preserved). Flip to `'markdown'` / `'plain'` / `'code'` / `'html'`
+   * to enable formatting. See docs/specs/TELEGRAM-MARKDOWN-RENDERER-SPEC.md.
+   * Hot-reloadable: the adapter/lifeline read the config on every send.
+   */
+  telegramFormatMode?: 'plain' | 'html' | 'code' | 'markdown' | 'legacy-passthrough';
+  /** When true, lint issues return 422 / throw instead of just being logged. */
+  telegramLintStrict?: boolean;
+  /**
+   * Free-text description of how outbound agent-to-user messages should be
+   * written for this agent's user. Consumed by the MessagingToneGate's style
+   * rule (B11_STYLE_MISMATCH). Generic by design — every agent's operator sets
+   * their own preferred style without code changes. Examples:
+   *   "ELI10 — write for a 10-year-old. Short sentences. Plain words."
+   *   "Technical and terse. Prefer precise vocabulary."
+   *   "Formal business-memo tone."
+   * When undefined/empty the style rule does not apply (behavior unchanged).
+   */
+  messagingStyle?: string;
   /** HMAC signing key for context file integrity verification (auto-generated, 32-byte hex) */
   contextSigningKey?: string;
   /** MoltBridge integration — trust network for agent discovery and credibility */
@@ -1464,6 +1516,307 @@ export interface InstarConfig {
     agentName?: string;
     platform?: string;
   };
+  /** Integrated-Being ledger (cross-session coherence) — see docs/specs/integrated-being-ledger-v1.md */
+  integratedBeing?: IntegratedBeingConfig;
+  /**
+   * BackupManager configuration override. Optional; all fields merge over
+   * BackupManager's DEFAULT_CONFIG. `includeFiles` is set-unioned with
+   * defaults (see {@link BackupConfig.includeFiles}) — this is how
+   * migrators and users add extra paths to backups without displacing
+   * identity/memory defaults.
+   */
+  backup?: Partial<BackupConfig>;
+  /**
+   * PR-REVIEW-HARDENING kill-switch and rollout phase. Default 'off'
+   * (Phase A landing). Flipping to 'shadow' / 'layer1-2' / 'layer3'
+   * activates progressively more pipeline enforcement — see
+   * docs/specs/PR-REVIEW-HARDENING-SPEC.md §"Rollout plan".
+   */
+  prGate?: PrGateConfig;
+  /**
+   * PARALLEL-DEV-ISOLATION rollout phase. Default 'off' (no WorktreeManager
+   * instantiated, sessions share one working tree). Flipping to 'shadow' or
+   * 'enforce' spins up the WorktreeManager and gives each topic session its
+   * own isolated worktree — see docs/specs/PARALLEL-DEV-ISOLATION-SPEC.md.
+   */
+  parallelDev?: ParallelDevConfig;
+}
+
+// ── Parallel-dev isolation (PARALLEL-DEV-ISOLATION-SPEC) ────────────
+
+export interface ParallelDevConfig {
+  /**
+   * Rollout phase.
+   *   'off'      — no WorktreeManager; sessions share one working tree (legacy).
+   *   'shadow'   — WorktreeManager active locally; sessions spawn in isolated
+   *                worktrees, but the GitHub workflow check is advisory only.
+   *   'enforce'  — WorktreeManager active AND the push gate at GitHub Actions
+   *                blocks unsigned commits. Requires a working OIDC verifier
+   *                and installed GH rulesets.
+   */
+  phase: 'off' | 'shadow' | 'enforce';
+  /**
+   * Allow the headless AES-GCM + scrypt flat-file fallback when no OS keychain
+   * is reachable. When true, `INSTAR_WORKTREE_PASSPHRASE` (≥12 chars) must be
+   * set in the server's environment. See WorktreeKeyVault K1.
+   */
+  headlessAllowed?: boolean;
+  /**
+   * Repos enrolled for OIDC-authenticated push-gate calls, e.g.
+   * `[{ owner: 'JKHeadley', repo: 'instar' }]`. Empty = accept no OIDC tokens.
+   */
+  oidcEnrolledRepos?: Array<{ owner: string; repo: string }>;
+  /** Maximum commit→push delay before a trailer nonce expires (seconds). */
+  maxPushDelaySeconds?: number;
+}
+
+// ── PR-gate (PR-REVIEW-HARDENING-SPEC Phase A) ────────────────────
+
+export interface PrGateConfig {
+  /**
+   * Rollout phase. 'off' returns 404 for every /pr-gate/* route.
+   * 'shadow' | 'layer1-2' | 'layer3' progressively enable enforcement.
+   */
+  phase: 'off' | 'shadow' | 'layer1-2' | 'layer3';
+  /** Machine ID that serves the authoritative pr-gate endpoints. */
+  primaryMachineId?: string;
+  /** Machine IDs paired for replication / cross-tunnel failover. */
+  pairedMachineIds?: string[];
+}
+
+// ── Integrated-Being Ledger (v1) ────────────────────────────────────
+
+/**
+ * Configuration for the Integrated-Being ledger (per-agent shared state across
+ * concurrent sessions). All fields are optional — defaults apply when absent.
+ * See docs/specs/integrated-being-ledger-v1.md for the authoritative spec.
+ */
+export interface IntegratedBeingConfig {
+  /** Master switch. Default: true. Gates endpoint registration, emitter
+   *  registration, and backup inclusion. When false, all three are skipped. */
+  enabled?: boolean;
+  /** Outbound commitment classifier. Default: false (explicit opt-in). */
+  classifierEnabled?: boolean;
+  /** Retention for rotated archives. Default: 7 days. */
+  retentionDays?: number;
+  /** Fraction of prefilter-hits to LLM-classify (0..1). Default: 1.0. */
+  classifierSampleRate?: number;
+  /** Downstream paraphrase cross-check in outbound path. Default: true. */
+  paraphraseCheckEnabled?: boolean;
+  /** Per-agent salt for hashing untrusted counterparty names. Generated on
+   *  first use; never rotated silently. */
+  counterpartyHashSalt?: string;
+
+  // ── v2 knobs (docs/specs/integrated-being-ledger-v2.md) ──────────
+  /** Master v2 switch. Gates session-write endpoints, session registry,
+   *  and dashboard additions. Default false — v2 ships dark for observation. */
+  v2Enabled?: boolean;
+  /** Enables POST /shared-state/resolve/:id user-facing resolution flow.
+   *  Loader forces false when v2Enabled is false; auto-trues on first
+   *  v2Enabled flip unless operator explicitly set false. */
+  resolutionEnabled?: boolean;
+  /** Per-session write rate (writes/min). Default 30. Returns 429. */
+  sessionWriteRatePerMinute?: number;
+  /** Per-agent global write ceiling (writes/min, summed across sessions).
+   *  Default 100. */
+  maxWritesPerMinuteGlobal?: number;
+  /** Per-session cap on open commitments. Default 20. */
+  openCommitmentsPerSession?: number;
+  /** Per-session cap on passive-wait commitments. Default 3. */
+  passiveWaitCommitmentsPerSession?: number;
+  /** Absolute TTL for binding tokens (hours). Default 72. Past this,
+   *  tokens are invalid regardless of refresh. */
+  tokenAbsoluteTtlHours?: number;
+  /** Rolling idle TTL for binding tokens (hours). Default 24.
+   *  Absolute TTL still caps total lifetime. */
+  tokenIdleTtlHours?: number;
+  /** Days after last write that a session registration is retained.
+   *  Default 7. */
+  sessionBindingRetentionDays?: number;
+  /** Mechanism-ref validation timeout (ms). Default 200. */
+  mechanismRefValidateTimeoutMs?: number;
+  /** Trust-tier lookup timeout (ms). Default 500. */
+  trustTierLookupTimeoutMs?: number;
+  /** Dispute-count threshold for rendering disputed status. Default 3. */
+  disputeCountThreshold?: number;
+  /** Disputes per session per hour cap. Default 10. */
+  disputesPerSessionPerHour?: number;
+  /** Dispute window (hours). Default 24. */
+  disputeWindowHours?: number;
+  /** Aggregation signal threshold (cross-session dedup hits in 24h). Default 5. */
+  aggregationSignalThreshold?: number;
+  /** Aggregation signal immediate threshold (same-session dedup hits). Default 2. */
+  aggregationSignalImmediateThreshold?: number;
+  /** Phase A sidecar buffer max entries. Default 500 — overflow 429s. */
+  sidecarBufferMax?: number;
+}
+
+/** Ledger entry subsystem (who emitted). Always bound server-side. */
+export type LedgerEntrySubsystem =
+  | 'threadline'
+  | 'outbound-classifier'
+  | 'session-manager'
+  | 'compaction-sentinel'
+  | 'dispatch'
+  | 'coherence-gate'
+  /** v2: session-asserted writes via POST /shared-state/append. instance = session id. */
+  | 'session'
+  /** v2 slice 5: CommitmentSweeper expired/stranded emissions. */
+  | 'commitment-sweeper';
+
+/** Ledger entry kind. */
+export type LedgerEntryKind =
+  | 'commitment'
+  | 'agreement'
+  | 'thread-opened'
+  | 'thread-closed'
+  | 'thread-abandoned'
+  | 'decision'
+  | 'note';
+
+/** Authorship label on each entry (replaces "confidence"). */
+export type LedgerProvenance =
+  | 'subsystem-asserted'
+  | 'subsystem-inferred'
+  /** v2: bearer-token-authenticated session write via POST /shared-state/append. */
+  | 'session-asserted';
+
+/** Counterparty metadata for a ledger entry. */
+export interface LedgerCounterparty {
+  /** Type of counterparty. */
+  type: 'user' | 'agent' | 'self' | 'system';
+  /** Raw name. Charset [a-zA-Z0-9-_.:], max 64 chars. Rendered as
+   *  agent:<hash> for untrusted-tier counterparties at render time. */
+  name: string;
+  /** Trust tier, snapshotted at append time. Never re-resolved on read. */
+  trustTier: 'trusted' | 'untrusted';
+}
+
+/**
+ * A single append-only ledger entry.
+ *
+ * The id and timestamp are server-generated at append time; emittedBy is
+ * bound from calling code and never from external input.
+ */
+export interface LedgerEntry {
+  /** 12-hex server-generated ID. */
+  id: string;
+  /** ISO timestamp, server-set. */
+  t: string;
+  /** Who emitted this entry (always server-bound). */
+  emittedBy: {
+    subsystem: LedgerEntrySubsystem;
+    /** Instance identifier. Max 64 chars, charset [a-zA-Z0-9-_.:]. */
+    instance: string;
+  };
+  /** Entry kind. */
+  kind: LedgerEntryKind;
+  /** Human-readable subject. Max 200 chars, Unicode-sanitized at render time. */
+  subject: string;
+  /** Optional expanded summary. Max 400 chars, Unicode-sanitized at render time. */
+  summary?: string;
+  /** Counterparty metadata (required — addresses authority ambiguity). */
+  counterparty: LedgerCounterparty;
+  /** Optional id of an earlier entry this resolves/withdraws. */
+  supersedes?: string;
+  /** Authorship label (replaces earlier "confidence" field). */
+  provenance: LedgerProvenance;
+  /** Append-side dedup key within the rotation window.
+   *  e.g., "threadline:opened:<thread-id>". */
+  dedupKey: string;
+  /** Optional source label for classifier-produced entries. */
+  source?: 'heuristic-classifier';
+  /** v2: commitment-kind fields. Present iff kind === 'commitment'. */
+  commitment?: LedgerCommitmentFields;
+  /** v2: dispute pointer — kind must be 'note'. Separate from supersedes. */
+  disputes?: string;
+}
+
+// ── Integrated-Being Ledger (v2) ────────────────────────────────────
+
+/** Commitment mechanism declaration — how the commitment will be fulfilled. */
+export type LedgerMechanismType =
+  | 'scheduled-job'
+  | 'polling-sentinel'
+  | 'external-callback'
+  | 'passive-wait'
+  | 'user-driven';
+
+/** Result of one-time server-side mechanism-ref resolution at write. */
+export type LedgerMechanismRefStatus = 'valid' | 'invalid' | 'unverified';
+
+/** Commitment status in the stored state enum. 'stranded' is render-only. */
+export type LedgerCommitmentStatus =
+  | 'open'
+  | 'resolved'
+  | 'cancelled'
+  | 'expired'
+  | 'disputed';
+
+/** Tier of a resolution outcome — readers calibrate trust accordingly. */
+export type LedgerResolutionTier =
+  | 'self-asserted'
+  | 'subsystem-verified'
+  | 'user-resolved';
+
+/** Mechanism block for a commitment entry. refStatus is server-bound. */
+export interface LedgerMechanismSpec {
+  type: LedgerMechanismType;
+  /** Opaque ref resolvable against the mechanism-type registry. */
+  ref?: string;
+  /** ISO 8601 timestamp. Server-set — frozen at append. */
+  refResolvedAt: string;
+  /** Result of one-time resolution at write. Server-bound — never from client. */
+  refStatus: LedgerMechanismRefStatus;
+}
+
+/** Resolution block — present when a commitment is non-open. */
+export interface LedgerResolutionSpec {
+  /** ISO 8601 timestamp. */
+  at: string;
+  /** Which tier wrote this resolution. */
+  by: LedgerResolutionTier;
+  /** Optional note. Max 400 chars, Unicode-sanitized per v1 rules. */
+  note?: string;
+  /** Opaque pointer to audit trail. */
+  evidenceRef?: string;
+}
+
+/** Commitment-specific fields attached to a LedgerEntry of kind 'commitment'. */
+export interface LedgerCommitmentFields {
+  mechanism: LedgerMechanismSpec;
+  /** Optional ISO 8601 deadline. Sanity range: now+60s..now+90d. */
+  deadline?: string;
+  status: LedgerCommitmentStatus;
+  resolution?: LedgerResolutionSpec;
+}
+
+/**
+ * A registered session in the LedgerSessionRegistry. Represents a live
+ * or retained session that holds a binding token used to authenticate
+ * writes via POST /shared-state/append.
+ */
+export interface LedgerSessionRegistration {
+  /** Opaque session id (UUIDv4). */
+  sessionId: string;
+  /** Hex-encoded SHA-256 of the binding token. Plaintext token is returned
+   *  to the caller ONCE on register; only the hash is persisted. */
+  tokenHash: string;
+  /** ISO 8601 timestamp of initial registration. */
+  registeredAt: string;
+  /** ISO 8601 timestamp of most recent write or rotation. */
+  lastActiveAt: string;
+  /** ISO 8601 timestamp when the absolute TTL expires. */
+  absoluteExpiresAt: string;
+  /** ISO 8601 timestamp when the idle TTL expires (refreshed on write). */
+  idleExpiresAt: string;
+  /** True once the session has made at least one successful write.
+   *  Determines retention tier on cleanup (7d vs 1d). */
+  hasWritten: boolean;
+  /** True if revoked. Revoked sessions are purged on cleanup; verify fails closed. */
+  revoked: boolean;
+  /** Optional label for dashboard rendering — set by hook, max 64 chars. */
+  label?: string;
 }
 
 // ── Dashboard ───────────────────────────────────────────────────────
@@ -1497,6 +1850,37 @@ export interface FileViewerConfig {
 
 // ── Threadline Relay ────────────────────────────────────────────────
 
+export interface ThreadlineListenerConfig {
+  /** Whether the listener daemon is enabled */
+  enabled?: boolean;
+  /** Relay URL override for the daemon */
+  relayUrl?: string;
+  /** Pipe-mode session config */
+  pipeMode?: {
+    enabled?: boolean;
+    model?: string;
+    timeoutMs?: number;
+    warningMs?: number;
+    maxConcurrent?: number;
+    allowedTools?: string[];
+    allowedPaths?: string[];
+    minIqsBand?: number;
+  };
+  /** Failover config */
+  failover?: {
+    mode?: 'relay-presence' | 'heartbeat';
+    fallback?: string;
+    cooldownMs?: number;
+    max24h?: number;
+  };
+  /** Inbox retention in days */
+  inboxRetentionDays?: number;
+  /** Whether to publish availability to MoltBridge */
+  publishAvailability?: boolean;
+  /** Offline queue TTL in ms */
+  offlineQueueTtlMs?: number;
+}
+
 export interface ThreadlineConfig {
   /** Whether cloud relay is enabled (default: false, opt-in) */
   relayEnabled: boolean;
@@ -1514,6 +1898,35 @@ export interface ThreadlineConfig {
   ackRateLimit?: number;
   /** First-contact policy: 'supervised' (hold for approval) or 'auto' (respond immediately) */
   firstContactPolicy?: 'supervised' | 'auto';
+  /** Listener daemon configuration */
+  listener?: ThreadlineListenerConfig;
+  /** §4.4: Spawn manager / drain loop configuration */
+  spawn?: ThreadlineSpawnConfig;
+}
+
+/**
+ * §4.4: Configuration for the SpawnRequestManager and its drain loop.
+ *
+ * All fields are optional — sensible defaults are baked into the manager.
+ * The whole subtree can be omitted to keep prior behavior.
+ *
+ * The `drainEnabled` flag is the kill switch: setting `false` skips the
+ * `start()` call at server boot, leaving the drain loop dormant. Useful
+ * for emergency rollback without code changes.
+ */
+export interface ThreadlineSpawnConfig {
+  /** Cooldown between spawn requests per agent (ms). Default: 30000. */
+  cooldownMs?: number;
+  /** Max drains per tick. Default: 8. */
+  maxDrainsPerTick?: number;
+  /** Max envelope context size in UTF-8 bytes. Default: 262144 (256 KiB). */
+  maxEnvelopeBytes?: number;
+  /** Max queued messages across ALL agents. Default: 1000. */
+  maxGlobalQueued?: number;
+  /** Per-agent queue cap while in soft-limiter degradation. Default: 1. */
+  degradedMaxQueuedPerAgent?: number;
+  /** Kill switch: set false to skip starting the drain loop. Default: true. */
+  drainEnabled?: boolean;
 }
 
 // ── Input Guard ─────────────────────────────────────────────────────
@@ -2028,7 +2441,16 @@ export interface BackupConfig {
   enabled: boolean;
   /** Maximum snapshots to retain (default: 20) */
   maxSnapshots: number;
-  /** Files to include in backups (relative to .instar/) */
+  /**
+   * Additional files to include in backups, unioned with
+   * `BackupManager.DEFAULT_CONFIG.includeFiles`. Users and migrators
+   * can extend the default set but cannot remove from it.
+   * Paths are relative to `stateDir` (typically `.instar/`).
+   *
+   * Defense-in-depth: any entry resolving under `.instar/secrets/` is
+   * refused by `BLOCKED_PATH_PREFIXES` at snapshot time regardless of
+   * source (defaults, user config, migrator).
+   */
   includeFiles: string[];
 }
 

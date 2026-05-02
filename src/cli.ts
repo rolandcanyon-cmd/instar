@@ -23,6 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import { initProject } from './commands/init.js';
+import { SafeFsExecutor } from './core/SafeFsExecutor.js';
 // setup.ts is imported dynamically — it depends on @inquirer/prompts which requires Node 20.12+
 import { startServer, stopServer, restartServer } from './commands/server.js';
 import { showStatus } from './commands/status.js';
@@ -89,7 +90,7 @@ async function addTelegram(opts: { token?: string; chatId?: string }): Promise<v
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
     fs.renameSync(tmpPath, configPath);
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/cli.ts:93' }); } catch { /* ignore */ }
     throw err;
   }
 
@@ -143,7 +144,7 @@ async function addSentry(opts: { dsn?: string }): Promise<void> {
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
     fs.renameSync(tmpPath, configPath);
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/cli.ts:148' }); } catch { /* ignore */ }
     throw err;
   }
 
@@ -205,7 +206,7 @@ async function addEmail(opts: { credentialsFile?: string; tokenFile?: string }):
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
     fs.renameSync(tmpPath, configPath);
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/cli.ts:211' }); } catch { /* ignore */ }
     throw err;
   }
 
@@ -250,7 +251,7 @@ async function addQuota(opts: { stateFile?: string }): Promise<void> {
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
     fs.renameSync(tmpPath, configPath);
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/cli.ts:257' }); } catch { /* ignore */ }
     throw err;
   }
 
@@ -394,6 +395,32 @@ removeAdapterCmd
   .action(async () => {
     const { removeSlack } = await import('./commands/slack-cli.js');
     return removeSlack();
+  });
+
+// ── Worktree (parallel-dev isolation) ────────────────────────────
+
+const worktreeCmd = program
+  .command('worktree')
+  .description('Operator tools for parallel-dev topic-worktree isolation');
+
+worktreeCmd
+  .command('register-keypair')
+  .description('Move a migration-generated Ed25519 keypair into the configured keyvault backend')
+  .requiredOption('--private <path>', 'Path to the private-key PEM file (usually the .NEW file from migrate-incident-2026-04-17.mjs)')
+  .option('--keep-input', 'Do NOT delete the input private-key file after registration (default: delete)')
+  .option('--backend <name>', 'Force backend: keychain | flatfile (default: auto-detect)')
+  .action(async (opts) => {
+    const { registerKeypair } = await import('./commands/worktree.js');
+    try {
+      await registerKeypair({
+        privatePath: opts.private,
+        keepInputFile: !!opts.keepInput,
+        forceBackend: opts.backend,
+      });
+    } catch (err) {
+      console.error(pc.red(`register-keypair failed: ${(err as Error).message}`));
+      process.exit(1);
+    }
   });
 
 // ── Backup ───────────────────────────────────────────────────────
@@ -1163,6 +1190,99 @@ function rejectIfInsideSession(action: string): boolean {
   return false;
 }
 
+// ── Listener Daemon ──────────────────────────────────────────────────
+
+const listenerCmd = program
+  .command('listener')
+  .description('Manage the standalone listener daemon');
+
+listenerCmd
+  .command('start')
+  .description('Start the listener daemon')
+  .option('--foreground', 'Run in foreground')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { startListener } = await import('./commands/listener.js');
+    return startListener(opts);
+  });
+
+listenerCmd
+  .command('stop')
+  .description('Stop the listener daemon')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { stopListener } = await import('./commands/listener.js');
+    return stopListener(opts);
+  });
+
+listenerCmd
+  .command('status')
+  .description('Show daemon state + connection info')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { listenerStatus } = await import('./commands/listener.js');
+    return listenerStatus(opts);
+  });
+
+listenerCmd
+  .command('logs')
+  .description('Tail daemon log file')
+  .option('-n, --lines <n>', 'Number of lines', '50')
+  .option('-f, --follow', 'Follow log output')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { listenerLogs } = await import('./commands/listener.js');
+    return listenerLogs({ ...opts, lines: parseInt(opts.lines, 10) });
+  });
+
+listenerCmd
+  .command('restart')
+  .description('Graceful restart (drain → reconnect)')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { restartListener } = await import('./commands/listener.js');
+    return restartListener(opts);
+  });
+
+listenerCmd
+  .command('doctor')
+  .description('Pre-flight check for listener daemon')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { listenerDoctor } = await import('./commands/listener.js');
+    return listenerDoctor(opts);
+  });
+
+listenerCmd
+  .command('install')
+  .description('Install launchd plist / systemd unit for auto-start')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { installListener } = await import('./commands/listener.js');
+    return installListener(opts);
+  });
+
+listenerCmd
+  .command('uninstall')
+  .description('Remove launchd plist / systemd unit')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { uninstallListener } = await import('./commands/listener.js');
+    return uninstallListener(opts);
+  });
+
+listenerCmd
+  .command('purge')
+  .description('Delete all listener data (GDPR right-to-erasure)')
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--force', 'Confirm deletion')
+  .action(async (opts) => {
+    const { purgeListener } = await import('./commands/listener.js');
+    return purgeListener(opts);
+  });
+
+// ── Server ──────────────────────────────────────────────────────────
+
 const serverCmd = program
   .command('server')
   .description('Manage the persistent agent server');
@@ -1402,6 +1522,66 @@ lifelineCmd
   });
 
 lifelineCmd
+  .command('restart')
+  .description('Restart the Telegram lifeline via launchd kickstart — Stage B self-heal entry point')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { loadConfig } = await import('./core/Config.js');
+    const { readStartupMarker } = await import('./lifeline/startupMarker.js');
+    const { execFileSync, execSync } = await import('node:child_process');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const config = loadConfig(opts.dir);
+    const label = `com.instar.${config.projectName}.lifeline`;
+
+    // Check shadow-install .updating lockfile — don't kickstart against a
+    // half-written install. Wait up to 60 s.
+    const updatingLock = path.join(
+      path.dirname(config.stateDir),
+      'shadow-install',
+      '.updating',
+    );
+    const waitStarted = Date.now();
+    while (fs.existsSync(updatingLock) && Date.now() - waitStarted < 60_000) {
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    if (fs.existsSync(updatingLock)) {
+      console.error(pc.red('shadow-install is still updating; aborting to avoid half-written respawn'));
+      process.exit(2);
+    }
+
+    // Baseline startup marker pid so we can detect the respawn.
+    const baseline = readStartupMarker(config.stateDir);
+    const baselinePid = baseline?.pid ?? null;
+
+    try {
+      const uid = process.getuid?.() ?? 0;
+      execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${label}`], { stdio: 'inherit' });
+    } catch (err) {
+      // Fallback: maybe running under tmux (dev). Try SIGTERM via pkill.
+      console.warn(pc.yellow(`launchctl kickstart failed (${err instanceof Error ? err.message : err}); falling back to pkill`));
+      try {
+        execSync(`pkill -TERM -f '${config.projectName}.*lifeline'`);
+      } catch {
+        /* no process to kill */
+      }
+    }
+
+    // Poll for respawn — up to 30 s.
+    const pollStart = Date.now();
+    while (Date.now() - pollStart < 30_000) {
+      const now = readStartupMarker(config.stateDir);
+      if (now && now.pid !== baselinePid) {
+        console.log(pc.green(`Lifeline restarted (pid ${now.pid}, version ${now.version})`));
+        return;
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+    console.error(pc.red('Lifeline restart timed out after 30 s (pid never changed)'));
+    process.exit(1);
+  });
+
+lifelineCmd
   .command('status')
   .description('Check lifeline status')
   .option('-d, --dir <path>', 'Project directory')
@@ -1544,10 +1724,9 @@ autostartCmd
     }
   });
 
-// Hidden command: run post-update migration from the NEW binary
-// Called by the auto-updater after `npm install -g` to ensure
-// migrations use the latest code, not the old in-memory modules.
-program
+// Migrate command — post-update migrations. Default action (no subcommand)
+// runs the full migration flow. Subcommands perform targeted migrations.
+const migrateCmd = program
   .command('migrate')
   .description('Run post-update knowledge migration')
   .option('-d, --dir <path>', 'Project directory')
@@ -1594,6 +1773,56 @@ program
           pendingGuidePath: guideResult.pendingGuidePath,
         } : null,
       }));
+    } catch (err) {
+      console.error(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      process.exit(1);
+    }
+  });
+
+// Integrated-Being v1 — sync .claude/hooks/instar/session-start.sh with the
+// latest inline template. Used by divergent-local-hook agents to pick up the
+// /shared-state/render injection after an update.
+migrateCmd
+  .command('sync-session-hook')
+  .description('Sync .claude/hooks/instar/session-start.sh with the latest template (Integrated-Being v1 + v2)')
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--force', 'Overwrite a divergent local hook')
+  .option('--v2-mode <mode>', 'v2 migration mode: "inject" (update only v2 section, preserve customizations) or "overwrite" (replace entire hook, save backup)')
+  .action(async (opts: { dir?: string; force?: boolean; v2Mode?: string }) => {
+    try {
+      if (opts.v2Mode && opts.v2Mode !== 'inject' && opts.v2Mode !== 'overwrite') {
+        console.error(JSON.stringify({ error: '--v2-mode must be "inject" or "overwrite"' }));
+        process.exit(2);
+      }
+      const { syncSessionHook } = await import('./commands/migrate.js');
+      const result = await syncSessionHook({
+        dir: opts.dir,
+        force: opts.force,
+        v2Mode: opts.v2Mode as 'inject' | 'overwrite' | undefined,
+      });
+      console.log(JSON.stringify(result));
+    } catch (err) {
+      console.error(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      process.exit(1);
+    }
+  });
+
+// Integrated-Being v1 — delete orphaned shared-state ledger files.
+const ledgerCmd = program
+  .command('ledger')
+  .description('Manage the Integrated-Being shared-state ledger');
+
+ledgerCmd
+  .command('cleanup')
+  .description('Delete orphaned shared-state.jsonl* files (only when feature is disabled)')
+  .option('-d, --dir <path>', 'Project directory')
+  .option('--yes', 'Skip confirmation prompt')
+  .option('--force', 'Delete even when feature is enabled')
+  .action(async (opts: { dir?: string; yes?: boolean; force?: boolean }) => {
+    try {
+      const { ledgerCleanup } = await import('./commands/ledgerCleanup.js');
+      const result = await ledgerCleanup(opts);
+      console.log(JSON.stringify(result));
     } catch (err) {
       console.error(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
       process.exit(1);
@@ -1942,6 +2171,51 @@ playbookCmd
   .action(async (userId, opts) => {
     const { playbookUserAudit } = await import('./commands/playbook.js');
     return playbookUserAudit(userId, opts);
+  });
+
+// ── `instar gate` — UnjustifiedStopGate operator tooling (PR4) ──────
+const gateCmd = program
+  .command('gate')
+  .description('Operator tooling for the UnjustifiedStopGate (context-death-pitfall-prevention)');
+
+gateCmd
+  .command('status')
+  .description('Show gate mode, kill-switch state, autonomous flag')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { gateStatus } = await import('./commands/gate.js');
+    return gateStatus(opts);
+  });
+
+gateCmd
+  .command('set <subject>')
+  .description('Set a gate mode. Subjects: unjustified-stop')
+  .requiredOption('--mode <mode>', 'off | shadow | enforce')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (subject, opts) => {
+    const { gateSet } = await import('./commands/gate.js');
+    return gateSet(subject, opts);
+  });
+
+gateCmd
+  .command('kill-switch')
+  .description('Set or clear the gate kill-switch (fast-path allow-everything override)')
+  .option('--set', 'Set the kill-switch (all evaluations short-circuit to allow)')
+  .option('--clear', 'Clear the kill-switch (restore normal evaluation)')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { gateKillSwitch } = await import('./commands/gate.js');
+    return gateKillSwitch(opts);
+  });
+
+gateCmd
+  .command('log')
+  .description('Show the most recent gate evaluation events')
+  .option('--tail <n>', 'Number of events to show (default 20)')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (opts) => {
+    const { gateLog } = await import('./commands/gate.js');
+    return gateLog(opts);
   });
 
 program.parse();

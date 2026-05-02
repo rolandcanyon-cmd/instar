@@ -14,6 +14,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { NativeBackend } from '../../src/messaging/imessage/NativeBackend.js';
 import type { IMessageIncoming } from '../../src/messaging/imessage/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // Apple Cocoa epoch offset (2001-01-01 in Unix seconds)
 const APPLE_EPOCH = 978307200;
@@ -60,6 +61,21 @@ function createTestDb(dbPath: string): Database.Database {
       message_id INTEGER,
       FOREIGN KEY (chat_id) REFERENCES chat(ROWID),
       FOREIGN KEY (message_id) REFERENCES message(ROWID)
+    );
+
+    CREATE TABLE attachment (
+      ROWID INTEGER PRIMARY KEY,
+      filename TEXT,
+      mime_type TEXT,
+      transfer_name TEXT,
+      total_bytes INTEGER
+    );
+
+    CREATE TABLE message_attachment_join (
+      message_id INTEGER,
+      attachment_id INTEGER,
+      FOREIGN KEY (message_id) REFERENCES message(ROWID),
+      FOREIGN KEY (attachment_id) REFERENCES attachment(ROWID)
     );
   `);
 
@@ -121,7 +137,7 @@ describe('Feature: NativeBackend reads Messages database', () => {
 
   afterEach(() => {
     try { testDb.close(); } catch { /* */ }
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/imessage-native-backend.test.ts:140' });
   });
 
   describe('Scenario: Connects to database and reads initial state', () => {

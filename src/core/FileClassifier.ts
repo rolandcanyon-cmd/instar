@@ -12,6 +12,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { SafeGitExecutor } from './SafeGitExecutor.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -124,6 +125,11 @@ const DEFAULT_GENERATED_PATTERNS = [
   '*.min.js', '*.min.css', '*.map',
   'coverage/', '.nyc_output/',
   'target/',  // Rust/Java
+  // Integrated-Being v1 — per-machine ledger, never synced across machines.
+  // If this ever ends up in a merge, prefer ours and exclude from LLM conflict
+  // resolution. See docs/specs/integrated-being-ledger-v1.md §Multi-machine.
+  '.instar/shared-state.jsonl',
+  '.instar/shared-state.jsonl.*',
 ];
 
 const DEFAULT_SECRET_PATTERNS = [
@@ -290,14 +296,10 @@ export class FileClassifier {
       const manifestPath = path.join(this.projectDir, classification.manifestFile);
       if (fs.existsSync(manifestPath)) {
         try {
-          execFileSync('git', ['checkout', '--ours', classification.manifestFile], {
-            cwd: this.projectDir,
-            stdio: 'pipe',
-          });
-          execFileSync('git', ['add', classification.manifestFile], {
-            cwd: this.projectDir,
-            stdio: 'pipe',
-          });
+          SafeGitExecutor.execSync(['checkout', '--ours', classification.manifestFile], { cwd: this.projectDir,
+            stdio: 'pipe', operation: 'src/core/FileClassifier.ts:299' });
+          SafeGitExecutor.execSync(['add', classification.manifestFile], { cwd: this.projectDir,
+            stdio: 'pipe', operation: 'src/core/FileClassifier.ts:304' });
         } catch {
           // @silent-fallback-ok — manifest checkout is pre-regen prep; regen will recreate it anyway
         }
@@ -316,10 +318,8 @@ export class FileClassifier {
 
         // Stage the regenerated lockfile
         const relPath = path.relative(this.projectDir, filePath);
-        execFileSync('git', ['add', relPath], {
-          cwd: this.projectDir,
-          stdio: 'pipe',
-        });
+        SafeGitExecutor.execSync(['add', relPath], { cwd: this.projectDir,
+          stdio: 'pipe', operation: 'src/core/FileClassifier.ts:327' });
 
         return { success: true, command: cmd };
       } catch {
@@ -437,10 +437,7 @@ export class FileClassifier {
 
   private getStageHash(relPath: string, stage: number): string | null {
     try {
-      const output = execFileSync(
-        'git', ['ls-files', '-s', '--', relPath],
-        { cwd: this.projectDir, encoding: 'utf-8', stdio: 'pipe' },
-      );
+      const output = SafeGitExecutor.readSync(['ls-files', '-s', '--', relPath], { cwd: this.projectDir, encoding: 'utf-8', stdio: 'pipe', operation: 'src/core/FileClassifier.ts:449' });
       // Output: "mode hash stage\tfilename" — one line per stage
       for (const line of output.trim().split('\n')) {
         const parts = line.trim().split(/\s+/);

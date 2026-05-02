@@ -8,6 +8,7 @@ import request from 'supertest';
 import { HandshakeManager } from '../../../src/threadline/HandshakeManager.js';
 import { createThreadlineRoutes } from '../../../src/threadline/ThreadlineEndpoints.js';
 import { sign } from '../../../src/threadline/ThreadlineCrypto.js';
+import { SafeFsExecutor } from '../../../src/core/SafeFsExecutor.js';
 
 describe('ThreadlineEndpoints', () => {
   let tmpDir: string;
@@ -42,7 +43,7 @@ describe('ThreadlineEndpoints', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/threadline/ThreadlineEndpoints.test.ts:46' });
   });
 
   describe('GET /threadline/health', () => {

@@ -8,7 +8,7 @@
  *   topic message → find/spawn session → inject message → session replies via [telegram:N]
  */
 
-import { execFileSync, execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -46,6 +46,7 @@ import { QuotaNotifier } from '../monitoring/QuotaNotifier.js';
 import { QuotaManager } from '../monitoring/QuotaManager.js';
 import { classifySessionDeath } from '../monitoring/QuotaExhaustionDetector.js';
 import { SessionWatchdog } from '../monitoring/SessionWatchdog.js';
+import { formatWatchdogUserMessage } from '../monitoring/watchdog-notifications.js';
 import { StallTriageNurse } from '../monitoring/StallTriageNurse.js';
 import { TriageOrchestrator } from '../monitoring/TriageOrchestrator.js';
 import { SessionMonitor } from '../monitoring/SessionMonitor.js';
@@ -104,6 +105,7 @@ import type { Message, IntelligenceProvider, UserProfile, InstarConfig } from '.
 import { UserManager } from '../users/UserManager.js';
 import { formatUserContextForSession, hasUserContext } from '../users/UserContextBuilder.js';
 import type { OrphanProcessReaper } from '../monitoring/OrphanProcessReaper.js';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 // setup.ts uses @inquirer/prompts which requires Node 20.12+
 // Dynamic import to avoid breaking the server on older Node versions
 // import { installAutoStart } from './setup.js';
@@ -580,7 +582,12 @@ async function respawnSessionForTopic(
     }
   }
 
-  const storedName = telegram.getTopicName(topicId);
+  let storedName = telegram.getTopicName(topicId);
+  // If the name is unknown, try to resolve it from Telegram before falling back
+  if (!storedName || /^topic-\d+$/.test(storedName)) {
+    const resolved = await telegram.resolveTopicName(topicId);
+    if (resolved) storedName = resolved;
+  }
   // Use topic name, not tmux session name — tmux names include the project prefix
   // which causes cascading names like ai-guy-ai-guy-ai-guy-topic-1 on each respawn.
   const topicName = storedName || `topic-${topicId}`;
@@ -895,7 +902,7 @@ function wireTelegramRouting(
   // arrive faster than the async spawn completes.
   const spawningTopics = new Set<number>();
 
-  telegram.onTopicMessage = (msg: Message) => {
+  telegram.onTopicMessage = async (msg: Message) => {
     const topicId = (msg.metadata?.messageThreadId as number) ?? null;
     if (!topicId) return;
 
@@ -1079,8 +1086,15 @@ function wireTelegramRouting(
         return;
       }
 
-      const spawnName = storedTopicName || `topic-${topicId}`;
       spawningTopics.add(topicId);
+
+      // Resolve topic name — try in-memory, then active probe, then fallback
+      let spawnName = storedTopicName;
+      if (!spawnName || /^topic-\d+$/.test(spawnName)) {
+        const resolved = await telegram.resolveTopicName(topicId);
+        if (resolved) spawnName = resolved;
+      }
+      if (!spawnName) spawnName = `topic-${topicId}`;
 
       // Use the shared spawn helper that includes topic history + user context
       spawnSessionForTopic(sessionManager, telegram, spawnName, topicId, text, topicMemory, resolvedUser ?? undefined).then((newSessionName) => {
@@ -1240,7 +1254,7 @@ function wireIMessageRouting(
         const cutoff = Date.now() - 3_600_000;
         for (const f of fs.readdirSync(tmpDir)) {
           const fp = path.join(tmpDir, f);
-          try { if (fs.statSync(fp).mtimeMs < cutoff) fs.unlinkSync(fp); } catch { /* ignore */ }
+          try { if (fs.statSync(fp).mtimeMs < cutoff) SafeFsExecutor.safeUnlinkSync(fp, { operation: 'src/commands/server.ts:1257' }); } catch { /* ignore */ }
         }
       } catch { /* non-critical */ }
       const senderSlug = sender.replace(/[^a-zA-Z0-9]/g, '').slice(-8);
@@ -1257,7 +1271,41 @@ function wireIMessageRouting(
     const sender = msg.channel?.identifier;
     if (!sender) return;
 
-    const text = msg.content;
+    // Build the text with attachment references inlined. iMessage stores the
+    // attachment placeholder character (\uFFFC) in the text where the photo sits,
+    // but doesn't include the path. We replace placeholders with explicit
+    // [image:/path] tags (matching the Telegram pattern) so Claude can read the
+    // files via the Read tool. Attachments are auto-hardlinked into
+    // .instar/imessage/attachments/ by the user-context sync script, avoiding
+    // the need for FDA on node.
+    let text = msg.content;
+    const attachments = (msg.metadata?.attachments as Array<{
+      filename?: string;
+      mimeType?: string;
+      path?: string;
+    }>) ?? [];
+    if (attachments.length > 0) {
+      // If text has no placeholders but has attachments, append refs at the end.
+      // Otherwise replace each \uFFFC with an [image:/path] tag sequentially.
+      const tags = attachments.map((a) => {
+        if (!a.path) return '[attachment path unavailable]';
+        // For images/PDFs/etc., use [image:...] so Claude's existing handling applies.
+        // The path will be the hardlinked one if the sync script ran; otherwise
+        // the TCC-protected original (which Claude may or may not be able to read).
+        const isImage = (a.mimeType || '').startsWith('image/');
+        const kind = isImage ? 'image' : 'file';
+        return `[${kind}:${a.path}]`;
+      });
+      if (text.includes('\uFFFC')) {
+        // Replace each placeholder with the next tag
+        let i = 0;
+        text = text.replace(/\uFFFC/g, () => tags[i++] ?? '[image:missing]');
+      } else {
+        // No inline placeholders — append tags at the end
+        text = (text ? text + ' ' : '') + tags.join(' ');
+      }
+    }
+
     const senderName = (msg.metadata?.senderName as string) ?? undefined;
     const senderNorm = sender.toLowerCase();
 
@@ -1414,6 +1462,36 @@ async function ensureAgentUpdatesTopic(
 }
 
 /**
+ * Find npm's CLI entry point (npm-cli.js) so we can run npm via
+ * `execFileSync(process.execPath, [npmCli, ...args])` — no shell required.
+ * This avoids "/bin/sh ENOENT" failures in minimal/containerized environments.
+ */
+function findNpmCli(): string {
+  // npm ships alongside node — look for it relative to process.execPath
+  const nodeDir = path.dirname(process.execPath);
+
+  // Standard layout: node is in bin/, npm-cli.js is in lib/node_modules/npm/bin/npm-cli.js
+  const libNpmCli = path.resolve(nodeDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  if (fs.existsSync(libNpmCli)) return libNpmCli;
+
+  // Homebrew on macOS: node in /opt/homebrew/bin, npm-cli in /opt/homebrew/lib/node_modules/npm/bin/npm-cli.js
+  // (same layout, but verify explicitly for clarity)
+  for (const candidate of [
+    '/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js',
+    '/usr/local/lib/node_modules/npm/bin/npm-cli.js',
+    '/usr/lib/node_modules/npm/bin/npm-cli.js',
+  ]) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // Last resort: use the npm shell wrapper (requires shell, but at least we tried)
+  const npmBin = path.join(nodeDir, 'npm');
+  if (fs.existsSync(npmBin)) return npmBin;
+
+  throw new Error('Cannot find npm CLI — native module rebuild unavailable');
+}
+
+/**
  * Pre-flight check: ensure better-sqlite3 native bindings are compiled for the current Node.js version.
  *
  * Both TopicMemory and SemanticMemory use better-sqlite3. When Telegram is not configured,
@@ -1463,18 +1541,21 @@ async function ensureSqliteBindings(): Promise<boolean> {
       } else {
         // Fallback: npm rebuild in the directory containing better-sqlite3.
         // Shadow installs have their own node_modules — try that first, then global.
+        // IMPORTANT: Use execFileSync (no shell) instead of execSync to avoid
+        // "/bin/sh ENOENT" failures in minimal/containerized environments.
+        const npmCli = findNpmCli();
         const instarDir = new URL('../../..', import.meta.url).pathname;
         const shadowBs3 = path.join(instarDir, 'node_modules', 'better-sqlite3');
         if (fs.existsSync(shadowBs3)) {
-          execSync('npm rebuild better-sqlite3', {
+          execFileSync(process.execPath, [npmCli, 'rebuild', 'better-sqlite3'], {
             cwd: instarDir,
             encoding: 'utf-8',
             timeout: 60000,
             stdio: 'pipe',
           });
         } else {
-          const globalInstarDir = execSync('npm root -g', { encoding: 'utf-8', timeout: 10000 }).trim() + '/instar';
-          execSync('npm rebuild better-sqlite3', {
+          const globalInstarDir = execFileSync(process.execPath, [npmCli, 'root', '-g'], { encoding: 'utf-8', timeout: 10000 }).toString().trim() + '/instar';
+          execFileSync(process.execPath, [npmCli, 'rebuild', 'better-sqlite3'], {
             cwd: globalInstarDir,
             encoding: 'utf-8',
             timeout: 60000,
@@ -1507,7 +1588,7 @@ function cleanupTelegramTempFiles(): void {
         const filepath = path.join(tmpDir, file);
         const stat = fs.statSync(filepath);
         if (stat.isFile() && now - stat.mtimeMs > maxAge) {
-          fs.unlinkSync(filepath);
+          SafeFsExecutor.safeUnlinkSync(filepath, { operation: 'src/commands/server.ts:1592' });
           cleaned++;
         }
       } catch { /* @silent-fallback-ok — temp file cleanup */ }
@@ -1604,6 +1685,25 @@ export async function startServer(options: StartOptions): Promise<void> {
   });
   liveConfig.start();
 
+  // Threadline → Telegram bridge config — settings surface for the bridge
+  // module. Default-OFF auto-create ships from day one;
+  // see TelegramBridgeConfig for the policy.
+  const { TelegramBridgeConfig } = await import('../threadline/TelegramBridgeConfig.js');
+  const telegramBridgeConfig = new TelegramBridgeConfig(liveConfig);
+
+  // The actual bridge module is instantiated AFTER the Telegram adapter is
+  // wired (further down in this file). Held as a let so closures formed
+  // here can reference whatever instance ends up assigned. Bridge is
+  // RELAY-ONLY (signal-vs-authority compliant): emits no routing decisions,
+  // blocks nothing. Authority lives in TelegramBridgeConfig.
+  let telegramBridge: import('../threadline/TelegramBridge.js').TelegramBridge | null = null;
+
+  // Read-only observability layer over canonical inbox/outbox/bindings.
+  // Stateless — reads files at every query. Powers the dashboard
+  // Threadline tab via /threadline/observability/* endpoints.
+  const { ThreadlineObservability } = await import('../threadline/ThreadlineObservability.js');
+  const threadlineObservability = new ThreadlineObservability({ stateDir: config.stateDir });
+
   // NotificationBatcher: consolidate all Telegram notifications into tiered delivery.
   // IMMEDIATE = user needs to act NOW (quota exhausted, critical stall)
   // SUMMARY = batched every 30 min (degradations, coherence, orphan reports)
@@ -1675,25 +1775,9 @@ export async function startServer(options: StartOptions): Promise<void> {
     }
   }
 
-  // Migration: fix autoApply default bug from init.ts (pre-0.9.47).
-  // init.ts wrote `updates.autoApply: false` despite the intended default being true.
-  // One-time fix: rewrite the config file if autoApply is explicitly false.
-  if (config.updates?.autoApply === false) {
-    try {
-      const configPath = path.join(config.projectDir, '.instar', 'config.json');
-      if (fs.existsSync(configPath)) {
-        const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-        if (raw.updates?.autoApply === false) {
-          raw.updates.autoApply = true;
-          fs.writeFileSync(configPath, JSON.stringify(raw, null, 2) + '\n');
-          config.updates = { ...config.updates, autoApply: true };
-          console.log(`[migration] Fixed updates.autoApply: false → true (bug in init.ts pre-0.9.47)`);
-        }
-      }
-    } catch (err) {
-      console.error(`[migration] Failed to fix autoApply config:`, err);
-    }
-  }
+  // Migration disabled — we manage updates via the daily rebase job,
+  // not via npm auto-updates. The migration was forcing autoApply: true
+  // which overwrites our intentional autoApply: false setting.
 
   const serverSessionName = `${config.projectName}-server`;
 
@@ -1860,7 +1944,14 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.red(`  Port conflict: ${err instanceof Error ? err.message : err}`));
       process.exit(1);
     }
-    const stopHeartbeat = startHeartbeat(config.projectDir);
+    let stopHeartbeat: (() => void) | undefined;
+    try {
+      stopHeartbeat = startHeartbeat(config.projectDir);
+    } catch (err) {
+      // Registry heartbeat is non-critical — server should run without it.
+      // ELOCKED errors from concurrent agent startups are transient.
+      console.log(pc.yellow(`  Registry heartbeat failed to start (non-critical): ${err instanceof Error ? err.message : err}`));
+    }
 
     // Warn if no auth token configured — server allows unauthenticated access
     if (!config.authToken) {
@@ -1932,10 +2023,96 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     const sessionManager = new SessionManager(config.sessions, state);
 
-    // Input Guard — cross-topic injection defense (Layer 1 + 1.5 + 2)
+    // Input Guard is constructed later (after sharedIntelligence is available)
+    // so the topic coherence reviewer can route through the IntelligenceProvider
+    // abstraction instead of calling Anthropic directly.
+
+    // TopicResumeMap: persist Claude session UUIDs across session restarts.
+    // When a session is killed/restarted, we save its UUID so the next spawn
+    // can use --resume to reattach to the existing conversation context.
+    const { TopicResumeMap } = await import('../core/TopicResumeMap.js');
+    _topicResumeMap = new TopicResumeMap(config.stateDir, config.sessions.projectDir, config.sessions.tmuxPath);
+    _projectDir = config.sessions.projectDir;
+
+    // Shared intelligence provider — lightweight LLM for internal classification tasks.
+    // Priority: Claude CLI subscription (zero extra cost, default) → Anthropic API (explicit opt-in)
+    // Components that need LLM intelligence (Sentinel, TelegramAdapter, etc.) share this.
+    //
+    // Rationale: Instar must not depend on an API key. The subscription path is the default so
+    // every agent gets LLM-gated features out of the box. Users who prefer direct API access can
+    // set `intelligenceProvider: "anthropic-api"` in config.json.
+    let sharedIntelligence: IntelligenceProvider | undefined;
+    const explicitIntelligenceProvider =
+      (config as unknown as { intelligenceProvider?: string }).intelligenceProvider;
+    let intelligenceSource = 'none';
+
+    if (explicitIntelligenceProvider === 'anthropic-api') {
+      try {
+        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
+        if (apiProvider) {
+          sharedIntelligence = apiProvider;
+          intelligenceSource = 'Anthropic API (explicit opt-in)';
+        } else {
+          console.log(pc.yellow('  intelligenceProvider: "anthropic-api" set but ANTHROPIC_API_KEY not found — falling back to Claude CLI'));
+        }
+      } catch { /* no API key available */ }
+    }
+
+    if (!sharedIntelligence) {
+      try {
+        sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        intelligenceSource = 'Claude CLI subscription';
+      } catch { /* CLI not available */ }
+    }
+
+    if (!sharedIntelligence && explicitIntelligenceProvider !== 'anthropic-api') {
+      // Last resort: if user has API key but didn't explicitly opt in, use it rather than
+      // leaving the agent flying blind. We prefer subscription, but degrading to heuristics
+      // is worse than using whatever LLM is available.
+      try {
+        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
+        if (apiProvider) {
+          sharedIntelligence = apiProvider;
+          intelligenceSource = 'Anthropic API (CLI unavailable — last resort)';
+        }
+      } catch { /* no API key available */ }
+    }
+
+    _sharedIntelligence = sharedIntelligence ?? null;
+    if (sharedIntelligence) {
+      console.log(pc.gray(`  Intelligence: ${intelligenceSource}`));
+    } else {
+      console.log(pc.yellow('  Intelligence: none (no Claude CLI, no API key) — LLM-gated features degraded'));
+      // Visible degradation — every downstream LLM-gated feature depends on this.
+      // The DegradationReporter routes to console, disk, Telegram alert, and feedback.
+      // Keep the externally-rendered impact string generic; the detailed
+      // capability-down enumeration (tone gate, input guard, coherence gate, stall
+      // triage, job reflection) stays in the yellow console line above and the
+      // local degradations.json log. We don't broadcast a "which defenses are down"
+      // checklist to Telegram/feedback channels.
+      const { DegradationReporter } = await import('../monitoring/DegradationReporter.js');
+      DegradationReporter.getInstance().report({
+        feature: 'SharedIntelligenceProvider',
+        primary: 'Shared LLM provider (Claude CLI subscription by default, Anthropic API opt-in)',
+        fallback: 'Heuristic-only operation for LLM-gated features',
+        reason: 'No LLM transport configured on this machine (see local startup logs for detail).',
+        impact: 'LLM-gated features degraded; defense-in-depth reduced. See local logs for the affected feature list.',
+      });
+    }
+
+    // Wire intelligence into git sync for LLM conflict resolution (Tier 1 → 2)
+    if (gitSync && sharedIntelligence) {
+      gitSync.setIntelligence(sharedIntelligence);
+    }
+
+    // Input Guard — cross-topic injection defense (Layer 1 + 1.5 + 2).
+    // Constructed AFTER sharedIntelligence so the topic-coherence reviewer routes
+    // through the IntelligenceProvider (subscription-first). InputGuard no longer
+    // carries a direct Anthropic API path — all LLM usage flows through the shared
+    // provider abstraction, enforcing the subscription-first principle at the
+    // single provider-selection layer rather than in each consumer.
     if (config.inputGuard?.enabled !== false) {
       const guardConfig = config.inputGuard ?? { enabled: true };
-      const anthropicKey = process.env['ANTHROPIC_API_KEY']?.trim();
       const { InputGuard } = await import('../core/InputGuard.js');
       const inputGuard = new InputGuard({
         config: {
@@ -1947,41 +2124,14 @@ export async function startServer(options: StartOptions): Promise<void> {
           reviewTimeout: guardConfig.reviewTimeout ?? 3000,
         },
         stateDir: config.stateDir,
-        apiKey: anthropicKey,
+        intelligence: sharedIntelligence,
       });
       const registryPath = path.join(config.stateDir, 'topic-session-registry.json');
       sessionManager.setInputGuard(inputGuard, registryPath);
-      console.log(pc.green(`  Input Guard: enabled (action: ${guardConfig.action ?? 'warn'})`));
-    }
-
-    // TopicResumeMap: persist Claude session UUIDs across session restarts.
-    // When a session is killed/restarted, we save its UUID so the next spawn
-    // can use --resume to reattach to the existing conversation context.
-    const { TopicResumeMap } = await import('../core/TopicResumeMap.js');
-    _topicResumeMap = new TopicResumeMap(config.stateDir, config.sessions.projectDir, config.sessions.tmuxPath);
-    _projectDir = config.sessions.projectDir;
-
-    // Shared intelligence provider — lightweight LLM for internal classification tasks.
-    // Prefer Anthropic API (faster, no tmux) → Claude CLI fallback.
-    // Components that need LLM intelligence (Sentinel, TelegramAdapter, etc.) share this.
-    let sharedIntelligence: IntelligenceProvider | undefined;
-    try {
-      const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-      if (apiProvider) {
-        sharedIntelligence = apiProvider;
-      }
-    } catch { /* no API key available */ }
-    if (!sharedIntelligence) {
-      try {
-        sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
-      } catch { /* CLI not available */ }
-    }
-
-    _sharedIntelligence = sharedIntelligence ?? null;
-
-    // Wire intelligence into git sync for LLM conflict resolution (Tier 1 → 2)
-    if (gitSync && sharedIntelligence) {
-      gitSync.setIntelligence(sharedIntelligence);
+      const reviewBackend = sharedIntelligence
+        ? 'via shared IntelligenceProvider'
+        : 'provenance + patterns only (no LLM review)';
+      console.log(pc.green(`  Input Guard: enabled (action: ${guardConfig.action ?? 'warn'}, ${reviewBackend})`));
     }
 
     let relationships: RelationshipManager | undefined;
@@ -2260,8 +2410,25 @@ export async function startServer(options: StartOptions): Promise<void> {
     const isStandbyTelegram = !coordinator.isAwake && telegramConfig;
     if ((skipTelegram || isStandbyTelegram) && telegramConfig) {
       // Send-only mode: no polling, but sendToTopic() works for session replies
-      telegram = new TelegramAdapter(telegramConfig.config as any, config.stateDir);
+      telegram = new TelegramAdapter(
+        {
+          ...(telegramConfig.config as any),
+          // PR2: hot-reloadable accessors. Sending-side authoritative —
+          // each send re-reads config so a canary flip lands without restart.
+          getFormatMode: () =>
+            (config as unknown as { telegramFormatMode?: 'plain' | 'html' | 'code' | 'markdown' | 'legacy-passthrough' })
+              .telegramFormatMode,
+          getLintStrict: () =>
+            (config as unknown as { telegramLintStrict?: boolean }).telegramLintStrict,
+        },
+        config.stateDir,
+      );
       console.log(pc.green(`  Telegram send-only mode (${isStandbyTelegram ? 'standby' : 'lifeline owns polling'})`));
+
+      // Resolve any topic names still using the fallback "topic-NNNN" pattern
+      telegram.resolveUnknownTopicNames().catch(err => {
+        console.warn(`[telegram] Topic name resolution failed: ${err}`);
+      });
 
       // Ensure topics exist even in send-only mode (createForumTopic is a simple API call)
       ensureAgentAttentionTopic(telegram, state).catch(err => {
@@ -2310,10 +2477,39 @@ export async function startServer(options: StartOptions): Promise<void> {
     }
 
     if (telegramConfig && !skipTelegram && !isStandbyTelegram) {
-      telegram = new TelegramAdapter(telegramConfig.config as any, config.stateDir);
+      telegram = new TelegramAdapter(
+        {
+          ...(telegramConfig.config as any),
+          // PR2: hot-reloadable accessors. Sending-side authoritative —
+          // each send re-reads config so a canary flip lands without restart.
+          getFormatMode: () =>
+            (config as unknown as { telegramFormatMode?: 'plain' | 'html' | 'code' | 'markdown' | 'legacy-passthrough' })
+              .telegramFormatMode,
+          getLintStrict: () =>
+            (config as unknown as { telegramLintStrict?: boolean }).telegramLintStrict,
+        },
+        config.stateDir,
+      );
       telegram.intelligence = sharedIntelligence ?? null;
       await telegram.start();
       console.log(pc.green(`  Telegram connected (stall alerts: ${sharedIntelligence ? 'LLM-gated' : 'timer-only'})`));
+
+      // Threadline → Telegram bridge — mirrors inbound/outbound threadline
+      // messages into per-thread Telegram topics. Default-OFF; the relay
+      // handler below and the threadline_send tool consult bridge.mirror*
+      // unconditionally — TelegramBridgeConfig owns the gate.
+      try {
+        const { TelegramBridge } = await import('../threadline/TelegramBridge.js');
+        telegramBridge = new TelegramBridge({
+          stateDir: config.stateDir,
+          localAgentName: config.projectName,
+          config: telegramBridgeConfig,
+          telegram,
+        });
+        console.log(pc.dim(`  Threadline → Telegram bridge: armed (default ${telegramBridgeConfig.getSettings().enabled ? 'ENABLED' : 'OFF'})`));
+      } catch (err) {
+        console.warn(pc.yellow(`  Threadline → Telegram bridge init failed (non-fatal): ${err instanceof Error ? err.message : err}`));
+      }
 
       // Wire Prompt Gate callbacks — connect Telegram relay responses to sessions
       if (promptGateConfig?.enabled) {
@@ -2557,8 +2753,9 @@ export async function startServer(options: StartOptions): Promise<void> {
           if (fs.existsSync(fixScript)) {
             execFileSync(process.execPath, [fixScript], { encoding: 'utf-8', timeout: 60000, stdio: 'pipe' });
           } else {
-            const globalInstarDir = execSync('npm root -g', { encoding: 'utf-8', timeout: 10000 }).trim() + '/instar';
-            execSync('npm rebuild better-sqlite3', {
+            const npmCli = findNpmCli();
+            const globalInstarDir = execFileSync(process.execPath, [npmCli, 'root', '-g'], { encoding: 'utf-8', timeout: 10000 }).toString().trim() + '/instar';
+            execFileSync(process.execPath, [npmCli, 'rebuild', 'better-sqlite3'], {
               cwd: globalInstarDir,
               encoding: 'utf-8',
               timeout: 60000,
@@ -2573,7 +2770,7 @@ export async function startServer(options: StartOptions): Promise<void> {
 
         const jsonlPath = path.join(config.stateDir, 'telegram-messages.jsonl');
         if (fs.existsSync(jsonlPath)) {
-          const imported = topicMemory.importFromJsonl(jsonlPath);
+          const imported = await topicMemory.importFromJsonl(jsonlPath);
           if (imported > 0) {
             console.log(pc.green(`  TopicMemory: imported ${imported} messages from JSONL`));
           }
@@ -2784,43 +2981,52 @@ export async function startServer(options: StartOptions): Promise<void> {
             prefix = `[slack:${channelId} from ${safeSenderName}]`;
           }
 
-          // Write context file for the session
+          // Build context for the session — inject inline like Telegram does
+          // Use async fallback to fetch from Slack API if ring buffer is empty
           const tmpDir = '/tmp/instar-slack';
           fs.mkdirSync(tmpDir, { recursive: true });
-          const ctxPath = path.join(tmpDir, `ctx-${channelId}-${Date.now()}.txt`);
-          const history = slackAdapter!.getChannelMessages(channelId, 30);
+          const history = await slackAdapter!.getChannelMessagesWithFallback(channelId, 30);
           const unansweredCount = slackAdapter!.getUnansweredCount(channelId);
 
           const botUserId = slackAdapter!.getBotUserId?.() ?? null;
 
-          // Build human-readable thread history (matches Telegram's context format)
-          const lines: string[] = [];
-          lines.push(`--- Thread History (last ${history.length} messages) ---`);
-          lines.push('IMPORTANT: Read this history carefully before taking any action.');
-          lines.push('Your task is to continue THIS conversation, not start something new.');
-          lines.push(`Channel: ${channelId}`);
-          lines.push('');
-          for (const m of history) {
-            const date = new Date(parseFloat(m.ts) * 1000);
-            const time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-            const isBot = botUserId && m.user === botUserId;
-            const label = isBot ? 'Agent' : (senderName || m.user);
-            lines.push(`[${time}] ${label}: ${m.text}`);
+          // Build human-readable thread history (matches Telegram's inline context pattern)
+          const contextLines: string[] = [];
+          if (history.length > 0) {
+            contextLines.push('CONTINUATION — You are resuming an EXISTING Slack conversation. Read the context below before responding. Do NOT ask what was being discussed.');
+            contextLines.push('');
+            contextLines.push(`--- Thread History (last ${history.length} messages) ---`);
+            contextLines.push('IMPORTANT: Read this history carefully before taking any action.');
+            contextLines.push('Your task is to continue THIS conversation, not start something new.');
+            contextLines.push(`Channel: ${channelId}`);
+            contextLines.push('');
+            for (const m of history) {
+              const date = new Date(parseFloat(m.ts) * 1000);
+              const time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+              const isBot = botUserId && m.user === botUserId;
+              const label = isBot ? 'Agent' : (senderName || m.user);
+              contextLines.push(`[${time}] ${label}: ${m.text}`);
+            }
+            contextLines.push('');
+            contextLines.push('--- End Thread History ---');
+          } else {
+            console.warn(`[slack→context] No history available for channel ${channelId} — session starts without thread context`);
           }
-          lines.push('');
-          lines.push('--- End Thread History ---');
-          lines.push('');
-          lines.push('CRITICAL: You MUST relay your response back to Slack after responding.');
-          lines.push('Use the relay script (write ONLY your reply text — do NOT pipe or cat this file into the script):');
-          lines.push('');
-          lines.push(`cat <<'EOF' | .claude/scripts/slack-reply.sh ${channelId}`);
-          lines.push('Your response text here');
-          lines.push('EOF');
-          lines.push('');
-          lines.push('Strip the [slack:] prefix before interpreting the message.');
-          lines.push('Only relay conversational text — not tool output, file contents, or internal reasoning.');
+          contextLines.push('');
+          contextLines.push('CRITICAL: You MUST relay your response back to Slack after responding.');
+          contextLines.push('Use the relay script (write ONLY your reply text — do NOT pipe or cat this file into the script):');
+          contextLines.push('');
+          contextLines.push(`cat <<'EOF' | .claude/scripts/slack-reply.sh ${channelId}`);
+          contextLines.push('Your response text here');
+          contextLines.push('EOF');
+          contextLines.push('');
+          contextLines.push('Strip the [slack:] prefix before interpreting the message.');
+          contextLines.push('Only relay conversational text — not tool output, file contents, or internal reasoning.');
 
-          const contextData = lines.join('\n');
+          const contextData = contextLines.join('\n');
+
+          // Also write to file as backup reference
+          const ctxPath = path.join(tmpDir, `ctx-${channelId}-${Date.now()}.txt`);
           fs.writeFileSync(ctxPath, contextData);
 
           // Transform [image:path] and [document:path] tags into explicit read instructions
@@ -2842,15 +3048,19 @@ export async function startServer(options: StartOptions): Promise<void> {
             },
           );
 
-          const FILE_THRESHOLD = 500;
+          // Inject context INLINE in the bootstrap message (matches Telegram pattern).
+          // This ensures the agent sees thread history immediately without needing to read a file.
           const fullMessage = `${prefix} ${transformedContent} (IMPORTANT: Read ${ctxPath} for thread history and Slack relay instructions — you MUST relay your response back.)`;
 
-          // Long messages: write to temp file and inject reference (matches Telegram pattern)
+          // Large bootstrap messages: write to file with INLINE context included
+          const FILE_THRESHOLD = 500;
           let bootstrapMessage: string;
           if (fullMessage.length > FILE_THRESHOLD) {
+            // Write full message + inline context to the file so agent gets everything in one read
             const msgFilePath = path.join(tmpDir, `msg-${channelId}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`);
-            fs.writeFileSync(msgFilePath, fullMessage);
-            bootstrapMessage = `${prefix} [Long message saved to ${msgFilePath} — read it to see the full message]`;
+            const fullContent = `${fullMessage}\n\n${contextData}`;
+            fs.writeFileSync(msgFilePath, fullContent);
+            bootstrapMessage = `${prefix} [Long message saved to ${msgFilePath} — read it to see the full message and thread history]`;
           } else {
             bootstrapMessage = fullMessage;
           }
@@ -2905,7 +3115,7 @@ export async function startServer(options: StartOptions): Promise<void> {
             const newSessionName = await sessionManager.spawnInteractiveSession(
               bootstrapMessage,
               targetSession,
-              { resumeSessionId },
+              { resumeSessionId, slackChannelId: channelId },
             );
             if (newSessionName) {
               slackAdapter!.registerChannelSession(channelId, newSessionName);
@@ -3371,32 +3581,25 @@ export async function startServer(options: StartOptions): Promise<void> {
       watchdog.intelligence = sharedIntelligence ?? null;
 
       watchdog.on('intervention', (event: any) => {
-        const levelNames = ['Monitoring', 'Ctrl+C', 'SIGTERM', 'SIGKILL', 'Kill Session'];
-        const levelName = levelNames[event.level] || `Level ${event.level}`;
-        const msg = `🔧 Watchdog [${levelName}]: ${event.action}\nStuck: \`${event.stuckCommand.slice(0, 60)}\``;
+        // Routine recovery (Ctrl+C, SIGTERM) stays as console diagnostics only.
+        // The user only hears when we had to force-kill (SIGKILL / session-kill) —
+        // that's the "actual issue" threshold. See watchdog-notifications.ts.
+        const userMsg = formatWatchdogUserMessage(event);
+        if (!userMsg) return;
 
         if (telegram) {
           const topicId = telegram.getTopicForSession(event.sessionName);
-          if (topicId) telegram.sendToTopic(topicId, msg).catch(() => {});
+          if (topicId) telegram.sendToTopic(topicId, userMsg).catch(() => {});
         }
         if (_slackAdapter) {
           const channelId = _slackAdapter.getChannelForSession(event.sessionName);
-          if (channelId) _slackAdapter.sendToChannel(channelId, msg).catch(() => {});
+          if (channelId) _slackAdapter.sendToChannel(channelId, userMsg).catch(() => {});
         }
       });
 
-      watchdog.on('recovery', (sessionName: string, fromLevel: number) => {
-        const msg = `✅ Watchdog: session recovered (was at escalation level ${fromLevel})`;
-
-        if (telegram) {
-          const topicId = telegram.getTopicForSession(sessionName);
-          if (topicId) telegram.sendToTopic(topicId, msg).catch(() => {});
-        }
-        if (_slackAdapter) {
-          const channelId = _slackAdapter.getChannelForSession(sessionName);
-          if (channelId) _slackAdapter.sendToChannel(channelId, msg).catch(() => {});
-        }
-      });
+      // Recovery events stay silent to the user. If we didn't announce the
+      // problem (Ctrl+C / SIGTERM are now silent), announcing recovery is
+      // noise. Intervention log still records it for diagnostics.
 
       watchdog.start();
       console.log(pc.green('  Session Watchdog enabled'));
@@ -3653,6 +3856,22 @@ export async function startServer(options: StartOptions): Promise<void> {
           captureSessionOutput: (name, lines) => {
             return sessionManager.captureOutput(name, lines);
           },
+          getRecentTopicMessages: (topicId, limit) => {
+            // Used by context-exhaustion recovery to capture any in-flight agent
+            // reply that lands after the session is killed, so the fresh session
+            // can avoid duplicating it. TopicMemory is the authoritative source
+            // once the adapter has written the reply to the store.
+            if (!topicMemory || !topicMemory.isReady()) return [];
+            try {
+              return topicMemory.getRecentMessages(topicId, limit).map(m => ({
+                text: m.text,
+                fromUser: m.fromUser,
+                timestamp: m.timestamp,
+              }));
+            } catch {
+              return [];
+            }
+          },
           respawnSessionFresh: async (topicId, _sessionName, recoveryPrompt) => {
             // Fresh respawn for context exhaustion — explicitly clear resume UUID
             // so the new session starts clean with history, not --resume.
@@ -3690,22 +3909,30 @@ export async function startServer(options: StartOptions): Promise<void> {
               // Spawn a fresh session with recovery context
               await new Promise(resolve => setTimeout(resolve, 2000));
 
-              // Build a recovery bootstrap message with thread history
-              const history = _slackAdapter.getChannelMessages(slackChId, 30);
+              // Build a recovery bootstrap message with thread history (inline, matching Telegram pattern)
+              // Use async fallback to fetch from Slack API if ring buffer is empty (race condition on restart)
+              const history = await _slackAdapter.getChannelMessagesWithFallback(slackChId, 30);
               const botUserId = _slackAdapter.getBotUserId?.() ?? null;
               const lines: string[] = [];
+              lines.push(`CONTINUATION — You are resuming an EXISTING Slack conversation after context exhaustion. Read the context below and pick up where you left off. Do NOT ask what was being discussed.`);
+              lines.push('');
               lines.push(`[RECOVERY] Previous session hit the context window limit. This is a FRESH restart with thread history.`);
               if (recoveryPrompt) lines.push(recoveryPrompt);
               lines.push('');
-              lines.push(`--- Thread History (last ${history.length} messages) ---`);
-              for (const m of history) {
-                const date = new Date(parseFloat(m.ts) * 1000);
-                const time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-                const isBot = botUserId && m.user === botUserId;
-                const label = isBot ? 'Agent' : m.user;
-                lines.push(`[${time}] ${label}: ${m.text}`);
+              if (history.length > 0) {
+                lines.push(`--- Thread History (last ${history.length} messages) ---`);
+                for (const m of history) {
+                  const date = new Date(parseFloat(m.ts) * 1000);
+                  const time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+                  const isBot = botUserId && m.user === botUserId;
+                  const label = isBot ? 'Agent' : m.user;
+                  lines.push(`[${time}] ${label}: ${m.text}`);
+                }
+                lines.push('--- End Thread History ---');
+              } else {
+                console.warn(`[slack→recovery] WARNING: No history available for channel ${slackChId} — recovery context is empty. Ring buffer may not be populated yet.`);
+                lines.push('[WARNING: Thread history unavailable — ring buffer may not be populated. Check Slack channel for recent messages before responding.]');
               }
-              lines.push('--- End Thread History ---');
               lines.push('');
               lines.push('CRITICAL: You MUST relay your response back to Slack.');
               lines.push(`cat <<'EOF' | .claude/scripts/slack-reply.sh ${slackChId}`);
@@ -3718,10 +3945,10 @@ export async function startServer(options: StartOptions): Promise<void> {
               const contextData = lines.join('\n');
               fs.writeFileSync(ctxPath, contextData);
 
-              const bootstrapMessage = `[slack:${slackChId}] [RECOVERY] Context exhaustion — session restarted fresh. (IMPORTANT: Read ${ctxPath} for thread history and Slack relay instructions — you MUST relay your response back.)`;
+              const bootstrapMessage = `[slack:${slackChId}] ${contextData}`;
 
               try {
-                const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage);
+                const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage, undefined, { slackChannelId: slackChId });
                 if (newSessionName) {
                   _slackAdapter.registerChannelSession(slackChId, newSessionName);
                   console.log(`[slack→recovery] Fresh session "${newSessionName}" spawned for channel ${slackChId} (context exhaustion recovery)`);
@@ -4016,10 +4243,15 @@ export async function startServer(options: StartOptions): Promise<void> {
     if (scheduler) {
       const originalCanRun = scheduler.canRunJob;
       scheduler.canRunJob = (priority) => {
-        // Check memory first
+        // Check memory first — return a rich result so the scheduler can
+        // log the actual gating reason instead of mislabelling it as 'quota'.
         const memCheck = memoryMonitor.canSpawnSession();
         if (!memCheck.allowed) {
-          return false;
+          return {
+            allowed: false,
+            reason: 'memory-pressure',
+            detail: memCheck.reason ?? 'memory pressure elevated',
+          };
         }
         // Then check original gate (quota, etc.)
         return originalCanRun(priority);
@@ -4050,36 +4282,209 @@ export async function startServer(options: StartOptions): Promise<void> {
     const hookEventReceiver = new HookEventReceiver({ stateDir: config.stateDir });
     console.log(pc.green('  Hook event receiver enabled'));
 
-    // Wire PreCompact events to trigger proactive triage after compaction.
-    // When a session compacts, it goes idle at a prompt. If there are unanswered
-    // user messages (common with Telegram/Slack), Pattern 2b will reinject them.
-    if (triageOrchestrator && telegram) {
-      const _triageOrch = triageOrchestrator;
-      const _telegram = telegram;
-      hookEventReceiver.on('PreCompact', () => {
-        // Delay to let compaction + recovery hooks finish
-        setTimeout(() => {
-          const topicSessions = _telegram.getAllTopicSessions();
-          for (const [topicId, sessionName] of topicSessions) {
-            if (!sessionManager.isSessionAlive(sessionName)) continue;
-            const history = _telegram.getTopicHistory(topicId, 5);
-            const lastMsg = history[history.length - 1];
-            if (lastMsg?.fromUser) {
-              console.log(`[CompactionResume] PreCompact detected, topic ${topicId} has unanswered message — activating triage`);
-              _triageOrch.activate(topicId, sessionName, 'watchdog', lastMsg.text, Date.now()).catch(err => {
-                console.warn(`[CompactionResume] Triage activation failed for topic ${topicId}:`, err);
-              });
+    // ── Compaction Resume: unified recovery for one session ──────────────
+    // After compaction, the session's working context is gone. Rather than
+    // replaying the user's last message (which assumes the agent still has
+    // thread context), we inject a prompt telling the agent to re-read recent
+    // topic messages and continue. The agent fetches its own history, so this
+    // restores continuity without pretending no compaction happened.
+    //
+    // Note: we deliberately bypass triageOrchestrator here. Its reinject_message
+    // heuristic unconditionally re-sends the last user message from topic
+    // history — fine for "message lost mid-flight" stalls, wrong for compaction
+    // recovery where the agent needs to re-orient first.
+    //
+    // Three independent triggers call into this:
+    //   1. PreCompact hook event (Claude Code fires it — unreliable)
+    //   2. SessionWatchdog 'compaction-idle' polling (default-enabled)
+    //   3. POST /internal/compaction-resume (compaction-recovery.sh hook)
+    // After compaction the agent needs three things: orientation, user-facing
+    // transparency, and a clear handoff back to whatever they were doing.
+    //
+    // The payload embeds the same context block the session-spawn path uses
+    // (topicMemory.formatContextForSession → summary + recent messages + a
+    // search hint for deeper lookup). Before this, the prompt was a single
+    // sentence asking the agent to "read recent messages" on its own — which
+    // let it fabricate a plausible-sounding status summary instead of
+    // answering the actual intent of the user's last message. Giving it the
+    // same shape of context it had at first spawn removes the reason to
+    // hallucinate.
+    const { isSystemOrProxyMessage, findLastRealMessage } = await import('../messaging/shared/isSystemOrProxyMessage.js');
+    const {
+      buildCompactionResumePayload,
+      formatInlineHistory,
+      prepareInjectionText,
+    } = await import('../messaging/shared/compactionResumePayload.js');
+
+    const recoverCompactedSession = async (sessionName: string, triggerLabel: string): Promise<boolean> => {
+      if (!sessionManager.isSessionAlive(sessionName)) return false;
+
+      // Telegram path
+      if (telegram) {
+        const topicId = telegram.getTopicForSession(sessionName);
+        if (topicId) {
+          // Walk history backward, skipping PresenceProxy standby messages and
+          // server-emitted delivery/lifecycle acks. Those are from-agent but
+          // they are NOT real responses — treating them as "agent answered"
+          // is what let this recovery path silently decline for 15 minutes
+          // while the user's question sat unanswered. See
+          // isSystemOrProxyMessage / findLastRealMessage for the canonical filter.
+          const history = telegram.getTopicHistory(topicId, 20);
+          const lastReal = findLastRealMessage(history);
+          if (lastReal?.fromUser) {
+            console.log(`[CompactionResume] (${triggerLabel}) topic ${topicId} session "${sessionName}" has unanswered message — recovering`);
+
+            // Prefer topicMemory (summary + recent messages + search hint);
+            // fall back to inline JSONL history when the SQLite store isn't
+            // ready. Matches the session-spawn precedence in this file.
+            let contextBlock = '';
+            if (topicMemory?.isReady()) {
+              try {
+                contextBlock = topicMemory.formatContextForSession(topicId, 20);
+              } catch (err) {
+                console.warn(`[CompactionResume] (${triggerLabel}) topicMemory failed, falling back to inline history:`, err);
+              }
             }
+            if (!contextBlock) {
+              const topicName = telegram.getTopicName?.(topicId) ?? undefined;
+              contextBlock = formatInlineHistory(history, { topicName, label: 'TOPIC CONTEXT' });
+            }
+
+            const payload = buildCompactionResumePayload(contextBlock);
+            const injectText = prepareInjectionText(payload, triggerLabel, topicId);
+            // Direct injection with topic tag so InputGuard accepts it.
+            const tagged = `[telegram:${topicId}] ${injectText}`;
+            const ok = sessionManager.injectMessage(sessionName, tagged);
+            if (ok) {
+              console.log(`[CompactionResume] (${triggerLabel}) direct re-inject OK for topic ${topicId}`);
+              return true;
+            }
+            console.warn(`[CompactionResume] (${triggerLabel}) direct re-inject FAILED for topic ${topicId}`);
           }
-        }, 10_000);
+        }
+      }
+
+      // Slack path — handled in the Slack-aware block below (needs slackChannelToSyntheticId).
+      // We attempt it here lazily via a deferred handler set on globalThis to avoid TDZ.
+      const slackHandler = (globalThis as Record<string, unknown>).__instarSlackCompactionResume as
+        | ((sessionName: string, triggerLabel: string) => Promise<boolean>)
+        | undefined;
+      if (slackHandler) {
+        try { return await slackHandler(sessionName, triggerLabel); } catch { /* fall through */ }
+      }
+      return false;
+    };
+
+    // ── CompactionSentinel ────────────────────────────────────────────
+    // Owns the full recovery lifecycle: detect → inject → verify (jsonl
+    // growth) → retry on failure → finalize. Replaces the fire-and-forget
+    // calls that used to live here. Dedupes across the three triggers and
+    // vetoes zombie cleanup while a recovery is in flight.
+    const { CompactionSentinel } = await import('../monitoring/CompactionSentinel.js');
+    const compactionSentinel = new CompactionSentinel(
+      {
+        recoverFn: recoverCompactedSession,
+        projectDir: config.projectDir,
+        getClaudeSessionId: (sessionName: string) => {
+          const session = sessionManager.listRunningSessions()
+            .find(s => s.tmuxSession === sessionName);
+          return session?.claudeSessionId;
+        },
+      },
+      // Defaults are production-sensible; override here only if needed.
+      {},
+    );
+    sessionManager.setActiveRecoveryChecker(
+      session => compactionSentinel.isRecoveryActive(session.tmuxSession),
+    );
+    console.log(pc.green('  CompactionSentinel enabled (verified recovery lifecycle)'));
+
+    // Trigger 1: PreCompact hook event — report to sentinel.
+    hookEventReceiver.on('PreCompact', () => {
+      // Delay to let compaction + recovery hooks finish
+      setTimeout(() => {
+        if (!telegram) return;
+        const topicSessions = telegram.getAllTopicSessions();
+        for (const [, sessionName] of topicSessions) {
+          compactionSentinel.report(sessionName, 'PreCompact');
+        }
+      }, 10_000);
+    });
+    console.log(pc.green('  Compaction auto-resume wired (PreCompact hook event)'));
+
+    // Trigger 2: Watchdog 'compaction-idle' polling — report to sentinel.
+    if (watchdog) {
+      watchdog.on('compaction-idle', (sessionName: string) => {
+        compactionSentinel.report(sessionName, 'watchdog-poll');
       });
-      console.log(pc.green('  Compaction auto-resume wired to triage orchestrator'));
+      console.log(pc.green('  Compaction auto-resume wired (watchdog poll)'));
     }
+
+    // Trigger 3: stash a function on globalThis so the HTTP route (registered
+    // later in AgentServer) and the compaction-recovery.sh hook can invoke it
+    // via POST /internal/compaction-resume. Routes into the sentinel so the
+    // dedupe/verify/retry lifecycle applies to this path too.
+    (globalThis as Record<string, unknown>).__instarCompactionRecover = (
+      sessionName: string,
+      triggerLabel: string,
+    ) => {
+      compactionSentinel.report(sessionName, triggerLabel || 'recovery-hook');
+      return Promise.resolve(true);
+    };
 
     // Subagent Tracker — monitors subagent lifecycle via hook events
     const { SubagentTracker } = await import('../monitoring/SubagentTracker.js');
     const subagentTracker = new SubagentTracker({ stateDir: config.stateDir });
     console.log(pc.green('  Subagent tracker enabled'));
+
+    // Helper Watchdog — detects subagent stalls and rate-limit failures,
+    // surfacing them back into the parent session's stdin so the agent
+    // can decide whether to retry smaller. Complements SessionWatchdog,
+    // which only covers the top-level session.
+    const { HelperWatchdog } = await import('../monitoring/HelperWatchdog.js');
+    const helperWatchdog = new HelperWatchdog({ subagentTracker });
+    helperWatchdog.start();
+    const findTmuxForClaudeSession = (claudeSessionId: string): string | null => {
+      const running = sessionManager
+        .listRunningSessions()
+        .filter((s) => s.claudeSessionId === claudeSessionId);
+      return running[0]?.tmuxSession ?? null;
+    };
+    const deliverHelperAlert = (tmux: string | null, msg: string): void => {
+      console.warn(msg);
+      if (!tmux) return;
+      try {
+        sessionManager.injectMessage(tmux, msg);
+      } catch (err) {
+        console.warn(
+          `[HelperWatchdog] inject failed for ${tmux}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+    helperWatchdog.on(
+      'stall',
+      (e: { agentId: string; agentType: string; sessionId: string; elapsedMs: number }) => {
+        const minutes = Math.round(e.elapsedMs / 60_000);
+        deliverHelperAlert(
+          findTmuxForClaudeSession(e.sessionId),
+          `[helper-watchdog] Your ${e.agentType} helper (agent ${e.agentId}) has been running for ${minutes}m with no stop event — likely stalled. Consider retrying with a smaller scope or aborting.`,
+        );
+      },
+    );
+    helperWatchdog.on(
+      'helper-failed',
+      (e: {
+        record: { agentId: string; agentType: string; sessionId: string; lastMessage: string | null };
+        reason: string;
+      }) => {
+        const snippet = (e.record.lastMessage ?? '').slice(0, 160);
+        deliverHelperAlert(
+          findTmuxForClaudeSession(e.record.sessionId),
+          `[helper-watchdog] Your ${e.record.agentType} helper (agent ${e.record.agentId}) died with reason=${e.reason}. Last message: ${snippet}`,
+        );
+      },
+    );
+    console.log(pc.green('  Helper watchdog enabled'));
 
     // Wire subagent awareness into zombie cleanup — prevents killing sessions
     // that are idle at the prompt but waiting for subagent results.
@@ -4122,6 +4527,23 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     });
     console.log(pc.green('  Worktree monitor enabled (post-session + periodic)'));
+
+    // Session-end maintenance — lightweight housekeeping at session boundaries
+    // Cross-pollinated from Dawn: distributes maintenance load across all sessions
+    const { SessionMaintenanceRunner } = await import('../core/SessionMaintenanceRunner.js');
+    const sessionMaintenance = new SessionMaintenanceRunner({ stateDir: config.stateDir });
+    sessionManager.on('sessionComplete', async () => {
+      try {
+        const result = await sessionMaintenance.run();
+        if (result.tasksRun.length > 0) {
+          console.log(`[SessionMaintenance] ${result.summary}`);
+        }
+      } catch (err) {
+        // Fire-and-forget — maintenance failures never block session cleanup
+        console.error('[SessionMaintenance] Failed:', err);
+      }
+    });
+    console.log(pc.green('  Session-end maintenance enabled'));
 
     // Instructions Verifier — tracks which CLAUDE.md files loaded
     const { InstructionsVerifier } = await import('../monitoring/InstructionsVerifier.js');
@@ -4205,6 +4627,75 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }
 
+    // Slack compaction-resume wiring — registered as a deferred handler the
+    // unified recoverCompactedSession() helper above will call. Works with or
+    // without triageOrchestrator (falls back to direct sessionManager inject).
+    if (_slackAdapter) {
+      const _slack = _slackAdapter;
+      const slackRecover = async (sessionName: string, triggerLabel: string): Promise<boolean> => {
+        const channelId = _slack.getChannelForSession(sessionName);
+        if (!channelId) return false;
+        const slackLogPath = path.join(config.stateDir, 'slack-messages.jsonl');
+        // Load up to the last 20 messages for this channel so we can both
+        // verify the most recent entry is unanswered (last real message is
+        // user) AND build an inline history block for the resume payload.
+        interface SlackLogEntry { text?: string; fromUser?: boolean; timestamp?: string; senderName?: string; channelId?: string }
+        const channelMessages: SlackLogEntry[] = [];
+        try {
+          const content = fs.readFileSync(slackLogPath, 'utf-8');
+          const lines = content.trim().split('\n');
+          for (let i = lines.length - 1; i >= 0 && channelMessages.length < 20; i--) {
+            try {
+              const msg = JSON.parse(lines[i]) as SlackLogEntry;
+              if (msg.channelId === channelId) {
+                channelMessages.unshift(msg);
+              }
+            } catch { /* skip malformed */ }
+          }
+        } catch { /* no log */ }
+        if (channelMessages.length === 0) return false;
+        const lastReal = findLastRealMessage(channelMessages);
+        if (!lastReal?.fromUser) return false;
+        console.log(`[CompactionResume] (${triggerLabel}) Slack channel ${channelId} has unanswered message — recovering`);
+
+        const contextBlock = formatInlineHistory(channelMessages, { label: 'SLACK CHANNEL CONTEXT' });
+        const payload = buildCompactionResumePayload(contextBlock);
+        const injectText = prepareInjectionText(payload, triggerLabel, channelId);
+        // Direct injection — bypass triage (see comment on recoverCompactedSession).
+        const ok = sessionManager.injectMessage(sessionName, injectText);
+        if (ok) {
+          console.log(`[CompactionResume] (${triggerLabel}) Slack direct re-inject OK for channel ${channelId}`);
+          return true;
+        }
+        return false;
+      };
+      (globalThis as Record<string, unknown>).__instarSlackCompactionResume = slackRecover;
+      console.log(pc.green('  Compaction auto-resume registered (Slack channels)'));
+    }
+
+    // ── ProxyCoordinator (shared between PresenceProxy and PromiseBeacon) ──
+    // Per PROMISE-BEACON-SPEC.md §A10: a per-topic mutex that prevents
+    // ⏳ (PromiseBeacon) and 🔭 (PresenceProxy) from double-posting.
+    const { ProxyCoordinator } = await import('../monitoring/ProxyCoordinator.js');
+    const proxyCoordinator = new ProxyCoordinator();
+
+    // ── Shared LlmQueue (priority-laned, daily-spend-capped) ──
+    const { LlmQueue: SharedLlmQueueCls } = await import('../monitoring/LlmQueue.js');
+    const promiseBeaconCfg = ((config as any).promiseBeacon ?? {}) as {
+      prefix?: string;
+      maxDailyLlmSpendCents?: number;
+      sentinelAutoEnable?: boolean;
+      quietHours?: { start: string; end: string; timezone?: string };
+      maxActiveBeacons?: number;
+    };
+    const sharedLlmQueue = new SharedLlmQueueCls({
+      maxConcurrent: 3,
+      interactiveReservePct: 0.4,
+      maxDailyCents: promiseBeaconCfg.maxDailyLlmSpendCents ?? 100,
+    });
+    // sharedLlmQueue is wired into both PromiseBeacon (background lane) and
+    // PresenceProxy (interactive lane) below.
+
     let presenceProxy: import('../monitoring/PresenceProxy.js').PresenceProxy | undefined;
     if (sharedIntelligence && telegram) {
       try {
@@ -4214,7 +4705,10 @@ export async function startServer(options: StartOptions): Promise<void> {
         const messagesLogPath = path.join(config.stateDir, 'telegram-messages.jsonl');
         const slackMessagesLogPath = path.join(config.stateDir, 'slack-messages.jsonl');
 
-        // Shared helper: check a messages log file for agent responses after a timestamp
+        // Shared helper: check a messages log file for agent responses after a timestamp.
+        // System/proxy-message filtering is delegated to isSystemOrProxyMessage so all
+        // three callsites (this one, PresenceProxy.isSystemMessage, and the compaction
+        // recoverFn) stay in sync.
         const checkLogForAgentResponse = (logPath: string, topicId: number, sinceIso: string): boolean => {
           try {
             const content = fs.readFileSync(logPath, 'utf-8');
@@ -4227,12 +4721,7 @@ export async function startServer(options: StartOptions): Promise<void> {
                 const matchesTopic = msg.topicId === topicId
                   || (topicId < 0 && msg.channelId && slackChannelToSyntheticId(String(msg.channelId)) === topicId);
                 if (matchesTopic && !msg.fromUser && msg.timestamp > sinceIso) {
-                  const t = (msg.text || '').trim();
-                  const isSystem = t === '✓ Delivered' || t.startsWith('✓ Delivered')
-                    || t.startsWith('🔄 Session restarting') || t === 'Session respawned.'
-                    || t === 'Session terminated.' || t.startsWith('Send a new message to start')
-                    || t.startsWith('🔭');
-                  if (!isSystem) return true;
+                  if (!isSystemOrProxyMessage(msg.text)) return true;
                 }
               } catch { /* skip malformed lines */ }
             }
@@ -4351,6 +4840,15 @@ export async function startServer(options: StartOptions): Promise<void> {
                 return { recovered: result.recovered };
               }
             : undefined,
+          // Shared per-topic mutex — coordinates with PromiseBeacon.
+          acquireProxyMutex: (topicId, holder) => proxyCoordinator.tryAcquire(topicId, holder),
+          releaseProxyMutex: (topicId, holder) => proxyCoordinator.release(topicId, holder),
+          // BUILD-STALL-VISIBILITY-SPEC Fix 2 — suppress generic standby when
+          // a /build heartbeat landed recently on this topic.
+          hasRecentBuildHeartbeat: (topicId, windowMs) => proxyCoordinator.hasRecentBuildHeartbeat(topicId, windowMs),
+          // Shared LLM queue (interactive lane) — cross-monitor concurrency
+          // and daily-spend-cap with PromiseBeacon.
+          sharedLlmQueue,
         });
 
         // Hook into Telegram's onMessageLogged callback (always active, unlike EventBus which requires a feature flag)
@@ -4375,6 +4873,44 @@ export async function startServer(options: StartOptions): Promise<void> {
         };
 
         presenceProxy.start();
+
+        // ── PromiseBeacon ────────────────────────────────────────────────
+        // Watches beacon-enabled commitments and emits ⏳ heartbeats so the
+        // user knows the agent hasn't gone silent on an open promise.
+        // Spec: docs/specs/PROMISE-BEACON-SPEC.md
+        try {
+          const { PromiseBeacon } = await import('../monitoring/PromiseBeacon.js');
+          const promiseBeacon = new PromiseBeacon({
+            stateDir: config.stateDir,
+            commitmentTracker,
+            llmQueue: sharedLlmQueue,
+            proxyCoordinator,
+            captureSessionOutput: (name, lines) => sessionManager.captureOutput(name, lines),
+            getSessionForTopic: (topicId) => telegram!.getSessionForTopic(topicId),
+            isSessionAlive: (name) => sessionManager.isSessionAlive(name),
+            sendMessage: async (topicId, text, metadata) => {
+              const url = `http://localhost:${config.port}/telegram/reply/${topicId}`;
+              const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${config.authToken}`,
+                },
+                body: JSON.stringify({ text, metadata }),
+              });
+              if (!response.ok) throw new Error(`Beacon reply failed: ${response.status}`);
+            },
+            prefix: promiseBeaconCfg.prefix ?? '⏳',
+            maxDailyLlmSpendCents: promiseBeaconCfg.maxDailyLlmSpendCents ?? 100,
+            sentinelAutoEnable: promiseBeaconCfg.sentinelAutoEnable ?? false,
+            quietHours: promiseBeaconCfg.quietHours ?? { start: '22:00', end: '08:00' },
+            maxActiveBeacons: promiseBeaconCfg.maxActiveBeacons ?? 20,
+          });
+          promiseBeacon.start();
+          (globalThis as Record<string, unknown>).__instarPromiseBeacon = promiseBeacon;
+        } catch (err) {
+          console.warn('[PromiseBeacon] init failed:', (err as Error).message);
+        }
 
         // Wire Slack's onMessageLogged into PresenceProxy + TopicMemory (if Slack is active)
         if (_slackAdapter) {
@@ -4864,7 +5400,14 @@ export async function startServer(options: StartOptions): Promise<void> {
     messageRouter.setSummarySentinel(summarySentinel);
 
     // On-demand session spawning for message delivery (Phase 5)
-    const spawnManager = new SpawnRequestManager({
+    // §4.4: spawn knobs are read from config.threadline.spawn — see
+    // ThreadlineSpawnConfig in core/types.ts. All fields are optional and
+    // fall through to manager-level defaults if absent.
+    const spawnConfig = config.threadline?.spawn;
+    // Forward-declared `let` so the onDrainReady callback can reference the
+    // manager it belongs to (for re-entrant evaluate() calls during drain).
+    let spawnManager: SpawnRequestManager;
+    spawnManager = new SpawnRequestManager({
       maxSessions: config.sessions.maxSessions ?? 5,
       getActiveSessions: () => sessionManager.listRunningSessions(),
       spawnSession: async (prompt, opts) => {
@@ -4873,7 +5416,9 @@ export async function startServer(options: StartOptions): Promise<void> {
           prompt,
           model: opts?.model as import('../core/types.js').ModelTier | undefined,
           maxDurationMinutes: opts?.maxDurationMinutes,
-          triggeredBy: 'spawn-request',
+          // §4.5: honor SpawnRequestManager's provenance tag so drain-spawned
+          // sessions are distinguishable from inline-spawned ones in logs/stream.
+          triggeredBy: opts?.triggeredBy ?? 'spawn-request',
         });
         return session.id;
       },
@@ -4886,18 +5431,141 @@ export async function startServer(options: StartOptions): Promise<void> {
       onEscalate: (request, reason) => {
         notify('IMMEDIATE', 'messaging', `Spawn escalation: ${reason}\n  Requester: ${request.requester.agent}\n  Target: ${request.target.agent}`);
       },
+      // §4.5: emit degradation breadcrumbs on edge transitions.
+      onDegradation: (event) => {
+        try {
+          const reporter = DegradationReporter.getInstance();
+          if (event.kind === 'spawn-penalty-tripped') {
+            reporter.report({
+              feature: 'Threadline.SpawnPenalty',
+              primary: `Open spawn slot for peer "${event.agent}"`,
+              fallback: `Spawn blocked for ${Math.round(event.penaltyMs / 1000)}s after ${event.consecutiveFailures} consecutive agent-attributable failures`,
+              reason: `Peer "${event.agent}" tripped the consecutive-failure penalty (3 strikes)`,
+              impact: 'Peer cannot spawn sessions until penalty clears. Successful inbound spawn from a different peer is unaffected.',
+            });
+          } else if (event.kind === 'spawn-infra-degraded') {
+            reporter.report({
+              feature: 'Threadline.SpawnInfraDegraded',
+              primary: `Full queue admission (cap 10) for peer "${event.agent}"`,
+              fallback: `Degraded admission (cap ${spawnConfig?.degradedMaxQueuedPerAgent ?? 1}) for ${Math.round(event.degradationMs / 60_000)}min`,
+              reason: `Peer "${event.agent}" tripped the infra-failure soft limiter (${event.failureCount} non-attributable failures in 10min)`,
+              impact: 'Peer\'s queue depth is capped; older messages are dropped. No blame attribution.',
+            });
+          }
+        } catch (err) {
+          console.warn(`[spawn-manager] degradation reporter failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
+      // §4.4: optional knobs from config.
+      cooldownMs: spawnConfig?.cooldownMs,
+      maxDrainsPerTick: spawnConfig?.maxDrainsPerTick,
+      maxEnvelopeBytes: spawnConfig?.maxEnvelopeBytes,
+      maxGlobalQueued: spawnConfig?.maxGlobalQueued,
+      degradedMaxQueuedPerAgent: spawnConfig?.degradedMaxQueuedPerAgent,
+      // §4.4 commit 2 + §4.5: drain-loop consumer wiring.
+      // When the drain loop finds an agent ready (cooldown cleared + queued
+      // messages present), this callback re-invokes evaluate() with a
+      // synthetic SpawnRequest tagged `triggeredBy: 'spawn-request-drain'`.
+      // The real queued context is reattached by SpawnRequestManager.evaluate
+      // via its internal drainQueue() call. Stub session/machine values:
+      // requester.session/machine isn't preserved per-message — those fields
+      // are only used in the spawn prompt template for display.
+      onDrainReady: async (agent: string) => {
+        try {
+          const result = await spawnManager.evaluate({
+            requester: { agent, session: 'drain', machine: 'drain' },
+            target: { agent: config.projectName, machine: os.hostname() },
+            reason: `Drain re-attempt for queued messages from ${agent}`,
+            priority: 'medium',
+            triggeredBy: 'spawn-request-drain',
+          });
+          if (!result.approved) {
+            console.log(`[spawn-manager] drain re-attempt for ${agent} not approved: ${result.reason}`);
+          }
+        } catch (err) {
+          console.warn(`[spawn-manager] drain re-attempt for ${agent} threw: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      },
     });
+
+    // §4.4 kill switch: drain loop runs unless explicitly disabled in config.
+    // Wired here so emergency rollback is a config flip, not a code change.
+    if (spawnConfig?.drainEnabled !== false) {
+      spawnManager.start();
+      console.log(`[spawn-manager] drain loop started (tick=${spawnManager.getDrainTickMs()}ms)`);
+    } else {
+      console.log('[spawn-manager] drain loop disabled by config.threadline.spawn.drainEnabled=false');
+    }
 
     // Threadline Router — handles threaded cross-agent conversations via relay
     const threadlineRouter = new ThreadlineRouter(
       messageRouter, spawnManager, threadResumeMap, messageStore,
       { localAgent: config.projectName, localMachine: os.hostname() },
+      null, // autonomyGate
+      messageDelivery, // PR-4: live-session injection path
     );
 
     // Listener Session Manager — warm session for fast relay responses (Phase 2)
     const listenerManager = config.threadline?.relayEnabled
       ? new ListenerSessionManager(config.stateDir, config.authToken ?? '', config.threadline as Partial<import('../threadline/ListenerSessionManager.js').ListenerConfig>)
       : null;
+
+    // Wake Socket Server — receives signals from the standalone listener daemon (Phase 1)
+    let wakeSocketServer: import('../threadline/WakeSocketServer.js').WakeSocketServer | undefined;
+    try {
+      const { WakeSocketServer } = await import('../threadline/WakeSocketServer.js');
+      wakeSocketServer = new WakeSocketServer(config.stateDir);
+      wakeSocketServer.on('wake', () => {
+        // Daemon wrote a new inbox entry — read and process it
+        const inboxPath = path.join(config.stateDir, 'threadline', 'inbox.jsonl.active');
+        if (fs.existsSync(inboxPath)) {
+          console.log('[wake-socket] Received wake signal from listener daemon');
+        }
+      });
+
+      // Phase 3: Fast failover via relay presence detection
+      wakeSocketServer.on('failover-trigger', () => {
+        console.log('[wake-socket] Received FAILOVER_TRIGGER from listener daemon');
+        // Read trigger details
+        const triggerPath = path.join(config.stateDir, 'failover-trigger.json');
+        if (fs.existsSync(triggerPath)) {
+          try {
+            const trigger = JSON.parse(fs.readFileSync(triggerPath, 'utf-8'));
+            console.log(`[wake-socket] Peer agent ${trigger.agentId?.slice(0, 8)}... disconnected from relay`);
+            // The MultiMachineCoordinator can use this to speed up failover
+            // For now, log the event. Full failover integration requires
+            // evaluating whether this agent is a standby for the disconnected peer.
+          } catch { /* ignore parse errors */ }
+        }
+      });
+
+      wakeSocketServer.start();
+      console.log(pc.dim(`  Wake socket: listening at ${path.join(config.stateDir, 'listener.sock')}`));
+    } catch (err) {
+      console.log(pc.dim(`  Wake socket: not started (${err instanceof Error ? err.message : err})`));
+    }
+
+    // Pipe Session Spawner — lightweight claude -p sessions for simple queries (Phase 2)
+    let pipeSpawner: import('../threadline/PipeSessionSpawner.js').PipeSessionSpawner | undefined;
+    if (config.threadline?.relayEnabled) {
+      try {
+        const { PipeSessionSpawner } = await import('../threadline/PipeSessionSpawner.js');
+        const pipeConfig = config.threadline?.listener?.pipeMode;
+        pipeSpawner = new PipeSessionSpawner({
+          stateDir: config.stateDir,
+          model: pipeConfig?.model ?? 'sonnet',
+          timeoutMs: pipeConfig?.timeoutMs ?? 600_000,
+          warningMs: pipeConfig?.warningMs ?? 480_000,
+          maxConcurrent: pipeConfig?.maxConcurrent ?? 5,
+          allowedTools: pipeConfig?.allowedTools ?? ['threadline_send', 'Read', 'Glob', 'Grep'],
+          allowedPaths: pipeConfig?.allowedPaths ?? ['src/', 'docs/', 'specs/'],
+          minIqsBand: pipeConfig?.minIqsBand ?? 70,
+        });
+        console.log(pc.dim(`  Pipe sessions: enabled (model: ${pipeConfig?.model ?? 'sonnet'}, max: ${pipeConfig?.maxConcurrent ?? 5})`));
+      } catch (err) {
+        console.log(pc.dim(`  Pipe sessions: not available (${err instanceof Error ? err.message : err})`));
+      }
+    }
 
     console.log(pc.green(`  Inter-agent messaging: enabled (token: ${agentToken.slice(0, 8)}...)${dropSummary}`));
 
@@ -4952,7 +5620,10 @@ export async function startServer(options: StartOptions): Promise<void> {
           isConfigured: () => true,
         }) : []),
         ...createLifelineProbes({
-          getSupervisorStatus: () => ({ running: false, healthy: false, restartAttempts: 0, lastHealthy: 0, coolingDown: false, cooldownRemainingMs: 0, circuitBroken: false, totalFailures: 0, lastCrashOutput: '', circuitBreakerRetryCount: 0, maxCircuitBreakerRetries: 0, inMaintenanceWait: false, maintenanceWaitElapsedMs: 0 }),
+          // Supervisor status intentionally omitted: the supervisor only exists
+          // in the lifeline process, not in the server. The process + queue probes
+          // here check lifeline health via the lock file and queue contents,
+          // which is the correct signal from the server's vantage point.
           getQueueLength: () => 0,
           peekQueue: () => [],
           lockFilePath: path.join(config.stateDir, 'lifeline.lock'),
@@ -4975,6 +5646,8 @@ export async function startServer(options: StartOptions): Promise<void> {
     let threadlineShutdown: (() => Promise<void>) | undefined;
     let threadlineRelayClient: import('../threadline/client/ThreadlineClient.js').ThreadlineClient | undefined;
     let unifiedTrust: UnifiedTrustSystem | undefined;
+    /** Shared reply waiters for threadline waitForReply support */
+    const threadlineReplyWaiters = new Map<string, { resolve: (reply: string) => void; threadId: string; senderAgent: string; timer: ReturnType<typeof setTimeout> }>();
     try {
       const threadline = await bootstrapThreadline({
         agentName: config.projectName,
@@ -5052,6 +5725,39 @@ export async function startServer(options: StartOptions): Promise<void> {
             textContent = String(c.content ?? c.text ?? JSON.stringify(msg.content));
           } else { textContent = JSON.stringify(msg.content); }
 
+          // Check if this message resolves a pending waitForReply request.
+          // Skip auto-ack messages (they're from us, not a real reply).
+          // PR-3: Waiters are now keyed by threadId (unique per conversation)
+          // rather than sender fingerprint or agent name. Fall back to the
+          // legacy fingerprint/name lookup only if no threadId is present,
+          // for compatibility with older senders.
+          const isAutoAck = textContent.startsWith('Message received.') || textContent.startsWith('Message received,');
+          let waiter = msg.threadId ? threadlineReplyWaiters.get(msg.threadId) : undefined;
+          if (!waiter) {
+            // Legacy fallback: try by sender fingerprint, then by resolved name
+            waiter = threadlineReplyWaiters.get(senderFingerprint);
+            if (!waiter) {
+              const resolvedName = (() => {
+                try {
+                  const kaPath = path.join(config.stateDir, 'threadline', 'known-agents.json');
+                  const kaData = JSON.parse(fs.readFileSync(kaPath, 'utf-8'));
+                  const agents = kaData.agents ?? kaData;
+                  if (Array.isArray(agents)) {
+                    const match = agents.find((a: { publicKey?: string; name?: string }) =>
+                      a.publicKey === senderFingerprint || a.publicKey?.startsWith(senderFingerprint));
+                    return match?.name ?? null;
+                  }
+                  return null;
+                } catch { return null; }
+              })();
+              if (resolvedName) waiter = threadlineReplyWaiters.get(resolvedName);
+            }
+          }
+          if (waiter && !isAutoAck) {
+            waiter.resolve(textContent);
+            // Don't return — still process the message normally for routing
+          }
+
           // Auto-ack (post-trust-verification, never ack status messages)
           const msgType = typeof msg.content === 'object' && msg.content !== null ? (msg.content as Record<string, unknown>).type : undefined;
           if (trustLevel !== 'untrusted' && msgType !== 'status' && config.threadline?.autoAck !== false && !isAckRateLimited(senderFingerprint)) {
@@ -5060,7 +5766,84 @@ export async function startServer(options: StartOptions): Promise<void> {
             } catch (ackErr) { console.error(`[relay] Auto-ack failed: ${ackErr instanceof Error ? ackErr.message : ackErr}`); }
           }
 
-          // Phase 2: Route to warm listener if available and appropriate
+          // Canonical inbox write — single source of truth across all routing branches.
+          // Runs once at relay-ingest, BEFORE pipe / warm-listener / cold-spawn branching,
+          // so .instar/threadline/inbox.jsonl.active reflects every inbound message regardless
+          // of which path handles it. Read by the dashboard observability tab and the
+          // threadline → telegram bridge. Non-fatal on failure — routing continues either way.
+          if (listenerManager) {
+            try {
+              listenerManager.appendCanonicalInboxEntry({
+                from: senderFingerprint,
+                senderName,
+                trustLevel,
+                threadId: msg.threadId ?? getSyntheticThreadId(senderFingerprint),
+                text: textContent,
+                messageId: msg.messageId,
+              });
+            } catch (err) {
+              console.warn(`[relay] Canonical inbox append failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+            }
+          }
+
+          // Threadline → Telegram bridge: mirror inbound message into a per-thread
+          // Telegram topic so the user has visibility into agent-to-agent
+          // conversations. Relay-only — TelegramBridgeConfig owns the gate
+          // (default-OFF; allow/deny list determines auto-create). Async,
+          // non-awaited, and never blocks routing or throws to this handler.
+          if (telegramBridge) {
+            telegramBridge
+              .mirrorInbound({
+                threadId: msg.threadId ?? getSyntheticThreadId(senderFingerprint),
+                remoteAgent: senderFingerprint,
+                remoteAgentName: senderName,
+                text: textContent,
+                messageId: msg.messageId,
+              })
+              .catch(err => console.warn(`[tg-bridge] mirrorInbound: ${err instanceof Error ? err.message : err}`));
+          }
+
+          // Phase 2a: Pipe-mode session for simple queries (lightweight, auto-exit)
+          // Rapid-fire same-thread guard: if an active pipe session already exists for this
+          // thread, fall through to the listener/cold-spawn path so messages queue serially
+          // via ListenerSessionManager.writeToInbox instead of killing the prior tmux session.
+          if (
+            pipeSpawner &&
+            msg.threadId &&
+            !threadResumeMap.get(msg.threadId) &&
+            !pipeSpawner.hasActiveSessionForThread(msg.threadId)
+          ) {
+            const pipeCheck = pipeSpawner.shouldUsePipeMode({
+              threadId: msg.threadId,
+              messageText: textContent,
+              fromFingerprint: senderFingerprint,
+              fromName: senderName,
+              trustLevel,
+            });
+            if (pipeCheck.eligible) {
+              try {
+                const { classifyIntent, summarizeThreadHistory } = await import('../threadline/PipeSessionSpawner.js');
+                const intent = await classifyIntent(textContent);
+                if (intent === 'pipe') {
+                  const result = await pipeSpawner.spawn({
+                    threadId: msg.threadId,
+                    messageText: textContent,
+                    fromFingerprint: senderFingerprint,
+                    fromName: senderName,
+                    trustLevel,
+                  });
+                  if (result.spawned) {
+                    console.log(`[relay] Pipe session spawned for ${senderName} (thread: ${msg.threadId.slice(0, 8)})`);
+                    return;
+                  }
+                }
+              } catch (err) {
+                console.error(`[relay] Pipe session error (falling through to interactive): ${err instanceof Error ? err.message : err}`);
+              }
+            }
+          }
+
+          // Phase 2b: Route to warm listener if available and appropriate
           if (listenerManager && listenerManager.shouldUseListener(trustLevel, textContent.length)) {
             listenerManager.writeToInbox({ from: senderFingerprint, senderName, trustLevel, threadId: msg.threadId ?? getSyntheticThreadId(senderFingerprint), text: textContent });
             console.log(`[relay] Routed to listener inbox from ${senderName} (trust: ${trustLevel})`);
@@ -5075,7 +5858,12 @@ export async function startServer(options: StartOptions): Promise<void> {
             delivery: { status: 'delivered' as const, attempts: 1, lastAttempt: new Date().toISOString() },
           } as unknown as import('../messaging/types.js').MessageEnvelope;
 
-          const relayContext = { senderFingerprint, senderName, trustLevel };
+          const relayContext = {
+            trust: { kind: 'plaintext-tofu' as const, senderFingerprint },
+            senderFingerprint,
+            senderName,
+            trustLevel,
+          };
           let result = await threadlineRouter.handleInboundMessage(envelope, relayContext);
 
           // Fallback for threadId-less messages
@@ -5099,22 +5887,48 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.warn(pc.yellow(`  Threadline: failed to bootstrap — ${err instanceof Error ? err.message : String(err)}`));
     }
 
-    // Response Review Pipeline (Coherence Gate) — evaluates agent responses before delivery
+    // Messaging Tone Gate — always-on tone check on outbound messaging routes.
+    // Uses the shared IntelligenceProvider (Claude CLI subscription by default,
+    // Anthropic API if key is set). No opt-in. Catches CLI commands, file paths,
+    // config syntax, and other technical leakage in agent-to-user messages.
+    let messagingToneGate: import('../core/MessagingToneGate.js').MessagingToneGate | undefined;
+    if (sharedIntelligence) {
+      const { MessagingToneGate } = await import('../core/MessagingToneGate.js');
+      messagingToneGate = new MessagingToneGate(sharedIntelligence);
+      console.log(pc.green('  Messaging tone gate: active (Haiku via shared IntelligenceProvider)'));
+    } else {
+      console.log(pc.yellow('  Messaging tone gate: inactive (no IntelligenceProvider available)'));
+    }
+
+    // Outbound dedup gate — deterministic near-duplicate detection on every
+    // outbound agent message. Catches respawn races and idempotency gaps.
+    const { OutboundDedupGate } = await import('../core/OutboundDedupGate.js');
+    const outboundDedupGate = new OutboundDedupGate();
+    console.log(pc.green('  Outbound dedup gate: active (word-3gram Jaccard, threshold 0.7, 5min window)'));
+
+    // Response Review Pipeline (Coherence Gate) — evaluates agent responses before delivery.
+    // Prefers the shared IntelligenceProvider (subscription-compatible) so the gate works
+    // even without ANTHROPIC_API_KEY. Falls back to direct Anthropic API if a key is set
+    // and no intelligence is available.
     let responseReviewGate: import('../core/CoherenceGate.js').CoherenceGate | undefined;
     if (config.responseReview?.enabled) {
-      const anthropicKey = process.env['ANTHROPIC_API_KEY']?.trim();
-      if (anthropicKey) {
+      const anthropicKey = process.env['ANTHROPIC_API_KEY']?.trim() ?? '';
+      if (sharedIntelligence || anthropicKey) {
         const { CoherenceGate } = await import('../core/CoherenceGate.js');
         responseReviewGate = new CoherenceGate({
           config: config.responseReview,
           stateDir: config.stateDir,
           apiKey: anthropicKey,
+          intelligence: sharedIntelligence,
           relationships: relationships ?? undefined,
           adaptiveTrust: adaptiveTrust ?? undefined,
         });
-        console.log(pc.green(`  Response review pipeline: enabled (${Object.keys(config.responseReview.reviewers ?? {}).length} reviewers configured)`));
+        const backend = sharedIntelligence
+          ? 'via shared IntelligenceProvider'
+          : 'via Anthropic API (direct)';
+        console.log(pc.green(`  Response review pipeline: enabled ${backend} (${Object.keys(config.responseReview.reviewers ?? {}).length} reviewers configured)`));
       } else {
-        console.warn(pc.yellow(`  Response review pipeline: configured but ANTHROPIC_API_KEY not set`));
+        console.warn(pc.yellow(`  Response review pipeline: configured but no IntelligenceProvider or ANTHROPIC_API_KEY available`));
       }
     }
 
@@ -5193,7 +6007,116 @@ export async function startServer(options: StartOptions): Promise<void> {
       }, { description: 'Feature discovery state and behavioral contract summary' });
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, listenerManager: listenerManager ?? undefined, responseReviewGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, unifiedTrust, liveConfig });
+    // ── Integrated-Being ledger (v1) ──────────────────────────────────
+    // Spec: docs/specs/integrated-being-ledger-v1.md
+    let sharedStateLedger: import('../core/SharedStateLedger.js').SharedStateLedger | undefined;
+    let ledgerSessionRegistry:
+      | import('../core/LedgerSessionRegistry.js').LedgerSessionRegistry
+      | undefined;
+    {
+      const ibConfig = config.integratedBeing ?? {};
+      const ibEnabled = ibConfig.enabled === undefined ? true : ibConfig.enabled !== false;
+      if (ibEnabled) {
+        const { SharedStateLedger } = await import('../core/SharedStateLedger.js');
+        const { randomBytes } = await import('node:crypto');
+        // Generate salt on first use — persisted via LiveConfig.
+        let salt = ibConfig.counterpartyHashSalt ?? '';
+        if (!salt) {
+          salt = randomBytes(32).toString('hex');
+          try {
+            if (liveConfig) liveConfig.set('integratedBeing.counterpartyHashSalt', salt);
+          } catch { /* best effort */ }
+        }
+        sharedStateLedger = new SharedStateLedger({
+          stateDir: config.stateDir,
+          config: ibConfig,
+          salt,
+          degradationReporter,
+        });
+        // Wire emitters (single call-site; revert = delete this block).
+        const { registerLedgerEmitters } = await import('../core/registerLedgerEmitters.js');
+        // Note: dispatchExecutor is scoped inside the dispatches.enabled block.
+        // AutoDispatcher wraps it; the emitter sink is set via
+        // autoDispatcher.executor.setLedgerEventSink(). We access it through
+        // autoDispatcher — if dispatches are disabled, no emitter is installed.
+        const dispatchExec = autoDispatcher
+          ? (autoDispatcher as any).executor as import('../core/DispatchExecutor.js').DispatchExecutor | undefined
+          : undefined;
+        registerLedgerEmitters(sharedStateLedger, {
+          threadlineRouter: threadlineRouter ?? undefined,
+          dispatchExecutor: dispatchExec ?? undefined,
+          coherenceGate: responseReviewGate ?? undefined,
+          config: ibConfig,
+          instance: config.projectName ?? 'server',
+        });
+        console.log(pc.green('  Integrated-Being ledger: enabled'));
+
+        // ── Integrated-Being v2 (session-write surface) ────────────────
+        // Spec: docs/specs/integrated-being-ledger-v2.md
+        // Gated by config.integratedBeing.v2Enabled (default false).
+        // When false the registry is still instantiated so endpoints can
+        // consistently 503 with X-Disabled: v2; only the endpoint guards
+        // read the flag. Keeping the registry in-scope avoids a second
+        // branch in server.ts wiring.
+        if (ibConfig.v2Enabled === true) {
+          const { LedgerSessionRegistry } = await import(
+            '../core/LedgerSessionRegistry.js'
+          );
+          ledgerSessionRegistry = new LedgerSessionRegistry({
+            stateDir: config.stateDir,
+            config: ibConfig,
+          });
+          console.log(
+            pc.green('  Integrated-Being v2 (session-write surface): enabled')
+          );
+          // Start background sweepers (expired + stranded). Bounded
+          // per-run; safe to run on every server start.
+          const { CommitmentSweeper } = await import(
+            '../core/CommitmentSweeper.js'
+          );
+          const sweeper = new CommitmentSweeper({
+            ledger: sharedStateLedger!,
+            registry: ledgerSessionRegistry,
+            instance: config.projectName ?? 'server',
+          });
+          sweeper.start();
+          console.log(
+            pc.green('  Integrated-Being v2 (commitment sweepers): running')
+          );
+        } else {
+          console.log(
+            pc.dim('  Integrated-Being v2 (session-write surface): disabled')
+          );
+        }
+      }
+    }
+
+    // Parallel-dev isolation (PARALLEL-DEV-ISOLATION-SPEC.md) — off by default.
+    // When enabled, each topic session spawns in its own git worktree, with
+    // fencing tokens, Ed25519-signed commit trailers, and (at phase='enforce')
+    // an authoritative push gate at GitHub Actions.
+    let worktreeManager: import('../core/WorktreeManager.js').WorktreeManager | undefined;
+    const parallelDevConfig = config.parallelDev;
+    if (parallelDevConfig && parallelDevConfig.phase !== 'off') {
+      const { wireParallelDev } = await import('../core/ParallelDevWiring.js');
+      const wired = await wireParallelDev({
+        config: parallelDevConfig,
+        projectDir: config.projectDir,
+        stateDir: config.stateDir,
+      });
+      if (wired) {
+        worktreeManager = wired.worktreeManager;
+        sessionManager.setWorktreeManager(worktreeManager, wired.shimRoot);
+        console.log(
+          pc.green(`  Parallel-dev isolation: ${parallelDevConfig.phase} (WorktreeManager wired)`)
+        );
+      }
+    }
+
+    const { InitiativeTracker } = await import('../core/InitiativeTracker.js');
+    const initiativeTracker = new InitiativeTracker(config.stateDir);
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, proxyCoordinator, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability });
     await server.start();
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
@@ -5208,6 +6131,12 @@ export async function startServer(options: StartOptions): Promise<void> {
           return Promise.resolve();
         },
         alertTopicId,
+        // The MessagingToneGate is the single authority for outbound user
+        // messages — degradation alerts go through the same gate as agent
+        // replies do. Without this wire-in, health alerts bypass the
+        // jargon / self-heal / CTA discipline and the user sees raw
+        // ops-pager output. See upgrades/side-effects/agent-health-alert-authority-routing.md.
+        toneGate: messagingToneGate ?? null,
       });
     }
 
@@ -5271,6 +6200,17 @@ export async function startServer(options: StartOptions): Promise<void> {
                 scheduleRetry(index + 1);
               } else {
                 console.error('[tunnel] All retries exhausted. Tunnel unavailable until server restart.');
+                if (telegram) {
+                  try {
+                    const lifelineId = telegram.getLifelineTopicId?.();
+                    if (lifelineId) {
+                      await telegram.sendToTopic(
+                        lifelineId,
+                        '⚠️ Tunnel failed after all retries. Dashboard link is unavailable until the server is restarted.',
+                      ).catch(() => {});
+                    }
+                  } catch { /* best-effort notification */ }
+                }
               }
             }
           }, retryIntervals[index] * 60_000);
@@ -5464,6 +6404,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       await notificationBatcher.flushAll(); // Drain pending notifications before exit
       notificationBatcher.stop();
       retryManager.stop();
+      spawnManager.dispose(); // §4.4: stop drain loop + clear DRR state
       summarySentinel.stop();
       memoryMonitor.stop();
       caffeinateManager.stop();
@@ -5473,8 +6414,10 @@ export async function startServer(options: StartOptions): Promise<void> {
       sessionMonitor?.stop();
       if (tunnel) await tunnel.stop();
       if (threadlineShutdown) await threadlineShutdown();
-      stopHeartbeat();
-      unregisterAgent(config.projectDir);
+      wakeSocketServer?.stop();
+      pipeSpawner?.killAll();
+      try { stopHeartbeat?.(); } catch { /* non-critical during shutdown */ }
+      try { unregisterAgent(config.projectDir); } catch { /* ELOCKED is non-critical during shutdown */ }
       scheduler?.stop();
       if (telegram) await telegram.stop();
       sessionManager.stopMonitoring();
@@ -5482,6 +6425,8 @@ export async function startServer(options: StartOptions): Promise<void> {
       // when better-sqlite3 destructors fire during process teardown.
       topicMemory?.close();
       semanticMemory?.close();
+      // Integrated-Being v1 — flush stats sidecar (coalesces pending writes).
+      try { sharedStateLedger?.shutdown(); } catch { /* best effort */ }
       await server.stop();
       process.exit(0);
     };

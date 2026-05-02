@@ -23,6 +23,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { refreshHooksAndSettings } from '../../src/commands/init.js';
 import { loadJobs } from '../../src/scheduler/JobLoader.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ function createTestProject(opts: { port?: number; jobs?: object[] } = {}): TestP
     stateDir,
     jobsPath,
     configPath,
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/refresh-jobs.test.ts:69' }),
   };
 }
 
@@ -192,11 +193,11 @@ describe('refreshJobs()', () => {
       expect(stateCheck!.execute!.type).toBe('skill');
     });
 
-    it('uses default port 4321 when config is missing', () => {
+    it('uses default port 4040 when config is missing', () => {
       project = createTestProject({ jobs: [makeJob('health-check')] });
 
       // Delete config to simulate missing config
-      fs.unlinkSync(project.configPath);
+      SafeFsExecutor.safeUnlinkSync(project.configPath, { operation: 'tests/unit/refresh-jobs.test.ts:201' });
 
       refreshHooksAndSettings(project.dir, project.stateDir);
 
@@ -207,7 +208,7 @@ describe('refreshJobs()', () => {
 
       const stateCheck = updatedJobs.find(j => j.slug === 'state-integrity-check');
       if (stateCheck?.gate) {
-        expect(stateCheck.gate).toContain('4321');
+        expect(stateCheck.gate).toContain('4040');
       }
     });
   });

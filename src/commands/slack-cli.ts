@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import pc from 'picocolors';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 // Polyfill WebSocket for Node <22 (global added in Node 22)
 if (typeof globalThis.WebSocket === 'undefined') {
@@ -261,7 +262,7 @@ export async function addSlack(): Promise<void> {
       fs.chmodSync(tmpPath, 0o600);
       fs.renameSync(tmpPath, configPath);
     } catch (err) {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/commands/slack-cli.ts:265' }); } catch { /* ignore */ }
       throw err;
     }
 
@@ -349,7 +350,7 @@ export async function removeSlack(): Promise<void> {
     fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
     fs.renameSync(tmpPath, configPath);
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/commands/slack-cli.ts:354' }); } catch { /* ignore */ }
     throw err;
   }
 
@@ -365,14 +366,14 @@ export async function removeSlack(): Promise<void> {
 
   for (const file of filesToDelete) {
     if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
+      SafeFsExecutor.safeUnlinkSync(file, { operation: 'src/commands/slack-cli.ts:371' });
       console.log(pc.dim(`  Deleted: ${path.basename(file)}`));
     }
   }
 
   for (const dir of dirsToDelete) {
     if (fs.existsSync(dir)) {
-      fs.rmSync(dir, { recursive: true });
+      SafeFsExecutor.safeRmSync(dir, { recursive: true, operation: 'src/commands/slack-cli.ts:379' });
       console.log(pc.dim(`  Deleted: ${path.basename(dir)}/`));
     }
   }

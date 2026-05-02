@@ -45,6 +45,26 @@ export interface ReceivedMessage {
 
 const DEFAULT_RELAY_URL = 'wss://relay.threadline.dev/v1/connect';
 
+/**
+ * Client-side session affinity TTLs and cap (§4.1).
+ *
+ * When the caller does NOT provide an explicit threadId, `send()` (the
+ * E2E-encrypted path) reuses the last threadId we used for this recipient
+ * if both sliding and absolute TTLs are satisfied. `sendPlaintext()` does
+ * NOT consult the map — plaintext has no identity verification of the
+ * recipient path and reusing a thread there leaks nothing useful (server
+ * still mints fresh on its side since trust.kind is plaintext-tofu).
+ */
+const CLIENT_AFFINITY_SLIDING_TTL_MS = 600_000; // 10 minutes
+const CLIENT_AFFINITY_ABSOLUTE_TTL_MS = 7_200_000; // 2 hours
+const CLIENT_AFFINITY_MAX = 1000;
+
+interface ClientAffinityEntry {
+  threadId: string;
+  firstUsedAt: number;
+  lastUsedAt: number;
+}
+
 export class ThreadlineClient extends EventEmitter {
   private readonly config: ThreadlineClientConfig;
   private readonly identityManager: IdentityManager;
@@ -53,10 +73,71 @@ export class ThreadlineClient extends EventEmitter {
   private identity: IdentityInfo | null = null;
   private readonly knownAgents = new Map<AgentFingerprint, KnownAgent>();
 
-  constructor(config: ThreadlineClientConfig) {
+  /**
+   * E2E-path session affinity (§4.1 client side).
+   *
+   * Maps recipient fingerprint → most-recent threadId used with that peer,
+   * with sliding + absolute TTLs. Consulted ONLY by `send()` (the E2E-encrypted
+   * path). Plaintext path is unaffected.
+   *
+   * Process-local; never persisted.
+   */
+  private readonly lastThreadByPeer = new Map<AgentFingerprint, ClientAffinityEntry>();
+  /** Test seam: override `Date.now()` for deterministic TTL tests. */
+  private readonly nowFn: () => number;
+
+  constructor(config: ThreadlineClientConfig, nowFn?: () => number) {
     super();
     this.config = config;
     this.identityManager = new IdentityManager(config.stateDir ?? '.');
+    this.nowFn = nowFn ?? (() => Date.now());
+  }
+
+  /** Peek affinity for a recipient. Returns null on miss or TTL expiry. */
+  private peekClientAffinity(recipientId: AgentFingerprint): string | null {
+    const entry = this.lastThreadByPeer.get(recipientId);
+    if (!entry) return null;
+    const now = this.nowFn();
+    if (now - entry.firstUsedAt > CLIENT_AFFINITY_ABSOLUTE_TTL_MS) {
+      this.lastThreadByPeer.delete(recipientId);
+      return null;
+    }
+    if (now - entry.lastUsedAt > CLIENT_AFFINITY_SLIDING_TTL_MS) {
+      this.lastThreadByPeer.delete(recipientId);
+      return null;
+    }
+    return entry.threadId;
+  }
+
+  /** Record affinity for a recipient. LRU-bumps and evicts at cap. */
+  private recordClientAffinity(recipientId: AgentFingerprint, threadId: string): void {
+    const now = this.nowFn();
+    const existing = this.lastThreadByPeer.get(recipientId);
+    if (existing && existing.threadId === threadId) {
+      this.lastThreadByPeer.delete(recipientId);
+      this.lastThreadByPeer.set(recipientId, {
+        threadId,
+        firstUsedAt: existing.firstUsedAt,
+        lastUsedAt: now,
+      });
+    } else {
+      this.lastThreadByPeer.delete(recipientId);
+      this.lastThreadByPeer.set(recipientId, {
+        threadId,
+        firstUsedAt: now,
+        lastUsedAt: now,
+      });
+    }
+    while (this.lastThreadByPeer.size > CLIENT_AFFINITY_MAX) {
+      const oldestKey = this.lastThreadByPeer.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.lastThreadByPeer.delete(oldestKey);
+    }
+  }
+
+  /** Test seam: inspect the affinity map. Snapshot, not mutable. */
+  getClientAffinitySnapshotForTests(): ReadonlyMap<AgentFingerprint, ClientAffinityEntry> {
+    return new Map(this.lastThreadByPeer);
   }
 
   /**
@@ -162,9 +243,13 @@ export class ThreadlineClient extends EventEmitter {
       ? { content }
       : content;
 
-    const tId = threadId ?? `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // Authority precedence (§4.1): explicit caller threadId > client affinity > mint.
+    const tId = threadId
+      ?? this.peekClientAffinity(recipientId)
+      ?? `thread-${this.nowFn()}-${Math.random().toString(36).slice(2, 8)}`;
     const envelope = this.encryptor.encrypt(known.publicKey, known.x25519PublicKey, tId, message);
     this.relayClient.sendMessage(envelope);
+    this.recordClientAffinity(recipientId, tId);
 
     return envelope.messageId;
   }
@@ -255,8 +340,9 @@ export class ThreadlineClient extends EventEmitter {
 
   /**
    * Resolve an agent name or fingerprint to a fingerprint.
+   * Supports disambiguation syntax: "name:fingerprintPrefix" (e.g. "sagemind:a1b2c3d4").
    * Tries: exact fingerprint match → name match in cache → re-discover → name match.
-   * Returns null if not found.
+   * Returns null if not found. Throws if name is ambiguous and no fingerprint prefix given.
    */
   async resolveAgent(nameOrId: string): Promise<AgentFingerprint | null> {
     // 1. Exact fingerprint match (hex string, typically 32 chars)
@@ -264,14 +350,17 @@ export class ThreadlineClient extends EventEmitter {
       return nameOrId as AgentFingerprint;
     }
 
-    // 2. Name match in cache (case-insensitive)
-    const byName = this.findAgentByName(nameOrId);
+    // 2. Parse disambiguation syntax: "name:fingerprintPrefix"
+    const { name, fingerprintPrefix } = this.parseAgentAddress(nameOrId);
+
+    // 3. Name match in cache (case-insensitive)
+    const byName = this.findAgentByName(name, fingerprintPrefix);
     if (byName) return byName.agentId;
 
-    // 3. Re-discover and try again
+    // 4. Re-discover and try again
     if (this.relayClient) {
       await this.autoDiscover();
-      const byNameRetry = this.findAgentByName(nameOrId);
+      const byNameRetry = this.findAgentByName(name, fingerprintPrefix);
       if (byNameRetry) return byNameRetry.agentId;
     }
 
@@ -279,18 +368,81 @@ export class ThreadlineClient extends EventEmitter {
   }
 
   /**
-   * Find an agent by name (case-insensitive, partial match).
+   * Parse "name:fingerprintPrefix" addressing syntax.
+   * If no colon or input looks like a plain name, returns the whole input as name.
    */
-  private findAgentByName(name: string): KnownAgent | undefined {
+  private parseAgentAddress(input: string): { name: string; fingerprintPrefix?: string } {
+    // Only split on colon if the part after looks like a hex fingerprint prefix
+    const colonIdx = input.lastIndexOf(':');
+    if (colonIdx > 0 && colonIdx < input.length - 1) {
+      const suffix = input.substring(colonIdx + 1);
+      if (/^[0-9a-f]{4,32}$/i.test(suffix)) {
+        return {
+          name: input.substring(0, colonIdx),
+          fingerprintPrefix: suffix.toLowerCase(),
+        };
+      }
+    }
+    return { name: input };
+  }
+
+  /**
+   * Find an agent by name (case-insensitive, partial match).
+   * If fingerprintPrefix is provided, uses it to disambiguate same-named agents.
+   * Throws an error if multiple agents share the name and no prefix is given.
+   */
+  private findAgentByName(name: string, fingerprintPrefix?: string): KnownAgent | undefined {
     const lower = name.toLowerCase();
-    // Exact name match first
+
+    // Collect all exact name matches
+    const exactMatches: KnownAgent[] = [];
     for (const agent of this.knownAgents.values()) {
-      if (agent.name.toLowerCase() === lower) return agent;
+      if (agent.name.toLowerCase() === lower) exactMatches.push(agent);
     }
-    // Partial match (contains)
+
+    if (exactMatches.length === 1) return exactMatches[0];
+
+    if (exactMatches.length > 1) {
+      // Disambiguate by fingerprint prefix
+      if (fingerprintPrefix) {
+        const match = exactMatches.find(a => a.agentId.startsWith(fingerprintPrefix));
+        if (match) return match;
+        // No match for the given prefix
+        return undefined;
+      }
+      // Ambiguous — throw with helpful info
+      const options = exactMatches.map(a =>
+        `  ${a.name}:${a.agentId.substring(0, 8)} (${a.agentId})`
+      ).join('\n');
+      throw new Error(
+        `Ambiguous agent name "${name}" — ${exactMatches.length} agents share this name. ` +
+        `Use "name:fingerprint" syntax to disambiguate:\n${options}`
+      );
+    }
+
+    // No exact match — try partial match
+    const partialMatches: KnownAgent[] = [];
     for (const agent of this.knownAgents.values()) {
-      if (agent.name.toLowerCase().includes(lower)) return agent;
+      if (agent.name.toLowerCase().includes(lower)) partialMatches.push(agent);
     }
+
+    if (partialMatches.length === 1) return partialMatches[0];
+
+    if (partialMatches.length > 1) {
+      if (fingerprintPrefix) {
+        const match = partialMatches.find(a => a.agentId.startsWith(fingerprintPrefix));
+        if (match) return match;
+        return undefined;
+      }
+      const options = partialMatches.map(a =>
+        `  ${a.name}:${a.agentId.substring(0, 8)} (${a.agentId})`
+      ).join('\n');
+      throw new Error(
+        `Ambiguous agent name "${name}" — ${partialMatches.length} agents match. ` +
+        `Use "name:fingerprint" syntax to disambiguate:\n${options}`
+      );
+    }
+
     return undefined;
   }
 

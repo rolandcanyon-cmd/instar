@@ -55,6 +55,10 @@ const DEFAULT_MAX_DURATION_MINUTES = 240;
 /** Minutes of idle-at-prompt before a non-protected session is killed */
 const IDLE_PROMPT_KILL_MINUTES = 15;
 
+/** Fallback constants — used when config values are not set */
+const FALLBACK_MAX_DURATION_MINUTES = DEFAULT_MAX_DURATION_MINUTES;
+const FALLBACK_IDLE_PROMPT_KILL_MINUTES = IDLE_PROMPT_KILL_MINUTES;
+
 /** Patterns that indicate Claude is sitting at its idle prompt (not actively working) */
 const IDLE_PROMPT_PATTERNS = [
   'bypass permissions on',
@@ -121,6 +125,9 @@ export class SessionManager extends EventEmitter {
   /** Optional callback to check if a session has active subagents (prevents false zombie kills) */
   private subagentChecker?: (session: Session) => boolean;
 
+  /** Optional callback: is this session currently in active compaction recovery? If so, skip zombie kill. */
+  private activeRecoveryChecker?: (session: Session) => boolean;
+
   /** Prompt Gate InputDetector — monitors terminal output for interactive prompts */
   private promptDetector?: InputDetector;
 
@@ -145,10 +152,90 @@ export class SessionManager extends EventEmitter {
   private _cachedRunningCount = 0;
   private _cachedRunningSessions: Session[] = [];
 
+  /** Worktree manager — when set, spawnSession resolves an isolated worktree per topic. */
+  private worktreeManager: import('./WorktreeManager.js').WorktreeManager | null = null;
+
+  /** Per-session shim directory root (one subdir per session). Used for K9 mandatory shim. */
+  private shimRoot: string | null = null;
+
   constructor(config: SessionManagerConfig, state: StateManager) {
     super();
     this.config = config;
     this.state = state;
+  }
+
+  /** Effective idle-at-prompt kill threshold (config override or hardcoded default) */
+  private get effectiveIdleKillMinutes(): number {
+    return this.config.idlePromptKillMinutes ?? FALLBACK_IDLE_PROMPT_KILL_MINUTES;
+  }
+
+  /** Effective absolute max session duration (config override or hardcoded default) */
+  private get effectiveMaxDurationMinutes(): number {
+    return this.config.defaultMaxDurationMinutes ?? FALLBACK_MAX_DURATION_MINUTES;
+  }
+
+  /**
+   * Wire the WorktreeManager into spawnSession. When set, every spawned session
+   * resolves to an isolated worktree (PARALLEL-DEV-ISOLATION-SPEC.md, AC-1).
+   *
+   * @param shimRoot Filesystem root for per-session shim directories
+   *                 (e.g. `<stateDir>/session-shims/`). When unset, no PATH shim
+   *                 is injected (degrades to non-isolated mode for back-compat).
+   */
+  setWorktreeManager(
+    wm: import('./WorktreeManager.js').WorktreeManager,
+    shimRoot: string | null = null,
+  ): void {
+    this.worktreeManager = wm;
+    this.shimRoot = shimRoot;
+  }
+
+  /**
+   * Per-session shim (PARALLEL-DEV-ISOLATION-SPEC.md "Phase D: Mandatory destructive
+   * command interception"). Creates `<shimDir>/git`, `<shimDir>/rm`, and a `.shellrc`
+   * that defines bash functions overriding any user-shell aliases. Sourcing happens
+   * via `BASH_ENV` env var (set in tmux spawn).
+   */
+  private installSessionShim(shimDir: string, fencingToken: string): void {
+    fs.mkdirSync(shimDir, { recursive: true });
+
+    // Resolve the absolute path to the destructive-command shim runner.
+    // Walk up from the SessionManager source location to find package root.
+    const shimRunner = this.resolveShimRunner();
+
+    // git wrapper
+    const gitShim = `#!/bin/sh
+exec "${shimRunner}" git "$@"
+`;
+    fs.writeFileSync(path.join(shimDir, 'git'), gitShim, { mode: 0o755 });
+
+    // rm wrapper
+    const rmShim = `#!/bin/sh
+exec "${shimRunner}" rm "$@"
+`;
+    fs.writeFileSync(path.join(shimDir, 'rm'), rmShim, { mode: 0o755 });
+
+    // BASH_ENV-sourced rcfile to override shell aliases (handles `alias git=…` cases)
+    const shellrc = `# instar parallel-dev session shim
+export INSTAR_FENCING_TOKEN="${fencingToken}"
+git() { "${shimRunner}" git "$@"; }
+rm()  { "${shimRunner}" rm  "$@"; }
+`;
+    fs.writeFileSync(path.join(shimDir, '.shellrc'), shellrc, { mode: 0o644 });
+  }
+
+  private resolveShimRunner(): string {
+    // Walk from this file up to project root, then look for scripts/destructive-command-shim.js
+    let dir = path.dirname(new URL(import.meta.url).pathname);
+    for (let i = 0; i < 6; i++) {
+      const candidate = path.join(dir, 'scripts', 'destructive-command-shim.js');
+      if (fs.existsSync(candidate)) return candidate;
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    // Fallback to a not-yet-installed sentinel; shim wrappers will fail loudly
+    return '/usr/local/bin/instar-destructive-command-shim';
   }
 
   /**
@@ -167,6 +254,16 @@ export class SessionManager extends EventEmitter {
    */
   setSubagentChecker(checker: (session: Session) => boolean): void {
     this.subagentChecker = checker;
+  }
+
+  /**
+   * Register a predicate that vetoes zombie cleanup when a compaction recovery
+   * is in flight. When it returns true, the idle-prompt killer skips the
+   * session and resets its idle clock so cleanup won't race the recovery
+   * window. Wired by CompactionSentinel at server startup.
+   */
+  setActiveRecoveryChecker(checker: (session: Session) => boolean): void {
+    this.activeRecoveryChecker = checker;
   }
 
   /**
@@ -326,7 +423,7 @@ export class SessionManager extends EventEmitter {
         // Uses explicit maxDurationMinutes if set, otherwise falls back to
         // DEFAULT_MAX_DURATION_MINUTES as an absolute safety net.
         if (session.startedAt) {
-          const maxMinutes = session.maxDurationMinutes || DEFAULT_MAX_DURATION_MINUTES;
+          const maxMinutes = session.maxDurationMinutes || this.effectiveMaxDurationMinutes;
           const elapsed = (Date.now() - new Date(session.startedAt).getTime()) / 60000;
           const buffer = Math.min(maxMinutes * 0.2, 60); // 20% buffer, max 60 min
           const limit = maxMinutes + buffer;
@@ -419,7 +516,14 @@ export class SessionManager extends EventEmitter {
               }
             } else {
               const idleMs = now - this.idlePromptSince.get(session.id)!;
-              if (idleMs > IDLE_PROMPT_KILL_MINUTES * 60_000) {
+              if (idleMs > this.effectiveIdleKillMinutes * 60_000) {
+                // Veto: active compaction recovery in flight — skip kill and
+                // reset the idle clock so we don't race the recovery window.
+                if (this.activeRecoveryChecker && this.activeRecoveryChecker(session)) {
+                  console.log(`[SessionManager] Skipping zombie kill for "${session.name}" — compaction recovery in flight.`);
+                  this.idlePromptSince.delete(session.id);
+                  continue;
+                }
                 // Check for unanswered injection before killing
                 const pendingInjection = this.pendingInjections.get(session.tmuxSession);
                 if (pendingInjection) {
@@ -480,6 +584,11 @@ export class SessionManager extends EventEmitter {
 
   /**
    * Spawn a new Claude Code session in tmux.
+   *
+   * When a WorktreeManager is wired in (see `setWorktreeManager`) and `topicId`
+   * is supplied, the session is resolved into an isolated topic worktree
+   * (PARALLEL-DEV-ISOLATION-SPEC.md). Without `topicId`, falls back to the
+   * legacy main-checkout behavior for back-compat with non-topic-bound jobs.
    */
   async spawnSession(options: {
     name: string;
@@ -488,6 +597,9 @@ export class SessionManager extends EventEmitter {
     jobSlug?: string;
     triggeredBy?: string;
     maxDurationMinutes?: number;
+    topicId?: number | 'platform';
+    worktreeMode?: 'dev' | 'read-only' | 'doc-fix' | 'platform';
+    worktreeSlug?: string;
   }): Promise<Session> {
     const runningSessions = this.listRunningSessions();
     if (runningSessions.length >= this.config.maxSessions) {
@@ -506,6 +618,39 @@ export class SessionManager extends EventEmitter {
       throw new Error(`tmux session "${tmuxSession}" already exists`);
     }
 
+    // ── PARALLEL-DEV-ISOLATION (PARALLEL-DEV-ISOLATION-SPEC.md AC-1) ──
+    // If WorktreeManager is wired AND topicId provided, resolve a topic worktree
+    // and use its cwd. Otherwise fall back to projectDir (legacy behavior).
+    let resolvedCwd = this.config.projectDir;
+    let workTreeFencingToken: string | null = null;
+    let shimDir: string | null = null;
+    if (this.worktreeManager && options.topicId !== undefined) {
+      try {
+        const resolved = await this.worktreeManager.resolve({
+          topicId: options.topicId,
+          mode: options.worktreeMode ?? 'dev',
+          sessionId,
+          pid: process.pid,
+          processStartTime: Math.floor(Date.now() / 1000),
+          slug: options.worktreeSlug ?? options.name,
+        });
+        resolvedCwd = resolved.cwd;
+        workTreeFencingToken = resolved.fencingToken;
+
+        // K9: install per-session shim dir and prepend to PATH so destructive-command
+        // wrappers fire in the spawned shell (PARALLEL-DEV-ISOLATION-SPEC.md, "Phase D").
+        if (this.shimRoot) {
+          shimDir = path.join(this.shimRoot, sessionId);
+          this.installSessionShim(shimDir, resolved.fencingToken);
+        }
+      } catch (err: any) {
+        if (err && err.code === 'LOCK_HELD') {
+          throw new Error(`Cannot spawn session for topic ${options.topicId}: lock held by ${JSON.stringify(err.holder)}`);
+        }
+        throw err;
+      }
+    }
+
     // Build Claude CLI arguments — no shell intermediary.
     // tmux new-session executes the command directly (no bash -c needed)
     // when given as separate arguments after the session options.
@@ -517,16 +662,29 @@ export class SessionManager extends EventEmitter {
     }
     claudeArgs.push('-p', options.prompt);
 
+    // K9: build PATH env with shim prepended (when shim was installed)
+    const inheritedPath = process.env.PATH ?? '';
+    const shimmedPath = shimDir ? `${shimDir}:${inheritedPath}` : inheritedPath;
+
     try {
       execFileSync(this.config.tmuxPath, [
         'new-session', '-d',
         '-s', tmuxSession,
-        '-c', this.config.projectDir,
+        '-c', resolvedCwd,
         '-e', 'CLAUDECODE=', // Prevent nested Claude Code detection
         '-e', `INSTAR_SESSION_ID=${sessionId}`, // Expose instar session ID to hook events
         '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
         '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
-        '-e', 'ANTHROPIC_API_KEY=', // Clear stale/invalid API keys — agents use Claude subscription
+        ...(workTreeFencingToken ? ['-e', `INSTAR_FENCING_TOKEN=${workTreeFencingToken}`] : []),
+        ...(workTreeFencingToken ? ['-e', `INSTAR_WORKTREE_PATH=${resolvedCwd}`] : []),
+        ...(shimDir ? ['-e', `PATH=${shimmedPath}`, '-e', `BASH_ENV=${path.join(shimDir, '.shellrc')}`] : []),
+        // OAuth tokens (sk-ant-oat01-...) go in CLAUDE_CODE_OAUTH_TOKEN to enable
+        // interactive mode auth via subscription. API keys (sk-ant-api03-...) go in
+        // ANTHROPIC_API_KEY for direct API billing.
+        ...((this.config.anthropicApiKey ?? '').startsWith('sk-ant-oat')
+          ? ['-e', `CLAUDE_CODE_OAUTH_TOKEN=${this.config.anthropicApiKey}`, '-e', 'ANTHROPIC_API_KEY=']
+          : ['-e', `ANTHROPIC_API_KEY=${this.config.anthropicApiKey ?? ''}`, '-e', 'CLAUDE_CODE_OAUTH_TOKEN=']),
+        '-e', `ANTHROPIC_BASE_URL=${this.config.anthropicBaseUrl ?? ''}`,
         // Isolate database credentials — spawned sessions must never inherit production
         // database URLs from the parent shell. This prevents accidental schema changes
         // or data operations against the wrong database. (Learned from Portal incident 2026-02-22)
@@ -888,7 +1046,7 @@ export class SessionManager extends EventEmitter {
       const ageMinutes = s.startedAt
         ? Math.round((now - new Date(s.startedAt).getTime()) / 60000)
         : 0;
-      const maxDuration = s.maxDurationMinutes || DEFAULT_MAX_DURATION_MINUTES;
+      const maxDuration = s.maxDurationMinutes || this.effectiveMaxDurationMinutes;
 
       // A session is stale if it's exceeded its expected duration
       let isStale = false;
@@ -1065,7 +1223,7 @@ export class SessionManager extends EventEmitter {
    * Used for Telegram-driven conversational sessions.
    * Optionally sends an initial message after Claude is ready.
    */
-  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; resumeSessionId?: string }): Promise<string> {
+  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string }): Promise<string> {
     const sanitized = name
       ? name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
       : null;
@@ -1115,7 +1273,13 @@ export class SessionManager extends EventEmitter {
         '-e', `INSTAR_SESSION_ID=${interactiveSessionId}`, // Expose instar session ID to hook events
         '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
         '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
-        '-e', 'ANTHROPIC_API_KEY=', // Clear stale/invalid API keys — agents use Claude subscription
+        // OAuth tokens (sk-ant-oat01-...) go in CLAUDE_CODE_OAUTH_TOKEN to enable
+        // interactive mode auth via subscription. API keys (sk-ant-api03-...) go in
+        // ANTHROPIC_API_KEY for direct API billing.
+        ...((this.config.anthropicApiKey ?? '').startsWith('sk-ant-oat')
+          ? ['-e', `CLAUDE_CODE_OAUTH_TOKEN=${this.config.anthropicApiKey}`, '-e', 'ANTHROPIC_API_KEY=']
+          : ['-e', `ANTHROPIC_API_KEY=${this.config.anthropicApiKey ?? ''}`, '-e', 'CLAUDE_CODE_OAUTH_TOKEN=']),
+        '-e', `ANTHROPIC_BASE_URL=${this.config.anthropicBaseUrl ?? ''}`,
         // Isolate database credentials — spawned sessions must never inherit production
         // database URLs from the parent shell. (Learned from Portal incident 2026-02-22)
         '-e', 'DATABASE_URL=',
@@ -1127,6 +1291,10 @@ export class SessionManager extends EventEmitter {
 
       if (options?.telegramTopicId) {
         tmuxArgs.push('-e', `INSTAR_TELEGRAM_TOPIC=${options.telegramTopicId}`);
+      }
+
+      if (options?.slackChannelId) {
+        tmuxArgs.push('-e', `INSTAR_SLACK_CHANNEL=${options.slackChannelId}`);
       }
 
       tmuxArgs.push(this.config.claudePath, '--dangerously-skip-permissions');
@@ -1158,7 +1326,7 @@ export class SessionManager extends EventEmitter {
       tmuxSession,
       startedAt: new Date().toISOString(),
       prompt: initialMessage,
-      maxDurationMinutes: DEFAULT_MAX_DURATION_MINUTES,
+      maxDurationMinutes: this.effectiveMaxDurationMinutes,
     };
     this.state.saveSession(session);
 

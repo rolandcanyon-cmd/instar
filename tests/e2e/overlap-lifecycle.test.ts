@@ -20,6 +20,7 @@ import os from 'node:os';
 import { WorkLedger } from '../../src/core/WorkLedger.js';
 import { OverlapGuard } from '../../src/core/OverlapGuard.js';
 import type { OverlapCheckResult } from '../../src/core/OverlapGuard.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -80,7 +81,7 @@ describe('OverlapGuard E2E lifecycle', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/e2e/overlap-lifecycle.test.ts:84' });
   });
 
   // ── Scenario 1: No-conflict collaboration lifecycle ────────────────
@@ -438,7 +439,7 @@ describe('OverlapGuard E2E lifecycle', () => {
         // onAlert should NOT fire for 'log' action
         expect(onAlertPure).not.toHaveBeenCalled();
       } finally {
-        fs.rmSync(stateDir2, { recursive: true, force: true });
+        SafeFsExecutor.safeRmSync(stateDir2, { recursive: true, force: true, operation: 'tests/e2e/overlap-lifecycle.test.ts:443' });
       }
     });
   });
@@ -560,7 +561,7 @@ describe('OverlapGuard E2E lifecycle', () => {
         expect(resultArchLog.canProceed).toBe(true);
         expect(onBlockB).not.toHaveBeenCalled();
       } finally {
-        fs.rmSync(stateDir2, { recursive: true, force: true });
+        SafeFsExecutor.safeRmSync(stateDir2, { recursive: true, force: true, operation: 'tests/e2e/overlap-lifecycle.test.ts:566' });
       }
     });
   });

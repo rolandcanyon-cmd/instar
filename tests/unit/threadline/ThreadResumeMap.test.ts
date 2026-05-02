@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { ThreadResumeMap } from '../../../src/threadline/ThreadResumeMap.js';
 import type { ThreadResumeEntry } from '../../../src/threadline/ThreadResumeMap.js';
+import { SafeFsExecutor } from '../../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -14,7 +15,7 @@ function createTempDir(): { dir: string; stateDir: string; cleanup: () => void }
   return {
     dir,
     stateDir,
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/threadline/ThreadResumeMap.test.ts:18' }),
   };
 }
 
@@ -52,7 +53,7 @@ function createFakeJsonl(uuid: string): string {
 function cleanupFakeJsonl(): void {
   const testProjectDir = path.join(os.homedir(), '.claude', 'projects', 'threadline-test-project');
   try {
-    fs.rmSync(testProjectDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(testProjectDir, { recursive: true, force: true, operation: 'tests/unit/threadline/ThreadResumeMap.test.ts:57' });
   } catch {
     // May not exist
   }
@@ -527,7 +528,7 @@ describe('ThreadResumeMap', () => {
       const threadlineDir = path.join(freshStateDir, 'threadline');
       expect(fs.existsSync(threadlineDir)).toBe(true);
 
-      fs.rmSync(freshDir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(freshDir, { recursive: true, force: true, operation: 'tests/unit/threadline/ThreadResumeMap.test.ts:533' });
     });
   });
 

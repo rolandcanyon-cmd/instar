@@ -8,6 +8,7 @@ import { ThreadResumeMap } from '../../../src/threadline/ThreadResumeMap.js';
 import type { ThreadResumeEntry } from '../../../src/threadline/ThreadResumeMap.js';
 import type { MessageEnvelope, AgentMessage, MessageThread } from '../../../src/messaging/types.js';
 import type { SpawnResult } from '../../../src/messaging/SpawnRequestManager.js';
+import { SafeFsExecutor } from '../../../src/core/SafeFsExecutor.js';
 
 // ── Mock Factories ───────────────────────────────────────────────
 
@@ -173,7 +174,7 @@ function createTempDir(): { dir: string; stateDir: string; cleanup: () => void }
   return {
     dir,
     stateDir,
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/threadline/ThreadlineRouter.test.ts:177' }),
   };
 }
 
@@ -189,7 +190,7 @@ function createFakeJsonl(uuid: string): void {
 function cleanupFakeJsonl(): void {
   const testProjectDir = path.join(os.homedir(), '.claude', 'projects', 'threadline-router-test');
   try {
-    fs.rmSync(testProjectDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(testProjectDir, { recursive: true, force: true, operation: 'tests/unit/threadline/ThreadlineRouter.test.ts:194' });
   } catch {
     // May not exist
   }
@@ -229,19 +230,123 @@ describe('ThreadlineRouter', () => {
     cleanupFakeJsonl();
   });
 
-  // ── Messages without threadId ────────────────────────────────
+  // ── Live-session injection (PR-4) ────────────────────────────
 
-  describe('messages without threadId', () => {
-    it('returns handled: false for messages without threadId', async () => {
-      const envelope = makeEnvelope({ threadId: undefined });
-      const result = await router.handleInboundMessage(envelope);
-      expect(result.handled).toBe(false);
+  describe('live-session injection', () => {
+    it('injects into live session when messageDelivery is provided and succeeds', async () => {
+      const threadId = crypto.randomUUID();
+      threadResumeMap.save(threadId, makeEntry({ uuid: existingUuid, sessionName: 'live-sess' }));
+
+      const mockDelivery = {
+        deliverToSession: vi.fn().mockResolvedValue({ success: true, phase: 'delivered', shouldRetry: false }),
+        checkInjectionSafety: vi.fn(),
+        formatInline: vi.fn(),
+        formatPointer: vi.fn(),
+      };
+
+      const injectingRouter = new ThreadlineRouter(
+        mockRouter as any,
+        mockSpawnManager as any,
+        threadResumeMap,
+        mockStore as any,
+        { localAgent: 'local-agent', localMachine: 'local-machine' },
+        null,
+        mockDelivery as any,
+      );
+
+      const envelope = makeEnvelope({ threadId });
+      const result = await injectingRouter.handleInboundMessage(envelope);
+
+      expect(result.handled).toBe(true);
+      expect(result.injected).toBe(true);
+      expect(result.resumed).toBeUndefined();
+      expect(result.spawned).toBeUndefined();
+      expect(mockDelivery.deliverToSession).toHaveBeenCalledWith('live-sess', envelope);
+      expect(mockSpawnManager.evaluate).not.toHaveBeenCalled();
     });
 
-    it('does not call spawnManager for non-threaded messages', async () => {
+    it('falls back to resume when injection fails', async () => {
+      const threadId = crypto.randomUUID();
+      threadResumeMap.save(threadId, makeEntry({ uuid: existingUuid, sessionName: 'dead-sess' }));
+
+      const mockDelivery = {
+        deliverToSession: vi.fn().mockResolvedValue({
+          success: false, phase: 'queued', failureReason: 'Session not alive', shouldRetry: true,
+        }),
+        checkInjectionSafety: vi.fn(),
+        formatInline: vi.fn(),
+        formatPointer: vi.fn(),
+      };
+
+      const injectingRouter = new ThreadlineRouter(
+        mockRouter as any,
+        mockSpawnManager as any,
+        threadResumeMap,
+        mockStore as any,
+        { localAgent: 'local-agent', localMachine: 'local-machine' },
+        null,
+        mockDelivery as any,
+      );
+
+      const envelope = makeEnvelope({ threadId });
+      const result = await injectingRouter.handleInboundMessage(envelope);
+
+      expect(result.handled).toBe(true);
+      expect(result.injected).toBeUndefined();
+      expect(result.resumed).toBe(true);
+      expect(mockDelivery.deliverToSession).toHaveBeenCalled();
+      expect(mockSpawnManager.evaluate).toHaveBeenCalled();
+    });
+
+    it('falls back to spawn when no resume entry exists even with messageDelivery', async () => {
+      const threadId = crypto.randomUUID();
+
+      const mockDelivery = {
+        deliverToSession: vi.fn(),
+        checkInjectionSafety: vi.fn(),
+        formatInline: vi.fn(),
+        formatPointer: vi.fn(),
+      };
+
+      const injectingRouter = new ThreadlineRouter(
+        mockRouter as any,
+        mockSpawnManager as any,
+        threadResumeMap,
+        mockStore as any,
+        { localAgent: 'local-agent', localMachine: 'local-machine' },
+        null,
+        mockDelivery as any,
+      );
+
+      const envelope = makeEnvelope({ threadId });
+      const result = await injectingRouter.handleInboundMessage(envelope);
+
+      expect(result.handled).toBe(true);
+      expect(result.spawned).toBe(true);
+      expect(mockDelivery.deliverToSession).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Messages without threadId ────────────────────────────────
+  // PR-2: First-contact messages without a threadId used to be dropped
+  // (handled: false). They are now minted a new UUID and routed through
+  // the normal spawn flow so the recipient actually sees them.
+
+  describe('messages without threadId (first contact)', () => {
+    it('mints a new threadId and spawns a new session', async () => {
+      const envelope = makeEnvelope({ threadId: undefined });
+      const result = await router.handleInboundMessage(envelope);
+      expect(result.handled).toBe(true);
+      expect(result.spawned).toBe(true);
+      expect(result.threadId).toBeDefined();
+      expect(result.threadId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      expect(envelope.message.threadId).toBe(result.threadId);
+    });
+
+    it('calls spawnManager for first-contact messages', async () => {
       const envelope = makeEnvelope({ threadId: undefined });
       await router.handleInboundMessage(envelope);
-      expect(mockSpawnManager.evaluate).not.toHaveBeenCalled();
+      expect(mockSpawnManager.evaluate).toHaveBeenCalledOnce();
     });
   });
 

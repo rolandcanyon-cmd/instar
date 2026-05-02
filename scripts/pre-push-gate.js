@@ -130,7 +130,7 @@ try {
   const { execSync } = await import('node:child_process');
   // Get files changed since the remote tracking branch
   const remoteBranch = execSync('git rev-parse --abbrev-ref @{u} 2>/dev/null || echo origin/main', { encoding: 'utf-8' }).trim();
-  const changedFiles = execSync(`git diff --name-only ${remoteBranch}...HEAD 2>/dev/null || git diff --name-only HEAD~1`, { encoding: 'utf-8' })
+  const changedFiles = execSync(`git diff --name-only ${remoteBranch}...HEAD 2>/dev/null || git diff --name-only HEAD~1 2>/dev/null`, { encoding: 'utf-8' })
     .trim()
     .split('\n')
     .filter(Boolean);
@@ -201,6 +201,98 @@ try {
   }
 } catch {
   // Git commands may fail in CI or detached HEAD — skip gracefully
+}
+
+// ── 5. Side-effects review artifact ───────────────────────────────────
+// If the upgrade notes claim a fix or feature (anything that would require
+// an Evidence section), a matching side-effects review artifact must exist
+// in upgrades/side-effects/. This enforces the /instar-dev process at push
+// time — the pre-commit hook catches it earlier per-commit, this is the
+// release-level re-check.
+//
+// Skipped in CI: contributor branches may be based on a commit predating the
+// artifact being added to main. The enforcement point is the local pre-push
+// hook; CI can't retroactively add artifacts.
+if (!process.env.CI) {
+  const FIX_PATTERNS = [
+    /\bfix(es|ed|ing)?\b/i,
+    /\bbug(fix)?\b/i,
+    /\bregression\b/i,
+    /\bresolves?\b/i,
+    /\bresolved\b/i,
+    /\bcrashes?\b/i,
+    /\bcrashed\b/i,
+    /\bcrashing\b/i,
+    /\bbroken\b/i,
+    /\bstall(s|ed|ing)?\b/i,
+    /\bfeature\b/i,
+    /\badd(s|ed|ing)?\b/i,
+    /\bnew\b/i,
+  ];
+
+  const guidePath = versionedGuideExists ? versionedGuidePath : nextPath;
+  if (fs.existsSync(guidePath)) {
+    const guideContent = fs.readFileSync(guidePath, 'utf-8');
+    // Extract "## What Changed" section
+    const whatChangedMatch = guideContent.match(/## What Changed\s*([\s\S]*?)(?=\n##\s|$)/);
+    const whatChanged = whatChangedMatch ? whatChangedMatch[1] : '';
+
+    const qualifies = FIX_PATTERNS.some((p) => p.test(whatChanged));
+
+    if (qualifies) {
+      const sideEffectsDir = path.join(ROOT, 'upgrades', 'side-effects');
+      const artifactName = versionedGuideExists ? `${version}.md` : null;
+      let artifactFound = false;
+
+      if (fs.existsSync(sideEffectsDir)) {
+        const files = fs.readdirSync(sideEffectsDir).filter((f) => f.endsWith('.md'));
+        if (artifactName) {
+          artifactFound = files.includes(artifactName);
+        } else {
+          // For NEXT.md, any fresh artifact from the last 24h counts.
+          // The expectation is that during release cut, NEXT.md -> <version>.md
+          // rename will pair with the artifact rename as well.
+          const recent = files.filter((f) => {
+            const stat = fs.statSync(path.join(sideEffectsDir, f));
+            return Date.now() - stat.mtimeMs < 24 * 60 * 60 * 1000;
+          });
+          artifactFound = recent.length > 0;
+        }
+      }
+
+      if (!artifactFound) {
+        errors.push(
+          `Upgrade notes claim a fix/feature but no matching side-effects review artifact found in upgrades/side-effects/. ` +
+          `Every change qualifying for review must ship with an artifact produced via the /instar-dev skill. ` +
+          `See skills/instar-dev/SKILL.md and docs/signal-vs-authority.md.`
+        );
+      }
+    }
+  }
+}
+
+// ── Destructive-tool containment lint (full repo) ─────────────────────
+//
+// Runs the lint-no-direct-destructive AST scanner across the whole repo on
+// every push. Pre-commit only runs it over staged files; pre-push catches
+// commits that landed before the rule existed (or before the marker scheme
+// expired). Fails the push on any violation.
+//
+// Wired here rather than in .husky/pre-push because the husky hook files
+// are managed by a sandboxed flow that this gate can extend.
+
+try {
+  const { spawnSync } = await import('node:child_process');
+  const result = spawnSync(
+    process.execPath,
+    [path.join(ROOT, 'scripts/lint-no-direct-destructive.js')],
+    { cwd: ROOT, stdio: ['ignore', 'inherit', 'inherit'] },
+  );
+  if (result.status !== 0) {
+    errors.push('lint-no-direct-destructive: violations detected (see output above)');
+  }
+} catch (err) {
+  warnings.push(`lint-no-direct-destructive failed to run: ${err.message}`);
 }
 
 // ── Report ────────────────────────────────────────────────────────────

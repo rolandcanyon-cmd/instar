@@ -21,6 +21,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { EmbeddingProvider } from '../../src/memory/EmbeddingProvider.js';
 import { VectorSearch } from '../../src/memory/VectorSearch.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 type Database = import('better-sqlite3').Database;
 
@@ -58,7 +59,7 @@ async function createTestDb(): Promise<TestSetup> {
     db,
     cleanup: () => {
       db.close();
-      fs.rmSync(dir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/vector-search.test.ts:62' });
     },
   };
 }

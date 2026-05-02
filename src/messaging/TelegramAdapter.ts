@@ -26,6 +26,13 @@ import { MessagingEventBus } from './shared/MessagingEventBus.js';
 import { CallbackRegistry, isAllowedButtonKey } from '../core/CallbackRegistry.js';
 import type { DetectedPrompt } from '../monitoring/PromptGate.js';
 import { sanitizeForPrompt } from '../monitoring/SessionRecovery.js';
+import { formatForTelegram, type FormatMode } from './TelegramMarkdownFormatter.js';
+import {
+  recordFormatApplied,
+  recordFormatLintIssue,
+  recordFormatFallbackPlainRetry,
+} from './telegramFormatMetrics.js';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 export interface TelegramConfig {
   /** Bot token from @BotFather */
@@ -57,6 +64,15 @@ export interface TelegramConfig {
     /** Timeout in seconds for relay responses (default: 300 = 5 min) */
     relayTimeoutSeconds?: number;
   };
+  /**
+   * Hot-reloadable accessor for the Telegram format mode. Returning a falsy
+   * value or `'legacy-passthrough'` preserves pre-PR2 behavior (byte-for-byte
+   * passthrough, caller-supplied parse_mode honored). See
+   * docs/specs/TELEGRAM-MARKDOWN-RENDERER-SPEC.md.
+   */
+  getFormatMode?: () => FormatMode | undefined;
+  /** Hot-reloadable accessor for lint-strict mode. */
+  getLintStrict?: () => boolean | undefined;
 }
 
 /** Tracks a pending text reply for a Prompt Gate relay (no-button prompts) */
@@ -109,6 +125,8 @@ interface TelegramUpdate {
       mime_type?: string;
       file_size?: number;
     };
+    forum_topic_created?: { name: string };
+    forum_topic_edited?: { name?: string };
   };
   callback_query?: {
     id: string;
@@ -270,6 +288,11 @@ export class TelegramAdapter implements MessagingAdapter {
   private lastUpdateId = 0;
   private startedAt: Date | null = null;
   private consecutivePollErrors = 0;
+  // Diagnostics surfaced via getStatus() so health probes can explain WHY polling stopped.
+  private lastPollError: string | null = null;
+  private fatalPollReason: '401' | 'network' | null = null;
+  private pollStoppedAt: Date | null = null;
+  private pending401Retry = false;
 
   // Forum detection — if the chat is not a forum, skip all topic operations
   private notAForum = false;
@@ -299,7 +322,7 @@ export class TelegramAdapter implements MessagingAdapter {
   private pendingPromises: Map<number, PendingPromise> = new Map(); // key = topicId
 
   // Topic message callback — fires on every incoming topic message
-  public onTopicMessage: ((message: Message) => void) | null = null;
+  public onTopicMessage: ((message: Message) => void | Promise<void>) | null = null;
 
   // Session management callbacks (wired by server.ts)
   public onInterruptSession: ((sessionName: string) => Promise<boolean>) | null = null;
@@ -644,12 +667,21 @@ export class TelegramAdapter implements MessagingAdapter {
     this.polling = true;
     this.startedAt = new Date();
     this.consecutivePollErrors = 0;
+    this.lastPollError = null;
+    this.fatalPollReason = null;
+    this.pollStoppedAt = null;
+    this.pending401Retry = false;
 
     // Ensure Lifeline topic exists (auto-recreate if deleted)
     await this.ensureLifelineTopic();
 
     console.log(`[telegram] Starting long-polling...`);
     this.poll();
+
+    // Resolve any topic names still using the fallback "topic-NNNN" pattern
+    this.resolveUnknownTopicNames().catch(err => {
+      console.warn(`[telegram] Topic name resolution failed: ${err}`);
+    });
 
     // Start notification batcher if configured
     if (this.batcher) {
@@ -1555,6 +1587,74 @@ export class TelegramAdapter implements MessagingAdapter {
     return this.topicToName.get(topicId) ?? null;
   }
 
+  /**
+   * Actively resolve a topic's name from Telegram by sending a temporary probe message
+   * that replies to the topic's service message (whose message_id = topic_id).
+   * The API response includes reply_to_message.forum_topic_created.name.
+   * The probe message is deleted immediately after.
+   */
+  async resolveTopicName(topicId: number): Promise<string | null> {
+    if (this.notAForum) return null;
+    try {
+      // Send a temp message replying to the topic creation service message
+      const result = await this.apiCall('sendMessage', {
+        chat_id: this.config.chatId,
+        text: '.', // minimal probe message — deleted immediately after
+        message_thread_id: topicId,
+        reply_to_message_id: topicId,
+      }) as { message_id: number; reply_to_message?: { forum_topic_created?: { name: string } } };
+
+      // Extract topic name from the reply target
+      const name = result.reply_to_message?.forum_topic_created?.name;
+
+      // Delete the probe message immediately
+      try {
+        await this.apiCall('deleteMessage', {
+          chat_id: this.config.chatId,
+          message_id: result.message_id,
+        });
+      } catch {
+        // @silent-fallback-ok — best-effort cleanup
+      }
+
+      if (name) {
+        this.topicToName.set(topicId, name);
+        this.saveRegistry();
+        console.log(`[telegram] Resolved topic name: ${topicId} → "${name}"`);
+        return name;
+      }
+    } catch (err) {
+      const errStr = String(err);
+      console.log(`[telegram] Could not resolve topic name for ${topicId}: ${err}`);
+      // If the topic was deleted, mark it so we don't retry resolution on every startup
+      if (errStr.includes('message thread not found') || errStr.includes('TOPIC_DELETED')) {
+        this.topicToName.set(topicId, `[deleted] topic-${topicId}`);
+        this.saveRegistry();
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Resolve all topic names that are still using the fallback "topic-NNNN" pattern.
+   * Called on startup to backfill names for topics created before name tracking.
+   */
+  async resolveUnknownTopicNames(): Promise<void> {
+    const unknowns: number[] = [];
+    for (const [topicId, name] of this.topicToName) {
+      if (/^topic-\d+$/.test(name)) {
+        unknowns.push(topicId);
+      }
+    }
+    if (unknowns.length === 0) return;
+    console.log(`[telegram] Resolving ${unknowns.length} unknown topic names...`);
+    for (const topicId of unknowns) {
+      await this.resolveTopicName(topicId);
+      // Small delay to avoid hitting rate limits
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+
   // ── Topic Purpose Management ─────────────────────────────────
 
   /**
@@ -2114,6 +2214,10 @@ export class TelegramAdapter implements MessagingAdapter {
     pendingStalls: number;
     pendingPromises: number;
     topicMappings: number;
+    lastError: string | null;
+    consecutivePollErrors: number;
+    fatalReason: '401' | 'network' | null;
+    stoppedAt: string | null;
   } {
     const stallStatus = this.sharedStallDetector
       ? this.sharedStallDetector.getStatus()
@@ -2125,6 +2229,10 @@ export class TelegramAdapter implements MessagingAdapter {
       pendingStalls: stallStatus.pendingStalls,
       pendingPromises: stallStatus.pendingPromises,
       topicMappings: this.topicToSession.size,
+      lastError: this.lastPollError,
+      consecutivePollErrors: this.consecutivePollErrors,
+      fatalReason: this.fatalPollReason,
+      stoppedAt: this.pollStoppedAt ? this.pollStoppedAt.toISOString() : null,
     };
   }
 
@@ -2733,7 +2841,7 @@ export class TelegramAdapter implements MessagingAdapter {
           fs.writeFileSync(tmpPath, kept.join('\n') + '\n');
           fs.renameSync(tmpPath, this.messageLogPath);
         } catch (rotateErr) {
-          try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+          try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/messaging/TelegramAdapter.ts:2844' }); } catch { /* ignore */ }
           throw rotateErr;
         }
         console.log(`[telegram] Rotated message log: ${lines.length} -> ${kept.length} lines`);
@@ -2978,7 +3086,7 @@ export class TelegramAdapter implements MessagingAdapter {
         fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
         fs.renameSync(tmpPath, this.registryPath);
       } catch (writeErr) {
-        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/messaging/TelegramAdapter.ts:3090' }); } catch { /* ignore */ }
         throw writeErr;
       }
     } catch (err) {
@@ -3015,7 +3123,7 @@ export class TelegramAdapter implements MessagingAdapter {
         fs.writeFileSync(tmpPath, JSON.stringify({ lastUpdateId: this.lastUpdateId }));
         fs.renameSync(tmpPath, this.offsetPath);
       } catch (writeErr) {
-        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/messaging/TelegramAdapter.ts:3128' }); } catch { /* ignore */ }
         throw writeErr;
       }
     } catch (err) {
@@ -3059,12 +3167,30 @@ export class TelegramAdapter implements MessagingAdapter {
     } catch (err) {
       this.consecutivePollErrors++;
       const errMsg = err instanceof Error ? err.message : String(err);
+      this.lastPollError = errMsg;
 
       // Check for fatal errors that require restart
       if (errMsg.includes('401') || errMsg.includes('Unauthorized')) {
-        console.error(`[telegram] FATAL: Bot token is invalid. Stopping polling.`);
-        this.polling = false;
-        return;
+        // Single retry after 30s — distinguishes transient 401s from genuine token revocation.
+        // Without this, a one-off auth blip permanently kills polling until the agent restarts.
+        if (!this.pending401Retry) {
+          this.pending401Retry = true;
+          const tokenPrefix = this.config.token ? this.config.token.slice(0, 6) : 'unknown';
+          console.warn(`[telegram] 401 Unauthorized (token=${tokenPrefix}…). Retrying once in 30s before declaring fatal.`);
+          await new Promise(r => setTimeout(r, 30_000));
+          // Fall through — schedule next poll. If second attempt also 401, the !this.pending401Retry
+          // check will be false and we'll go fatal.
+        } else {
+          const tokenPrefix = this.config.token ? this.config.token.slice(0, 6) : 'unknown';
+          console.error(`[telegram] FATAL: Bot token is invalid (token=${tokenPrefix}…). Stopping polling.`);
+          this.polling = false;
+          this.fatalPollReason = '401';
+          this.pollStoppedAt = new Date();
+          return;
+        }
+      } else {
+        // Non-401 errors clear any pending 401 retry state
+        this.pending401Retry = false;
       }
 
       // Exponential backoff on consecutive errors
@@ -3075,6 +3201,13 @@ export class TelegramAdapter implements MessagingAdapter {
       } else {
         console.error(`[telegram] Poll error: ${errMsg}`);
       }
+    }
+
+    // Successful loop iteration (or non-fatal error): if we were in 401 retry and got here
+    // without re-entering the 401 branch, the retry succeeded.
+    if (this.consecutivePollErrors === 0) {
+      this.pending401Retry = false;
+      this.lastPollError = null;
     }
 
     // Schedule next poll
@@ -3104,14 +3237,26 @@ export class TelegramAdapter implements MessagingAdapter {
     const numericTopicId = msg.message_thread_id ?? GENERAL_TOPIC_ID;
     const topicId = numericTopicId.toString();
 
-    // Auto-capture topic name from reply_to_message
-    if (msg.reply_to_message?.forum_topic_created?.name) {
+    // Auto-capture topic name from multiple sources:
+    // 1. Service message when topic is created (msg.forum_topic_created)
+    // 2. Service message when topic is renamed (msg.forum_topic_edited)
+    // 3. Reply to the topic creation service message (msg.reply_to_message.forum_topic_created)
+    const detectedName =
+      msg.forum_topic_created?.name ??
+      msg.forum_topic_edited?.name ??
+      msg.reply_to_message?.forum_topic_created?.name;
+    if (detectedName) {
       const currentName = this.topicToName.get(numericTopicId);
-      const realName = msg.reply_to_message.forum_topic_created.name;
-      if (!currentName || /^topic-\d+$/.test(currentName)) {
-        this.topicToName.set(numericTopicId, realName);
+      if (!currentName || /^topic-\d+$/.test(currentName) || msg.forum_topic_edited?.name) {
+        this.topicToName.set(numericTopicId, detectedName);
         this.saveRegistry();
+        console.log(`[telegram] Captured topic name: ${numericTopicId} → "${detectedName}"`);
       }
+    }
+
+    // Service messages (topic created/edited) have no user content — skip further processing
+    if (msg.forum_topic_created || msg.forum_topic_edited) {
+      return;
     }
 
     // Handle voice messages
@@ -3226,9 +3371,11 @@ export class TelegramAdapter implements MessagingAdapter {
     // Fire topic message callback (always fires — General topic falls back to ID 1)
     if (this.onTopicMessage) {
       try {
-        this.onTopicMessage(message);
+        Promise.resolve(this.onTopicMessage(message)).catch(err => {
+          console.error(`[telegram] Topic message handler error: ${err}`);
+        });
       } catch (err) {
-        console.error(`[telegram] Topic message handler error: ${err}`);
+        console.error(`[telegram] Topic message handler sync error: ${err}`);
       }
     }
 
@@ -3324,7 +3471,7 @@ export class TelegramAdapter implements MessagingAdapter {
       await this.sendToTopic(topicId, replyText).catch(() => {});
     } finally {
       // Clean up voice file after processing
-      try { fs.unlinkSync(filepath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(filepath, { operation: 'src/messaging/TelegramAdapter.ts:3477' }); } catch { /* ignore */ }
     }
   }
 
@@ -3862,6 +4009,14 @@ export class TelegramAdapter implements MessagingAdapter {
   }
 
   private async apiCall(method: string, params: Record<string, unknown>, retryCount: number = 0): Promise<unknown> {
+    // PR2: run the formatter on sendMessage / editMessageText when a non-legacy
+    // mode is configured. Legacy-passthrough (default) preserves the caller's
+    // parse_mode byte-for-byte. See docs/specs/TELEGRAM-MARKDOWN-RENDERER-SPEC.md.
+    const sendParams = applyTelegramFormatter(
+      method,
+      params,
+      this.config.getFormatMode?.(),
+    );
     const url = `https://api.telegram.org/bot${this.config.token}/${method}`;
     const safeUrl = `https://api.telegram.org/bot[REDACTED]/${method}`;
 
@@ -3875,7 +4030,7 @@ export class TelegramAdapter implements MessagingAdapter {
       response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(params),
+        body: JSON.stringify(sendParams.outgoingParams),
         signal: controller.signal,
       });
     } finally {
@@ -3900,6 +4055,29 @@ export class TelegramAdapter implements MessagingAdapter {
         }
       }
       const text = await response.text();
+      // Plain-retry fallback on 400 for formatted sends. See spec
+      // "Plain-retry fallback". Only applies to sendMessage — editMessageText
+      // cannot be split/retried identically (TELEGRAM_EDIT_TOO_LONG).
+      if (
+        response.status === 400 &&
+        method === 'sendMessage' &&
+        sendParams.didFormat &&
+        !sendParams.isPlainRetry
+      ) {
+        recordFormatFallbackPlainRetry();
+        const retryParams: Record<string, unknown> = {
+          ...sendParams.originalParams,
+          parse_mode: undefined,
+        };
+        // Suffix idempotency key so downstream dedup treats this as fresh.
+        if (typeof retryParams._idempotencyKey === 'string') {
+          retryParams._idempotencyKey = `${retryParams._idempotencyKey}:fallback-plain`;
+        }
+        // Mark so we don't recurse.
+        (retryParams as { _isPlainRetry?: boolean })._isPlainRetry = true;
+        delete retryParams.parse_mode;
+        return this.apiCall(method, retryParams, retryCount);
+      }
       throw new Error(`Telegram API error ${safeUrl} (${response.status}): ${text}`);
     }
 
@@ -3910,4 +4088,69 @@ export class TelegramAdapter implements MessagingAdapter {
 
     return data.result;
   }
+}
+
+/**
+ * Shared formatter wire-up used by both TelegramAdapter.apiCall and
+ * TelegramLifeline.apiCall. Pure function for testability.
+ *
+ * For non-send methods, or when mode is undefined / `'legacy-passthrough'`,
+ * returns params unchanged. For `sendMessage` / `editMessageText` in a
+ * formatting mode, runs the formatter on `params.text` and overrides
+ * `params.parse_mode` with the formatter's output.
+ *
+ * Callers may opt out per-call by passing `params._isPlainRetry = true`
+ * (internal flag for the 400 retry path).
+ */
+export function applyTelegramFormatter(
+  method: string,
+  params: Record<string, unknown>,
+  configMode: FormatMode | undefined,
+): {
+  outgoingParams: Record<string, unknown>;
+  originalParams: Record<string, unknown>;
+  didFormat: boolean;
+  isPlainRetry: boolean;
+} {
+  const isPlainRetry = (params as { _isPlainRetry?: boolean })._isPlainRetry === true;
+  // Strip internal flags before sending to Bot API.
+  const stripped: Record<string, unknown> = { ...params };
+  delete (stripped as { _isPlainRetry?: boolean })._isPlainRetry;
+  delete (stripped as { _idempotencyKey?: unknown })._idempotencyKey;
+
+  const isSendMethod = method === 'sendMessage' || method === 'editMessageText';
+  const mode: FormatMode = configMode ?? 'legacy-passthrough';
+
+  if (
+    !isSendMethod ||
+    mode === 'legacy-passthrough' ||
+    isPlainRetry ||
+    typeof stripped.text !== 'string'
+  ) {
+    return {
+      outgoingParams: stripped,
+      originalParams: params,
+      didFormat: false,
+      isPlainRetry,
+    };
+  }
+
+  const result = formatForTelegram(stripped.text as string, mode);
+  recordFormatApplied(result.modeApplied);
+  for (const issue of result.lintIssues) {
+    recordFormatLintIssue(issue);
+  }
+  const outgoing: Record<string, unknown> = { ...stripped, text: result.text };
+  if (result.parseMode !== undefined) {
+    outgoing.parse_mode = result.parseMode;
+  } else {
+    // legacy-passthrough returns parseMode undefined; fall back to caller's
+    // explicit parse_mode if any (preserved above via ...stripped).
+  }
+  return {
+    outgoingParams: outgoing,
+    originalParams: params,
+    didFormat: true,
+    isPlainRetry: false,
+  };
 }

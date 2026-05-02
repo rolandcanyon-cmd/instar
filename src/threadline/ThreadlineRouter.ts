@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 import type { MessageRouter } from '../messaging/MessageRouter.js';
 import type { SpawnRequestManager, SpawnResult } from '../messaging/SpawnRequestManager.js';
 import type { MessageStore } from '../messaging/MessageStore.js';
+import type { IMessageDelivery } from '../messaging/types.js';
 import type { MessageEnvelope, AgentMessage } from '../messaging/types.js';
 import type { ThreadResumeMap, ThreadResumeEntry, ThreadState } from './ThreadResumeMap.js';
 import type { AutonomyGate } from './AutonomyGate.js';
@@ -37,9 +38,45 @@ export interface ThreadlineRouterConfig {
   maxHistoryMessages: number;
 }
 
+/**
+ * Ledger event fired by the router on thread lifecycle transitions.
+ * Consumed by the Integrated-Being SharedStateLedger via registerLedgerEmitters().
+ *
+ * SIGNAL-ONLY by design — the router never blocks on ledger write failures.
+ */
+export interface ThreadlineLedgerEvent {
+  kind: 'thread-opened' | 'thread-closed' | 'thread-abandoned';
+  threadId: string;
+  remoteAgent: string;
+  subject: string;
+  /** Trust-tier source — autonomy level snapshot for trust mapping. */
+  autonomyLevel?: string;
+  /** ISO timestamp of the event. */
+  timestamp: string;
+}
+
+/**
+ * Transport-level authentication kind for a relay message.
+ *
+ * Distinguishes how the sender's identity was established on the wire:
+ * - `verified`: end-to-end cryptographic authentication of this specific message
+ * - `plaintext-tofu`: trust-on-first-use over plaintext transport (not hijack-safe)
+ * - `unauthenticated`: no identity verification (rejected upstream in most paths)
+ *
+ * This is orthogonal to `AgentTrustLevel`, which is who the sender is in the trust DB.
+ * Affinity features that assume the sender can't be impersonated on the wire
+ * MUST gate on `kind === 'verified'`.
+ */
+export type RelayTrustLevel =
+  | { kind: 'verified'; senderFingerprint: string }
+  | { kind: 'plaintext-tofu'; senderFingerprint: string }
+  | { kind: 'unauthenticated' };
+
 /** Relay context passed from InboundMessageGate when message arrives via relay */
 export interface RelayMessageContext {
-  /** Sender's cryptographic fingerprint */
+  /** Transport-level authentication kind — see RelayTrustLevel. */
+  trust: RelayTrustLevel;
+  /** Sender's cryptographic fingerprint (display/key use; for authenticated-only use, read trust.senderFingerprint) */
   senderFingerprint: string;
   /** Sender's display name */
   senderName: string;
@@ -65,6 +102,10 @@ export interface ThreadlineHandleResult {
   spawned?: boolean;
   /** Whether an existing session was resumed */
   resumed?: boolean;
+  /** Whether the message was injected directly into a live session
+   *  (PR-4: avoids the overhead of spawning/resuming when a session is
+   *  already running for this thread). */
+  injected?: boolean;
   /** The tmux session name handling this thread */
   sessionName?: string;
   /** Error message if handling failed */
@@ -78,6 +119,31 @@ export interface ThreadlineHandleResult {
 // ── Constants ───────────────────────────────────────────────────
 
 const DEFAULT_MAX_HISTORY = 20;
+
+/**
+ * Receiver-side session affinity (§4.1).
+ *
+ * When a verified peer sends us a threadless message, we want to reuse the
+ * threadId we minted for their last recent message rather than spawning a
+ * fresh session for every follow-up. Map is process-local, never persisted,
+ * and read/written ONLY when `relayContext.trust.kind === 'verified'` —
+ * plaintext-tofu paths cannot assert the sender is the same entity across
+ * messages, so reusing a thread would open a hijack vector.
+ *
+ * Sliding TTL: entry expires if not used within this window.
+ * Absolute TTL: entry expires this long after its first use regardless of
+ * subsequent activity — caps exposure of any single reused thread.
+ * LRU cap: bounds memory under adversarial peer churn.
+ */
+const RECEIVER_AFFINITY_SLIDING_TTL_MS = 600_000; // 10 minutes
+const RECEIVER_AFFINITY_ABSOLUTE_TTL_MS = 7_200_000; // 2 hours
+const RECEIVER_AFFINITY_MAX = 1000;
+
+interface ReceiverAffinityEntry {
+  threadId: string;
+  firstUsedAt: number;
+  lastUsedAt: number;
+}
 
 const THREAD_SPAWN_PROMPT_TEMPLATE = `You are continuing a threaded conversation with {remote_agent}.
 
@@ -104,9 +170,32 @@ export class ThreadlineRouter {
   private readonly messageStore: MessageStore;
   private readonly config: ThreadlineRouterConfig;
   private readonly autonomyGate: AutonomyGate | null;
+  /** Optional live-session injection delivery (PR-4). When set, the router
+   *  will try to inject inbound messages directly into an already-running
+   *  session for the thread before falling back to spawn/resume. */
+  private readonly messageDelivery: IMessageDelivery | null;
+
+  /** Optional ledger-event sink (Integrated-Being v1). Signal-only. */
+  private readonly onLedgerEvent: ((evt: ThreadlineLedgerEvent) => void) | null;
 
   /** Track in-flight spawn requests to prevent concurrent spawns for the same thread */
   private readonly pendingSpawns = new Set<string>();
+
+  /**
+   * Verified-path session affinity (§4.1 D3 fix).
+   *
+   * Maps a verified peer's senderFingerprint → the threadId we last used
+   * for them, with sliding + absolute TTLs. Only read/written when
+   * `relayContext.trust.kind === 'verified'`. Uses insertion-order iteration
+   * as LRU proxy: setting an existing key deletes-then-sets to bump it to
+   * the tail, and eviction at cap drops the head.
+   *
+   * Process-local, never persisted. Confirmed by test asserting no files
+   * appear under `.instar/` during a send burst.
+   */
+  private readonly recentThreadByPeer = new Map<string, ReceiverAffinityEntry>();
+  /** Test seam: override `Date.now()` for deterministic TTL tests. */
+  private readonly nowFn: () => number;
 
   constructor(
     messageRouter: MessageRouter,
@@ -115,6 +204,9 @@ export class ThreadlineRouter {
     messageStore: MessageStore,
     config: Partial<ThreadlineRouterConfig> & Pick<ThreadlineRouterConfig, 'localAgent' | 'localMachine'>,
     autonomyGate?: AutonomyGate | null,
+    messageDelivery?: IMessageDelivery | null,
+    onLedgerEvent?: (evt: ThreadlineLedgerEvent) => void,
+    nowFn?: () => number,
   ) {
     this.messageRouter = messageRouter;
     this.spawnManager = spawnManager;
@@ -125,6 +217,110 @@ export class ThreadlineRouter {
       ...config,
     };
     this.autonomyGate = autonomyGate ?? null;
+    this.messageDelivery = messageDelivery ?? null;
+    this.onLedgerEvent = onLedgerEvent ?? null;
+    this.nowFn = nowFn ?? (() => Date.now());
+  }
+
+  /**
+   * Look up a recent affinity entry for a verified peer. Returns the threadId
+   * iff an entry exists AND both sliding + absolute TTLs are satisfied.
+   * Expired entries are evicted as a side-effect. Non-verified trust kinds
+   * short-circuit to null — the map is untouched.
+   */
+  private peekAffinity(relayContext: RelayMessageContext | undefined): string | null {
+    if (!relayContext || relayContext.trust.kind !== 'verified') return null;
+    const fingerprint = relayContext.trust.senderFingerprint;
+    const entry = this.recentThreadByPeer.get(fingerprint);
+    if (!entry) return null;
+    const now = this.nowFn();
+    if (now - entry.firstUsedAt > RECEIVER_AFFINITY_ABSOLUTE_TTL_MS) {
+      this.recentThreadByPeer.delete(fingerprint);
+      return null;
+    }
+    if (now - entry.lastUsedAt > RECEIVER_AFFINITY_SLIDING_TTL_MS) {
+      this.recentThreadByPeer.delete(fingerprint);
+      return null;
+    }
+    return entry.threadId;
+  }
+
+  /**
+   * Record a (fingerprint → threadId) affinity for a verified peer. Bumps
+   * LRU recency; evicts oldest entries when over cap. Non-verified trust
+   * kinds are no-ops.
+   */
+  private recordAffinity(relayContext: RelayMessageContext | undefined, threadId: string): void {
+    if (!relayContext || relayContext.trust.kind !== 'verified') return;
+    const fingerprint = relayContext.trust.senderFingerprint;
+    const now = this.nowFn();
+    const existing = this.recentThreadByPeer.get(fingerprint);
+    if (existing && existing.threadId === threadId) {
+      // Refresh lastUsedAt + bump LRU by delete-then-set.
+      this.recentThreadByPeer.delete(fingerprint);
+      this.recentThreadByPeer.set(fingerprint, {
+        threadId,
+        firstUsedAt: existing.firstUsedAt,
+        lastUsedAt: now,
+      });
+    } else {
+      this.recentThreadByPeer.delete(fingerprint);
+      this.recentThreadByPeer.set(fingerprint, {
+        threadId,
+        firstUsedAt: now,
+        lastUsedAt: now,
+      });
+    }
+    // LRU eviction: drop oldest until under cap.
+    while (this.recentThreadByPeer.size > RECEIVER_AFFINITY_MAX) {
+      const oldestKey = this.recentThreadByPeer.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.recentThreadByPeer.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Test seam: inspect the affinity map. Returns a snapshot; callers must
+   * not mutate. Not intended for production use.
+   */
+  getAffinitySnapshotForTests(): ReadonlyMap<string, ReceiverAffinityEntry> {
+    return new Map(this.recentThreadByPeer);
+  }
+
+  /** Fire a ledger event swallowing any exception (signal-only). */
+  private emitLedger(evt: ThreadlineLedgerEvent): void {
+    if (!this.onLedgerEvent) return;
+    try { this.onLedgerEvent(evt); } catch { /* signal-only */ }
+  }
+
+  /**
+   * Sweep thread-resume entries older than the TTL and emit synthetic
+   * `thread-abandoned` ledger events. Bounded, idempotent via dedupKey on
+   * the ledger side.
+   */
+  sweepAbandonedThreads(ttlMs: number = 24 * 60 * 60 * 1000): number {
+    if (!this.onLedgerEvent) return 0;
+    let emitted = 0;
+    try {
+      const all = this.threadResumeMap.listActive?.() ?? [];
+      const cutoff = Date.now() - ttlMs;
+      for (const { threadId, entry } of all) {
+        if (entry.state === 'active' || entry.state === 'idle') {
+          const last = Date.parse(entry.lastAccessedAt);
+          if (Number.isFinite(last) && last < cutoff) {
+            this.emitLedger({
+              kind: 'thread-abandoned',
+              threadId,
+              remoteAgent: entry.remoteAgent,
+              subject: entry.subject,
+              timestamp: new Date().toISOString(),
+            });
+            emitted += 1;
+          }
+        }
+      }
+    } catch { /* best effort */ }
+    return emitted;
   }
 
   /**
@@ -138,17 +334,29 @@ export class ThreadlineRouter {
   async handleInboundMessage(envelope: MessageEnvelope, relayContext?: RelayMessageContext): Promise<ThreadlineHandleResult> {
     const { message } = envelope;
 
-    // Only handle messages with a threadId that are addressed to us
-    if (!message.threadId) {
-      return { handled: false };
-    }
-
     // Only handle messages from other agents (not self-delivery)
     if (message.from.agent === this.config.localAgent) {
       return { handled: false };
     }
 
+    // First-contact: if the sender didn't provide a threadId, try to reuse
+    // the last threadId we minted for this verified peer (§4.1 D3 fix).
+    // Falls back to minting fresh on miss, plaintext trust kinds, or TTL expiry.
+    if (!message.threadId) {
+      const affinityThreadId = this.peekAffinity(relayContext);
+      if (affinityThreadId) {
+        console.log(`[ThreadlineRouter] Reused affinity threadId ${affinityThreadId} for verified peer (msg id: ${message.id})`);
+        message.threadId = affinityThreadId;
+      } else {
+        const mintedThreadId = crypto.randomUUID();
+        console.log(`[ThreadlineRouter] Minted new threadId ${mintedThreadId} for first-contact message from ${message.from.agent} (id: ${message.id})`);
+        message.threadId = mintedThreadId;
+      }
+    }
+
     const threadId = message.threadId;
+    // Record affinity (no-op for non-verified trust kinds).
+    this.recordAffinity(relayContext, threadId);
 
     // Prevent concurrent spawns for the same thread
     if (this.pendingSpawns.has(threadId)) {
@@ -193,6 +401,16 @@ export class ThreadlineRouter {
       // Check for existing resume entry
       const existingEntry = this.threadResumeMap.get(threadId);
 
+      // PR-4: If we have a live-session delivery path AND the thread has a
+      // resume entry pointing at a sessionName that is currently alive, try
+      // to inject the message directly into the running session instead of
+      // spawning a fresh Claude process. Fall through to resume/spawn on
+      // failure.
+      if (existingEntry && this.messageDelivery) {
+        const injected = await this.tryInjectIntoLiveSession(threadId, existingEntry, envelope);
+        if (injected) return injected;
+      }
+
       if (existingEntry) {
         return await this.resumeThread(threadId, existingEntry, envelope, relayContext);
       } else {
@@ -230,9 +448,23 @@ export class ThreadlineRouter {
 
   /**
    * Notify the router that a thread has been resolved (conversation complete).
+   *
+   * Emits a `thread-closed` ledger event wrapped in try/finally so the ledger
+   * emitter fires even if the resolve() call itself throws. Signal-only.
    */
   onThreadResolved(threadId: string): void {
-    this.threadResumeMap.resolve(threadId);
+    const entry = this.threadResumeMap.get(threadId);
+    try {
+      this.threadResumeMap.resolve(threadId);
+    } finally {
+      this.emitLedger({
+        kind: 'thread-closed',
+        threadId,
+        remoteAgent: entry?.remoteAgent ?? 'unknown',
+        subject: entry?.subject ?? '(unknown)',
+        timestamp: new Date().toISOString(),
+      });
+    }
   }
 
   /**
@@ -392,12 +624,65 @@ export class ThreadlineRouter {
 
     this.threadResumeMap.save(threadId, newEntry);
 
+    // Integrated-Being: emit thread-opened ledger event (signal-only).
+    this.emitLedger({
+      kind: 'thread-opened',
+      threadId,
+      remoteAgent: message.from.agent,
+      subject: message.subject,
+      timestamp: new Date().toISOString(),
+    });
+
     return {
       handled: true,
       threadId,
       spawned: true,
       sessionName: newEntry.sessionName,
     };
+  }
+
+  // ── Private: Inject into live session (PR-4) ────────────────
+
+  /**
+   * Attempt to deliver an inbound message directly into an already-running
+   * session for this thread, avoiding the spawn/resume path entirely.
+   * Returns a successful ThreadlineHandleResult on success, or null to
+   * signal the caller should fall back to resume/spawn.
+   */
+  private async tryInjectIntoLiveSession(
+    threadId: string,
+    entry: ThreadResumeEntry,
+    envelope: MessageEnvelope,
+  ): Promise<ThreadlineHandleResult | null> {
+    if (!this.messageDelivery) return null;
+    if (!entry.sessionName) return null;
+
+    try {
+      const result = await this.messageDelivery.deliverToSession(entry.sessionName, envelope);
+      if (!result.success) {
+        console.log(`[ThreadlineRouter] Live-session injection failed for thread ${threadId} (${entry.sessionName}): ${result.failureReason}. Falling back to resume/spawn.`);
+        return null;
+      }
+
+      // Injection succeeded — update the resume map entry
+      this.threadResumeMap.save(threadId, {
+        ...entry,
+        state: 'active',
+        lastAccessedAt: new Date().toISOString(),
+        messageCount: entry.messageCount + 1,
+      });
+
+      console.log(`[ThreadlineRouter] Injected message into live session ${entry.sessionName} for thread ${threadId}`);
+      return {
+        handled: true,
+        threadId,
+        injected: true,
+        sessionName: entry.sessionName,
+      };
+    } catch (err) {
+      console.warn(`[ThreadlineRouter] Live-session injection threw for thread ${threadId}:`, err);
+      return null;
+    }
   }
 
   // ── Private: Build thread history context ───────────────────

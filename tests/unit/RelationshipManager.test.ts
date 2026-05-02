@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { RelationshipManager } from '../../src/core/RelationshipManager.js';
 import type { RelationshipManagerConfig, UserChannel, IntelligenceProvider } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('RelationshipManager', () => {
   let tmpDir: string;
@@ -20,7 +21,7 @@ describe('RelationshipManager', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/RelationshipManager.test.ts:24' });
   });
 
   describe('findOrCreate', () => {
@@ -577,7 +578,7 @@ describe('RelationshipManager with IntelligenceProvider', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/RelationshipManager.test.ts:582' });
   });
 
   describe('findOrCreateAsync', () => {

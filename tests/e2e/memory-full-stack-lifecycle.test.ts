@@ -34,6 +34,7 @@ import { SessionActivitySentinel } from '../../src/monitoring/SessionActivitySen
 import { createMockSessionManager } from '../helpers/setup.js';
 import { StateManager } from '../../src/core/StateManager.js';
 import type { InstarConfig, IntelligenceProvider, Session } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('Full Memory Stack E2E lifecycle', () => {
   let tmpDir: string;
@@ -193,7 +194,7 @@ describe('Full Memory Stack E2E lifecycle', () => {
     await server.stop();
     semanticMemory?.close();
     topicMemory?.close();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/e2e/memory-full-stack-lifecycle.test.ts:197' });
   });
 
   const auth = () => ({ Authorization: `Bearer ${AUTH_TOKEN}`, Connection: 'close' });
@@ -938,7 +939,7 @@ describe('Full Memory Stack E2E lifecycle', () => {
       expect(searchResults[0].name).toBe('JWT Authentication');
 
       freshMemory.close();
-      fs.rmSync(freshDir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(freshDir, { recursive: true, force: true, operation: 'tests/e2e/memory-full-stack-lifecycle.test.ts:943' });
     });
   });
 });

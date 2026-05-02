@@ -17,7 +17,17 @@ import type { JobDefinition, JobPriority, ModelTier } from '../core/types.js';
 const VALID_PRIORITIES: JobPriority[] = ['critical', 'high', 'medium', 'low'];
 const VALID_MODELS: ModelTier[] = ['opus', 'sonnet', 'haiku'];
 
-/** Slugs for lightweight default jobs where grounding is unnecessary. */
+/**
+ * Slugs for built-in default jobs that ship with instar.
+ *
+ * The grounding audit is aimed at USER-AUTHORED jobs — it nudges users to
+ * declare identity/security requirements for work they add. Warning on the
+ * package's own shipped defaults at every boot is noise the user can't silence
+ * without editing vendored job definitions. Built-in defaults either don't
+ * need grounding (lightweight health/sync jobs) or carry inline grounding
+ * where required (identity-review, memory-hygiene, etc.) — the audit can
+ * trust the package author and skip them.
+ */
 const GROUNDING_EXEMPT_SLUGS: ReadonlySet<string> = new Set([
   'health-check',
   'feedback-retry',
@@ -25,15 +35,54 @@ const GROUNDING_EXEMPT_SLUGS: ReadonlySet<string> = new Set([
   'update-check',
   'project-map-refresh',
   'git-sync',
+  'reflection-trigger',
+  'relationship-maintenance',
+  'insight-harvest',
+  'evolution-overdue-check',
+  'coherence-audit',
+  'degradation-digest',
+  'state-integrity-check',
+  'memory-hygiene',
+  'guardian-pulse',
+  'session-continuity-check',
+  'memory-export',
+  'capability-audit',
+  'identity-review',
+  'evolution-proposal-evaluate',
+  'evolution-proposal-implement',
+  'commitment-detection',
+  'dashboard-link-refresh',
+  'overseer-guardian',
+  'overseer-learning',
+  'overseer-maintenance',
+  'overseer-infrastructure',
+  'overseer-development',
+  'sentry-error-scan',
+  'self-diagnosis',
+  'evolution-review',
+  'commitment-check',
 ]);
 
 /**
  * Load and validate job definitions from a JSON file.
- * Throws on invalid structure — fail loud at startup, not at runtime.
+ *
+ * Per-entry resilience: invalid entries are logged and skipped, not thrown.
+ * One malformed job should not take down the whole scheduler (and with it
+ * the HTTP server, dashboard, feedback pipeline, and Telegram poller).
+ * Structural errors (missing file, unparseable JSON, non-array root) still
+ * throw — those indicate nothing can be loaded at all.
+ *
+ * Missing file is NOT fatal: treated as "no jobs configured" so a
+ * fresh or partially-initialized agent still boots. The scheduler
+ * handles an empty list correctly.
  */
 export function loadJobs(jobsFile: string): JobDefinition[] {
   if (!fs.existsSync(jobsFile)) {
-    throw new Error(`Jobs file not found: ${jobsFile}`);
+    console.warn(
+      `[JobLoader] Jobs file not found: ${jobsFile} — treating as empty job list. ` +
+      `Create the file to configure recurring jobs.`
+    );
+    return [];
   }
 
   let raw: unknown;
@@ -47,10 +96,31 @@ export function loadJobs(jobsFile: string): JobDefinition[] {
     throw new Error(`Jobs file must contain a JSON array, got ${typeof raw}`);
   }
 
-  const jobs = raw.map((job: unknown, index: number) => {
-    validateJob(job, index);
-    return job as JobDefinition;
-  });
+  const jobs: JobDefinition[] = [];
+  const skipped: Array<{ index: number; slug?: string; error: string }> = [];
+  for (let index = 0; index < raw.length; index++) {
+    const job = raw[index];
+    try {
+      validateJob(job, index);
+      jobs.push(job as JobDefinition);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const slug = job && typeof job === 'object' ? (job as Record<string, unknown>).slug : undefined;
+      skipped.push({ index, slug: typeof slug === 'string' ? slug : undefined, error: message });
+      console.error(
+        `[JobLoader] Skipping invalid job at index ${index}` +
+        (typeof slug === 'string' ? ` (slug="${slug}")` : '') +
+        `: ${message}`
+      );
+    }
+  }
+
+  if (skipped.length > 0) {
+    console.warn(
+      `[JobLoader] Loaded ${jobs.length} valid job(s); skipped ${skipped.length} invalid entry(ies). ` +
+      `Fix the skipped entries to restore full scheduler coverage.`
+    );
+  }
 
   // Grounding-by-default audit — warn about jobs missing grounding config
   auditGrounding(jobs);

@@ -29,7 +29,7 @@ import { ThreadResumeMap } from './ThreadResumeMap.js';
 import { AgentTrustManager } from './AgentTrustManager.js';
 import { IdentityManager } from './client/IdentityManager.js';
 import { RegistryRestClient } from './client/RegistryRestClient.js';
-import type { SendMessageParams, SendMessageResult, ThreadHistoryResult, RegistryClient } from './ThreadlineMCPServer.js';
+import type { SendMessageParams, SendMessageResult, ThreadHistoryResult, ThreadHistoryMessage, RegistryClient } from './ThreadlineMCPServer.js';
 
 const DEFAULT_RELAY_URL = 'wss://relay.threadline.dev/v1/connect';
 
@@ -80,18 +80,24 @@ async function sendMessageViaHttp(
         targetAgent: params.targetAgent,
         threadId: params.threadId,
         message: params.message,
+        waitForReply: params.waitForReply,
+        timeoutSeconds: params.timeoutSeconds,
       }),
     });
 
     if (relayResponse.ok) {
-      const result = await relayResponse.json() as { success: boolean; messageId: string; threadId: string; error?: string };
+      const result = await relayResponse.json() as {
+        success: boolean; messageId: string; threadId: string; reply?: string; error?: string;
+        deliveryOutcome?: string; deliveryPath?: string;
+      };
       if (result.success) {
-        // Relay doesn't support waitForReply yet — return sent confirmation
         return {
           success: true,
           threadId: result.threadId,
           messageId: result.messageId,
-          reply: params.waitForReply ? undefined : undefined,
+          reply: result.reply ?? undefined,
+          deliveryOutcome: result.deliveryOutcome,
+          deliveryPath: result.deliveryPath,
         };
       }
     }
@@ -144,6 +150,76 @@ async function sendMessageViaHttp(
       messageId: '',
       error: `Failed to reach agent server: ${err instanceof Error ? err.message : String(err)}`,
     };
+  }
+}
+
+// ── Thread history via HTTP (queries the running agent server) ──────
+
+/**
+ * Fetch thread history via the agent server's /messages/thread/:threadId endpoint.
+ *
+ * Returns an empty history on any failure so the MCP tool degrades gracefully
+ * (a stopped agent server or missing thread shouldn't surface as an MCP error).
+ */
+async function getThreadHistoryViaHttp(
+  threadId: string,
+  limit: number,
+  serverPort: number,
+  agentToken: string,
+  before?: string,
+): Promise<ThreadHistoryResult> {
+  const empty: ThreadHistoryResult = { threadId, messages: [], totalCount: 0, hasMore: false };
+  try {
+    const response = await fetch(
+      `http://localhost:${serverPort}/messages/thread/${encodeURIComponent(threadId)}`,
+      {
+        headers: { 'Authorization': `Bearer ${agentToken}` },
+      },
+    );
+    if (!response.ok) {
+      return empty;
+    }
+    const data = (await response.json()) as {
+      thread?: unknown;
+      messages?: Array<{
+        message?: {
+          id?: string;
+          from?: { agent?: string };
+          body?: string;
+          createdAt?: string;
+          threadId?: string;
+        };
+      }>;
+    };
+    const envelopes = Array.isArray(data.messages) ? data.messages : [];
+
+    // Ascending-by-createdAt so slice(-limit) returns the most recent window.
+    const sorted = [...envelopes].sort((a, b) => {
+      const at = a.message?.createdAt ?? '';
+      const bt = b.message?.createdAt ?? '';
+      return at < bt ? -1 : at > bt ? 1 : 0;
+    });
+
+    const filtered = before
+      ? sorted.filter((e) => (e.message?.createdAt ?? '') < before)
+      : sorted;
+
+    const totalCount = filtered.length;
+    const effectiveLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : totalCount;
+    const sliced = filtered.slice(-effectiveLimit);
+    const hasMore = filtered.length > sliced.length;
+
+    const messages: ThreadHistoryMessage[] = sliced.map((e) => ({
+      id: e.message?.id ?? '',
+      from: e.message?.from?.agent ?? '',
+      body: e.message?.body ?? '',
+      timestamp: e.message?.createdAt ?? '',
+      threadId: e.message?.threadId ?? threadId,
+    }));
+
+    return { threadId, messages, totalCount, hasMore };
+  } catch {
+    return empty;
   }
 }
 
@@ -242,8 +318,8 @@ async function main(): Promise<void> {
       trustManager,
       auth: null, // No auth for stdio
       sendMessage: (params) => sendMessageViaHttp(params, serverPort, agentToken),
-      getThreadHistory: (threadId, _limit) =>
-        Promise.resolve({ threadId, messages: [], totalCount: 0, hasMore: false } as ThreadHistoryResult),
+      getThreadHistory: (threadId, limit, before) =>
+        getThreadHistoryViaHttp(threadId, limit, serverPort, agentToken, before),
       registry: registryClient,
     },
   );

@@ -27,6 +27,7 @@ import { RateLimiter } from '../../../src/threadline/RateLimiter.js';
 import { AgentDiscovery } from '../../../src/threadline/AgentDiscovery.js';
 import type { HttpFetcher, ThreadlineAgentInfo } from '../../../src/threadline/AgentDiscovery.js';
 import type { MessageEnvelope } from '../../../src/messaging/types.js';
+import { SafeFsExecutor } from '../../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -159,7 +160,7 @@ describe('Threadline Integration Tests', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/threadline/ThreadlineIntegration.test.ts:163' });
     vi.restoreAllMocks();
   });
 
@@ -700,7 +701,7 @@ describe('Threadline Integration Tests', () => {
       expect(result2.spawned).toBe(true);
     });
 
-    it('no threadId means message bypasses ThreadlineRouter', async () => {
+    it('no threadId (first-contact): mints a threadId and handles the message', async () => {
       const threadResumeMap = new ThreadResumeMap(tmpDir, '/test/project');
       const spawnManager = makeMockSpawnManager(true);
       const messageRouter = makeMockMessageRouter();
@@ -714,8 +715,11 @@ describe('Threadline Integration Tests', () => {
       const envelope = makeEnvelope({ fromAgent: 'remote-agent' }); // no threadId
       const result = await router.handleInboundMessage(envelope);
 
-      expect(result.handled).toBe(false);
-      expect(spawnManager.evaluate).not.toHaveBeenCalled();
+      expect(result.handled).toBe(true);
+      expect(result.threadId).toBeDefined();
+      expect(result.spawned).toBe(true);
+      expect(result.threadId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      expect(envelope.message.threadId).toBe(result.threadId);
     });
 
     it('self-sent message (from.agent === localAgent) is not handled', async () => {
@@ -1438,8 +1442,8 @@ describe('Threadline Integration Tests', () => {
       expect(rawMap[threadId].state).toBe('idle');
 
       // Clean up the fake JSONL file
-      fs.rmSync(jsonlPath, { force: true });
-      try { fs.rmdirSync(claudeProjectDir); } catch { /* may not be empty */ }
+      SafeFsExecutor.safeRmSync(jsonlPath, { force: true, operation: 'tests/integration/threadline/ThreadlineIntegration.test.ts:1446' });
+      try { SafeFsExecutor.safeRmdirSync(claudeProjectDir, { operation: 'tests/integration/threadline/ThreadlineIntegration.test.ts:1448' }); } catch { /* may not be empty */ }
     });
 
     it('onThreadResolved marks the thread as resolved', () => {
@@ -1893,8 +1897,8 @@ describe('Threadline Integration Tests', () => {
       expect(rawMap[threadId].state).toBe('failed');
 
       // Clean up
-      fs.rmSync(jsonlPath, { force: true });
-      try { fs.rmdirSync(claudeProjectDir); } catch { /* may not be empty */ }
+      SafeFsExecutor.safeRmSync(jsonlPath, { force: true, operation: 'tests/integration/threadline/ThreadlineIntegration.test.ts:1903' });
+      try { SafeFsExecutor.safeRmdirSync(claudeProjectDir, { operation: 'tests/integration/threadline/ThreadlineIntegration.test.ts:1905' }); } catch { /* may not be empty */ }
     });
 
     it('concurrent spawns for same thread are blocked', async () => {

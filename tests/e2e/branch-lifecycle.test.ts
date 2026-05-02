@@ -18,12 +18,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { BranchManager } from '../../src/core/BranchManager.js';
 import type { TaskBranch, MergeResult } from '../../src/core/BranchManager.js';
+import { SafeGitExecutor } from '../../src/core/SafeGitExecutor.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, {
-    cwd,
+  return SafeGitExecutor.run(args, { cwd,
     encoding: 'utf-8',
     stdio: 'pipe',
     env: {
@@ -32,8 +33,7 @@ function git(args: string[], cwd: string): string {
       GIT_AUTHOR_EMAIL: 'test@test.com',
       GIT_COMMITTER_NAME: 'Test',
       GIT_COMMITTER_EMAIL: 'test@test.com',
-    },
-  }).trim();
+    }, operation: 'tests/e2e/branch-lifecycle.test.ts:26' }).trim();
 }
 
 /**
@@ -134,7 +134,7 @@ describe('BranchManager E2E lifecycle', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/e2e/branch-lifecycle.test.ts:139' });
   });
 
   // ── Scenario 1: Full task branch lifecycle ─────────────────────────
@@ -231,13 +231,13 @@ describe('BranchManager E2E lifecycle', () => {
       git(['commit', '-m', 'task: update port to 8080'], tmpDir);
 
       // Step 4: Switch to main and make a CONFLICTING change to the same file
-      execFileSync('git', ['checkout', 'main'], { cwd: tmpDir });
+      SafeGitExecutor.execSync(['checkout', 'main'], { cwd: tmpDir, operation: 'tests/e2e/branch-lifecycle.test.ts:237' });
       fs.writeFileSync(path.join(tmpDir, 'config.ts'), 'export const PORT = 4000;\nexport const DEBUG = true;\n');
       git(['add', 'config.ts'], tmpDir);
       git(['commit', '-m', 'main: update port to 4000'], tmpDir);
 
       // Switch back to the task branch before completeBranch
-      execFileSync('git', ['checkout', 'task/test-machine/update-config'], { cwd: tmpDir });
+      SafeGitExecutor.execSync(['checkout', 'task/test-machine/update-config'], { cwd: tmpDir, operation: 'tests/e2e/branch-lifecycle.test.ts:244' });
 
       // Step 5: Try to complete the branch -- merge should fail
       const result = bm.completeBranch(branch.name);
@@ -321,7 +321,7 @@ describe('BranchManager E2E lifecycle', () => {
       git(['commit', '-m', 'feat: add feature A'], tmpDir);
 
       // Step 3: Switch back to main to create branch B
-      execFileSync('git', ['checkout', 'main'], { cwd: tmpDir });
+      SafeGitExecutor.execSync(['checkout', 'main'], { cwd: tmpDir, operation: 'tests/e2e/branch-lifecycle.test.ts:329' });
 
       const branchB = bm.createBranch({
         sessionId: 'AUT-401',
@@ -342,7 +342,7 @@ describe('BranchManager E2E lifecycle', () => {
 
       // Step 6: Complete branch A first
       // Need to switch to branch A before completing
-      execFileSync('git', ['checkout', 'task/test-machine/feature-a'], { cwd: tmpDir });
+      SafeGitExecutor.execSync(['checkout', 'task/test-machine/feature-a'], { cwd: tmpDir, operation: 'tests/e2e/branch-lifecycle.test.ts:351' });
       const resultA = bm.completeBranch(branchA.name);
       expect(resultA.success).toBe(true);
 
@@ -356,7 +356,7 @@ describe('BranchManager E2E lifecycle', () => {
       expect(fs.existsSync(path.join(tmpDir, 'feature-a.ts'))).toBe(true);
 
       // Step 9: Complete branch B
-      execFileSync('git', ['checkout', 'task/test-machine/feature-b'], { cwd: tmpDir });
+      SafeGitExecutor.execSync(['checkout', 'task/test-machine/feature-b'], { cwd: tmpDir, operation: 'tests/e2e/branch-lifecycle.test.ts:366' });
       const resultB = bm.completeBranch(branchB.name);
       expect(resultB.success).toBe(true);
 
@@ -453,7 +453,7 @@ describe('BranchManager E2E lifecycle', () => {
       fs.writeFileSync(path.join(tmpDir, 'orphan.ts'), 'orphan\n');
       git(['add', 'orphan.ts'], tmpDir);
       git(['commit', '-m', 'orphaned work'], tmpDir);
-      execFileSync('git', ['checkout', 'main'], { cwd: tmpDir });
+      SafeGitExecutor.execSync(['checkout', 'main'], { cwd: tmpDir, operation: 'tests/e2e/branch-lifecycle.test.ts:464' });
 
       // Step 2: Check health -- should detect orphan
       const warnings = bm.checkBranchHealth();
@@ -567,7 +567,7 @@ describe('BranchManager E2E lifecycle', () => {
       expect(bm.getCurrentBranch()).toBe('task/test-machine/awareness-test');
 
       // Switch back to main
-      execFileSync('git', ['checkout', 'main'], { cwd: tmpDir });
+      SafeGitExecutor.execSync(['checkout', 'main'], { cwd: tmpDir, operation: 'tests/e2e/branch-lifecycle.test.ts:579' });
       expect(bm.isOnTaskBranch()).toBe(false);
       expect(bm.getCurrentBranch()).toBe('main');
     });

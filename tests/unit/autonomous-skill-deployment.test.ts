@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { initProject } from '../../src/commands/init.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('Autonomous skill deployment', () => {
   const testBase = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-autonomous-'));
@@ -24,7 +25,7 @@ describe('Autonomous skill deployment', () => {
   const projectDir = path.join(testBase, projectName);
 
   afterAll(() => {
-    fs.rmSync(testBase, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(testBase, { recursive: true, force: true, operation: 'tests/unit/autonomous-skill-deployment.test.ts:28' });
   });
 
   it('creates project with autonomous skill', async () => {
@@ -39,8 +40,8 @@ describe('Autonomous skill deployment', () => {
   });
 
   describe('autonomous skill directory structure', () => {
-    it('installs skill.md', () => {
-      const skillFile = path.join(projectDir, '.claude', 'skills', 'autonomous', 'skill.md');
+    it('installs SKILL.md', () => {
+      const skillFile = path.join(projectDir, '.claude', 'skills', 'autonomous', 'SKILL.md');
       expect(fs.existsSync(skillFile)).toBe(true);
 
       const content = fs.readFileSync(skillFile, 'utf-8');

@@ -7,9 +7,10 @@
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import path from 'node:path';
 import pc from 'picocolors';
 // @inquirer/prompts imported dynamically — requires Node 20.12+
-import { detectTmuxPath, detectClaudePath } from './Config.js';
+import { detectTmuxPath, detectClaudePath, detectGhPath } from './Config.js';
 
 export interface PrerequisiteResult {
   name: string;
@@ -21,6 +22,8 @@ export interface PrerequisiteResult {
   canAutoInstall: boolean;
   /** The command to run to auto-install this prerequisite. */
   installCommand?: string;
+  /** Whether Homebrew needs to be installed first (macOS). */
+  needsHomebrew?: boolean;
 }
 
 export interface PrerequisiteCheck {
@@ -95,9 +98,47 @@ function getNodeVersion(): { version: string; major: number } {
 }
 
 /**
+ * Install Homebrew on macOS.
+ * Uses the official install script from https://brew.sh.
+ * stdio is inherited so the user can enter their sudo password when prompted.
+ * Returns true if installation succeeded.
+ */
+function installHomebrew(): boolean {
+  try {
+    console.log(pc.dim('  Installing Homebrew (this may take a few minutes)...'));
+    console.log(pc.dim('  You may be prompted for your password.'));
+    execFileSync('/bin/bash', [
+      '-c',
+      '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+    ], {
+      encoding: 'utf-8',
+      stdio: 'inherit',
+      timeout: 600000, // 10 min timeout — Homebrew install can be slow, especially with Xcode CLT
+    });
+
+    // After Homebrew installs, ensure it's on PATH for this process
+    // Apple Silicon installs to /opt/homebrew, Intel to /usr/local
+    const brewPaths = ['/opt/homebrew/bin', '/usr/local/bin'];
+    for (const bp of brewPaths) {
+      if (fs.existsSync(path.join(bp, 'brew'))) {
+        if (!process.env.PATH?.includes(bp)) {
+          process.env.PATH = `${bp}:${process.env.PATH}`;
+        }
+        break;
+      }
+    }
+
+    return hasHomebrew();
+  } catch {
+    // @silent-fallback-ok — homebrew install failure communicated via return
+    return false;
+  }
+}
+
+/**
  * Build install hint and command for tmux based on platform.
  */
-function tmuxInstallInfo(): { hint: string; canAutoInstall: boolean; command?: string } {
+function tmuxInstallInfo(): { hint: string; canAutoInstall: boolean; command?: string; needsHomebrew?: boolean } {
   const platform = detectPlatform();
   switch (platform) {
     case 'macos-arm':
@@ -111,7 +152,9 @@ function tmuxInstallInfo(): { hint: string; canAutoInstall: boolean; command?: s
       }
       return {
         hint: 'Install Homebrew first (https://brew.sh), then: brew install tmux',
-        canAutoInstall: false,
+        canAutoInstall: true,
+        command: 'brew install tmux',
+        needsHomebrew: true,
       };
     case 'linux':
       return {
@@ -136,6 +179,44 @@ function claudeInstallInfo(): { hint: string; canAutoInstall: boolean; command: 
     canAutoInstall: true,
     command: 'npm install -g @anthropic-ai/claude-code',
   };
+}
+
+/**
+ * Build install hint and command for GitHub CLI based on platform.
+ * gh enables: cloud-backed agent discovery, git sync to github backups,
+ * CI status checks, and PR/issue management. Without it, instar still
+ * works but loses these capabilities.
+ */
+function ghInstallInfo(): { hint: string; canAutoInstall: boolean; command?: string; needsHomebrew?: boolean } {
+  const platform = detectPlatform();
+  switch (platform) {
+    case 'macos-arm':
+    case 'macos-intel':
+      if (hasHomebrew()) {
+        return {
+          hint: 'Install with: brew install gh',
+          canAutoInstall: true,
+          command: 'brew install gh',
+        };
+      }
+      return {
+        hint: 'Install Homebrew first (https://brew.sh), then: brew install gh',
+        canAutoInstall: true,
+        command: 'brew install gh',
+        needsHomebrew: true,
+      };
+    case 'linux':
+      return {
+        hint: 'Install with: sudo apt install gh (Debian/Ubuntu) or see https://cli.github.com/',
+        canAutoInstall: true,
+        command: 'sudo apt install -y gh',
+      };
+    default:
+      return {
+        hint: 'Install GitHub CLI: https://cli.github.com/',
+        canAutoInstall: false,
+      };
+  }
 }
 
 /**
@@ -167,6 +248,7 @@ export function checkPrerequisites(): PrerequisiteCheck {
     installHint: tmuxInfo.hint,
     canAutoInstall: tmuxInfo.canAutoInstall,
     installCommand: tmuxInfo.command,
+    needsHomebrew: tmuxInfo.needsHomebrew,
   });
 
   // 3. Claude CLI
@@ -180,6 +262,19 @@ export function checkPrerequisites(): PrerequisiteCheck {
     installHint: claudeInfo.hint,
     canAutoInstall: claudeInfo.canAutoInstall,
     installCommand: claudeInfo.command,
+  });
+
+  // 4. GitHub CLI (gh) — needed for cloud-backed agent discovery and git sync
+  const ghPath = detectGhPath();
+  const ghInfo = ghInstallInfo();
+  results.push({
+    name: 'GitHub CLI',
+    found: !!ghPath,
+    path: ghPath || undefined,
+    installHint: ghInfo.hint,
+    canAutoInstall: ghInfo.canAutoInstall,
+    installCommand: ghInfo.command,
+    needsHomebrew: ghInfo.needsHomebrew,
   });
 
   const missing = results.filter(r => !r.found);
@@ -274,6 +369,29 @@ export async function ensurePrerequisites(): Promise<PrerequisiteCheck> {
     console.log(`  ${pc.red('✗')} ${missing.name} — not found`);
 
     if (missing.canAutoInstall && missing.installCommand) {
+      // If this prerequisite needs Homebrew and it's not installed, install it first
+      if (missing.needsHomebrew) {
+        const { confirm } = await import('@inquirer/prompts');
+        const installBrew = await confirm({
+          message: `${missing.name} requires Homebrew. Install Homebrew first?`,
+          default: true,
+        });
+
+        if (installBrew) {
+          const brewSuccess = installHomebrew();
+          if (brewSuccess) {
+            console.log(`  ${pc.green('✓')} Homebrew installed successfully`);
+          } else {
+            console.log(`  ${pc.red('✗')} Failed to install Homebrew`);
+            console.log(`    Install manually: https://brew.sh`);
+            continue;
+          }
+        } else {
+          console.log(`    ${missing.installHint}`);
+          continue;
+        }
+      }
+
       const { confirm } = await import('@inquirer/prompts');
       const install = await confirm({
         message: `Install ${missing.name}? (${pc.dim(missing.installCommand)})`,

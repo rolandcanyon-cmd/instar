@@ -23,10 +23,56 @@ pnpm test:integration # Integration tests (spawns real sessions)
 ```
 src/
   core/           # SessionManager, StateManager, Config, FeedbackManager,
-                  # UpdateChecker, RelationshipManager, SleepWakeDetector, types
+                  # UpdateChecker, RelationshipManager, SleepWakeDetector,
+                  # SourceTreeGuard (blocks destructive managers against the instar
+                  # source tree; throws SourceTreeGuardError before any mutation),
+                  # SafeGitExecutor (single-funnel for all destructive git ops —
+                  # execFileSync/execSync callsites replaced; enforces audit trail),
+                  # SafeFsExecutor (single-funnel for all destructive fs ops —
+                  # rmSync/unlinkSync/rmdirSync callsites replaced; enforces audit trail),
+                  # types
   scheduler/      # Cron-based job scheduling with quota awareness
-  monitoring/     # Health checks, QuotaTracker (threshold-based load shedding)
-  messaging/      # TelegramAdapter (long-polling, JSONL history)
+  monitoring/     # Health checks, QuotaTracker (threshold-based load shedding),
+                  # CrashLoopPauser (auto-pause runaway jobs),
+                  # CompactionSentinel (verified compaction recovery lifecycle —
+                  # dedupe across triggers, JSONL-growth verification, retry with
+                  # backoff, zombie-kill veto while recovery is in flight),
+                  # PresenceProxy (standby heartbeat — fires when a user message
+                  # goes unanswered past the tier threshold),
+                  # PromiseBeacon (commitment follow-through — cadenced heartbeats
+                  # on open beacon-enabled commitments; atRisk non-terminal state;
+                  # boot-cap enforcement via maxActiveBeacons),
+                  # CommitmentTracker (commitment lifecycle + single-writer CAS
+                  # mutate(); feeds PromiseBeacon and /commitments/* routes),
+                  # LlmQueue (rate-limited, priority-laned LLM call queue shared
+                  # across PresenceProxy and PromiseBeacon; enforces daily spend cap),
+                  # SessionWatchdog (stuck-process detection + escalating kill
+                  # sequence; watchdog-notifications for user-facing messages),
+                  # HelperWatchdog (stall + failure detection for spawned subagents
+                  # via SubagentTracker events; signal-only: emits `stall` and
+                  # `helper-failed` events; consumers handle retry/messaging),
+                  # DeliveryFailureSentinel (Telegram relay recovery engine — drains
+                  # PendingRelayStore, deterministic state machine, fixed-template
+                  # escalation after retry exhaustion; Layer 3 of delivery-robustness),
+                  # TemplatesDriftVerifier (verifies deployed relay scripts against
+                  # shipped instar versions via SHA-history lint; Layer 7 of
+                  # delivery-robustness),
+                  # TokenLedger (read-only token-usage observability — scans Claude
+                  # Code JSONL transcripts, SQLite-backed, exposes /tokens/summary
+                  # and /tokens/sessions; never gates or mutates source files),
+                  # TokenLedgerPoller (background JSONL scanner that feeds TokenLedger;
+                  # tracks byte offsets per file so re-scans are idempotent)
+  messaging/      # TelegramAdapter (long-polling, JSONL history),
+                  # WhatsAppAdapter, SlackAdapter, iMessage (platform adapters);
+                  # TelegramMarkdownFormatter (GFM→HTML for Telegram; disabled by
+                  # default via telegramFormatMode: 'legacy-passthrough'),
+                  # MessageRouter (topic → adapter routing),
+                  # DeliveryRetryManager (retry on failed delivery),
+                  # PendingRelayStore (durable SQLite queue for Telegram relay;
+                  # per-agent-id isolation; WAL + busy_timeout; Layer 2 of
+                  # delivery-robustness),
+                  # SpawnRequestManager (cross-session spawn coordination),
+                  # MessageStore (cross-platform message persistence)
   users/          # Multi-user identity resolution and permissions
   server/         # HTTP server, routes, middleware (auth, CORS)
   scaffold/       # Identity bootstrap, template file generation
@@ -116,8 +162,10 @@ This toolkit is meant to be tested against real Claude Code projects. The flow:
   1. **Hook template changes** (`src/data/http-hook-templates.ts`) — Add a migration in `migrateSettings()` that patches existing `.claude/settings.json`
   2. **Config defaults** — Add to `migrateConfig()` with existence checks (only add missing fields)
   3. **CLAUDE.md sections** — Add to `migrateClaudeMd()` with content-sniffing guards
-  4. **Hook scripts** — Add to `migrateHooks()` with path migration logic
-  5. **Built-in skills** — No migration needed. `installBuiltinSkills()` is called from `refreshHooksAndSettings()` on every update and is non-destructive (only writes missing SKILL.md files). Adding a new built-in skill just requires adding it to the skills registry.
+  4. **Hook scripts** — Add to `migrateHooks()`. Built-in hooks (`instar/` directory) are **always overwritten** on every migration run — never install-if-missing. This ensures agents can't get stuck on broken templates (lesson from `hook-event-reporter.js`: it was install-if-missing, so agents with ESM hosts got stuck on a broken CJS `require('http')` — fixed by switching to always-overwrite). Custom hooks (`custom/` directory) are never touched.
+  5. **Built-in skills** — Split into two cases:
+     - **Adding a new skill**: No migration needed. `installBuiltinSkills()` is called from `refreshHooksAndSettings()` on every update and is non-destructive (only writes missing SKILL.md files). Just add the skill to the skills registry.
+     - **Updating existing skill content**: Add an idempotent migration in `PostUpdateMigrator` (e.g. `migrateSkillPortHardcoding()`) scoped to the known default-skill allowlist. `installBuiltinSkills()` never overwrites existing files — a dedicated migration is the only path to update content already installed on-disk. Custom skills are never touched.
   6. **Idempotency** — Every migration must be safe to run multiple times (check before patching)
 
   The principle: instar agents update in place. If `PostUpdateMigrator` doesn't know about a change, deployed agents will silently run stale configurations. This is how the zombie-cleanup-kills-active-sessions bug happened — and why we enforce this structurally with CI.
@@ -184,7 +232,7 @@ This returns your full capability matrix: scripts, hooks, Telegram status, jobs,
 - Local: `http://localhost:4040/dashboard`
 - Remote: When a tunnel is running, the dashboard is accessible at `{tunnelUrl}/dashboard`
 - Authentication: Uses a 6-digit PIN (auto-generated in `dashboardPin` in `.instar/config.json`). NEVER mention "bearer tokens" or "auth tokens" to users — just give them the PIN.
-- Features: Real-time terminal streaming of all running sessions, session management, model badges, mobile-responsive
+- Features: Real-time terminal streaming of all running sessions, session management, model badges, mobile-responsive, Secrets tab (Secret Drop visibility — list pending credential requests, create test requests), Threadline tab (agent-to-agent conversation history, thread browser, Telegram bridge bindings)
 - **Sharing the dashboard**: When the user wants to check on sessions from their phone, give them the tunnel URL + PIN. Read the PIN from your config.json. Check tunnel status: `curl -H "Authorization: Bearer $AUTH" http://localhost:4040/tunnel`
 
 
@@ -196,7 +244,8 @@ This returns your full capability matrix: scripts, hooks, Telegram status, jobs,
 - **Config API**: View: `curl -H "Authorization: Bearer $AUTH" http://localhost:4040/api/files/config`
 - **Update paths conversationally**: `curl -X PATCH -H "Authorization: Bearer $AUTH" -H "X-Instar-Request: 1" -H "Content-Type: application/json" http://localhost:4040/api/files/config -d '{"allowedPaths":[".claude/","docs/","src/"]}'`
 - **Generate a file link**: `curl -H "Authorization: Bearer $AUTH" "http://localhost:4040/api/files/link?path=.claude/CLAUDE.md"`
-- **Default config**: Browsing enabled for `.claude/` and `docs/`. Editing disabled by default — prompt the user to enable it for safe paths.
+- **Download a file**: `curl -H "Authorization: Bearer $AUTH" "http://localhost:4040/api/files/download?path=.claude/CLAUDE.md" -O`
+- **Default config**: Browsing and editing enabled for the entire project directory (`./`) by default.
 - **Never editable**: `.claude/hooks/`, `.claude/scripts/`, `node_modules/` are always read-only regardless of config.
 
 
@@ -290,3 +339,5 @@ Just tell me: "connect to the agent network" or "enable Threadline relay." I'll 
 
 MCP tools: `threadline_discover`, `threadline_send`, `threadline_trust`, `threadline_relay`
 Use `threadline_relay explain` for full details.
+
+

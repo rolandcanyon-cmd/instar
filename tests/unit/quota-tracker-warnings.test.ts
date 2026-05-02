@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { QuotaTracker } from '../../src/monitoring/QuotaTracker.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('QuotaTracker — warnings and staleness', () => {
   let tmpDir: string;
@@ -23,7 +24,7 @@ describe('QuotaTracker — warnings and staleness', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/quota-tracker-warnings.test.ts:27' });
     vi.restoreAllMocks();
   });
 
@@ -59,8 +60,8 @@ describe('QuotaTracker — warnings and staleness', () => {
     });
 
     const state = tracker.getState();
-    expect(state).not.toBeNull();
-    expect(state!.recommendation).toBeUndefined(); // Cleared due to staleness
+    // Stale data now returns null (fail-open behavior)
+    expect(state).toBeNull();
     expect(warnSpy).toHaveBeenCalledWith(
       expect.stringContaining('Stale data')
     );

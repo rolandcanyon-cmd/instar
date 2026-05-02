@@ -15,6 +15,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 import type { WorkLedger, LedgerEntry } from './WorkLedger.js';
+import { assertNotInstarSourceTree } from './SourceTreeGuard.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
+import { SafeGitExecutor } from './SafeGitExecutor.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -116,6 +119,7 @@ export class HandoffManager {
   private handoffDir: string;
 
   constructor(config: HandoffManagerConfig) {
+    assertNotInstarSourceTree(config.projectDir, 'HandoffManager');
     this.projectDir = config.projectDir;
     this.stateDir = config.stateDir;
     this.machineId = config.machineId;
@@ -351,7 +355,7 @@ export class HandoffManager {
   clearHandoffNote(): void {
     const filePath = this.handoffFilePath();
     try {
-      fs.unlinkSync(filePath);
+      SafeFsExecutor.safeUnlinkSync(filePath, { operation: 'src/core/HandoffManager.ts:357' });
     } catch {
       // @silent-fallback-ok — file may not exist; clearing a nonexistent handoff note is a no-op
     }
@@ -493,11 +497,12 @@ export class HandoffManager {
   }
 
   private git(...args: string[]): string {
-    return execFileSync('git', args, {
+    return SafeGitExecutor.run(args, {
       cwd: this.projectDir,
       encoding: 'utf-8',
       timeout: 30_000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      operation: 'src/core/HandoffManager.ts:git',
     }).trim();
   }
 }

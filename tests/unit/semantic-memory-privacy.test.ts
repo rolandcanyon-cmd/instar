@@ -23,6 +23,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { SemanticMemory } from '../../src/memory/SemanticMemory.js';
 import type { MemoryEntity } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -50,7 +51,7 @@ async function createTestMemory(): Promise<TestSetup> {
     memory,
     cleanup: () => {
       memory.close();
-      fs.rmSync(dir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/semantic-memory-privacy.test.ts:54' });
     },
   };
 }
@@ -469,7 +470,7 @@ describe('SemanticMemory Privacy Scoping', () => {
       expect(newEntity!.entity.privacyScope).toBe('private');
 
       memory.close();
-      fs.rmSync(dir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/semantic-memory-privacy.test.ts:474' });
     });
   });
 
@@ -515,7 +516,7 @@ describe('SemanticMemory Privacy Scoping', () => {
       expect(entities[0].privacyScope).toBe('private');
 
       memory2.close();
-      fs.rmSync(dir2, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(dir2, { recursive: true, force: true, operation: 'tests/unit/semantic-memory-privacy.test.ts:521' });
     });
   });
 

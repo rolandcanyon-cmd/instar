@@ -76,10 +76,19 @@ For dashboard web access, a simpler `dashboardPin` is also available:
 {
   "sessions": {
     "maxConcurrent": 5,
-    "timeoutMinutes": 120
+    "timeoutMinutes": 120,
+    "claudePath": "/path/to/claude",
+    "tmuxPath": "/path/to/tmux"
   }
 }
 ```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `maxConcurrent` | `5` | Maximum number of concurrent Claude Code sessions |
+| `timeoutMinutes` | `120` | Session idle timeout in minutes |
+| `claudePath` | auto-detected | Path to the `claude` CLI binary. Override if your Claude Code installation is in a non-standard location or if auto-detection fails. |
+| `tmuxPath` | auto-detected | Path to the `tmux` binary. Override if tmux is installed in a non-standard location. |
 
 ## Safety & Autonomy
 
@@ -122,10 +131,39 @@ See [Coherence Gate](/features/coherence-gate/) for full configuration options.
 
 Configures the Threadline relay for inter-agent communication. See [Threadline Protocol](/features/threadline/) for details.
 
+### Telegram Bridge (Threadline)
+
+Mirror agent-to-agent threadline messages into per-thread Telegram topics for real-time visibility.
+
+```json
+{
+  "threadline": {
+    "telegramBridge": {
+      "enabled": false,
+      "autoCreateTopics": false,
+      "mirrorExisting": true,
+      "allowList": [],
+      "denyList": []
+    }
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Master kill-switch. When `false`, the bridge never posts to Telegram. |
+| `autoCreateTopics` | `false` | When `true`, automatically creates a new Telegram forum topic for each new threadline conversation. When `false`, only mirrors traffic into topics that already exist (or are in `allowList`). |
+| `mirrorExisting` | `true` | Mirror messages into topics that already have a binding, regardless of `autoCreateTopics`. |
+| `allowList` | `[]` | Remote agent identifiers that always get auto-created topics, even if `autoCreateTopics` is `false`. |
+| `denyList` | `[]` | Remote agent identifiers that never get auto-created topics. `allowList` takes precedence when both contain the same ID. |
+
+Thread-to-topic bindings are persisted in `.instar/threadline/telegram-bridge-bindings.json`. Configure via the dashboard Threadline tab or the `/threadline/telegram-bridge/config` API endpoint.
+
 ## Additional Config Keys
 
 | Key | Description |
 |-----|-------------|
+| `messagingStyle` | Free-text description of how outbound messages should be written for this agent's user (e.g. `"ELI10, short sentences, plain words"`). Consumed by the outbound tone gate's `B11_STYLE_MISMATCH` rule — replies that clearly violate the style are blocked with HTTP 422. When unset, the style rule does not apply. |
 | `monitoring` | Health monitoring configuration |
 | `relationships` | Relationship tracking config |
 | `feedback` | Feedback loop config |
@@ -162,3 +200,4 @@ Jobs are defined in `.instar/jobs.json`. See [Job Scheduler](/features/scheduler
 ## Hooks
 
 Behavioral hooks are installed in `.claude/settings.json` and scripts live in `.instar/hooks/` and `.claude/scripts/`. See [Hooks reference](/reference/hooks/) for details.
+

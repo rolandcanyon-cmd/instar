@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { detectTmuxPath, detectClaudePath } from '../../src/core/Config.js';
+import { detectTmuxPath, detectClaudePath, loadConfig } from '../../src/core/Config.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('Config', () => {
   describe('detectTmuxPath', () => {
@@ -20,6 +24,71 @@ describe('Config', () => {
       } else {
         expect(claudePath).toBeNull();
       }
+    });
+  });
+
+  describe('loadConfig', () => {
+    it('respects sessions.claudePath from config.json instead of auto-detecting', () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-config-test-'));
+      const stateDir = path.join(tmpDir, '.instar');
+      fs.mkdirSync(stateDir, { recursive: true });
+
+      const customClaudePath = '/usr/local/bin/my-claude-wrapper';
+      fs.writeFileSync(
+        path.join(stateDir, 'config.json'),
+        JSON.stringify({
+          sessions: { claudePath: customClaudePath, tmuxPath: '/usr/bin/tmux' },
+        }),
+      );
+
+      const config = loadConfig(tmpDir);
+      expect(config.sessions.claudePath).toBe(customClaudePath);
+
+      // Cleanup
+      SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/Config.test.ts:48' });
+    });
+
+    it('respects sessions.tmuxPath from config.json instead of auto-detecting', () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-config-test-'));
+      const stateDir = path.join(tmpDir, '.instar');
+      fs.mkdirSync(stateDir, { recursive: true });
+
+      const customTmuxPath = '/usr/local/bin/my-tmux-wrapper';
+      fs.writeFileSync(
+        path.join(stateDir, 'config.json'),
+        JSON.stringify({
+          sessions: { tmuxPath: customTmuxPath, claudePath: '/usr/bin/claude-stub' },
+        }),
+      );
+
+      const config = loadConfig(tmpDir);
+      expect(config.sessions.tmuxPath).toBe(customTmuxPath);
+
+      // Cleanup
+      SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/Config.test.ts:69' });
+    });
+
+    it('falls back to auto-detected claudePath when config omits it', () => {
+      const detected = detectClaudePath();
+      if (!detected) {
+        // Claude CLI not available (e.g., CI environment) — skip
+        return;
+      }
+
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-config-test-'));
+      const stateDir = path.join(tmpDir, '.instar');
+      fs.mkdirSync(stateDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(stateDir, 'config.json'),
+        JSON.stringify({}),
+      );
+
+      const config = loadConfig(tmpDir);
+      expect(config.sessions.claudePath).toBe(detected);
+
+      // Cleanup
+      SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/Config.test.ts:93' });
     });
   });
 });

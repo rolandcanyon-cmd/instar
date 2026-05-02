@@ -20,6 +20,7 @@ import { PlatformActivityRegistry } from '../../src/core/PlatformActivityRegistr
 import { CanonicalState } from '../../src/core/CanonicalState.js';
 import { ScopeVerifier } from '../../src/core/ScopeVerifier.js';
 import type { IntelligenceProvider } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ function setupAgent(name: string): AgentSetup {
     stateDir,
     registry,
     canonical,
-    cleanup: () => fs.rmSync(projectDir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(projectDir, { recursive: true, force: true, operation: 'tests/e2e/temporal-coherence-lifecycle.test.ts:51' }),
   };
 }
 
@@ -486,7 +487,7 @@ describe('TemporalCoherenceChecker E2E lifecycle', () => {
       expect(r1.llmEvaluated).toBe(true);
 
       // Simulate state directory wipe (e.g., git clean)
-      fs.rmSync(agent.stateDir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(agent.stateDir, { recursive: true, force: true, operation: 'tests/e2e/temporal-coherence-lifecycle.test.ts:491' });
       fs.mkdirSync(agent.stateDir, { recursive: true });
 
       // Should still work (AGENT.md is in projectDir, not stateDir)

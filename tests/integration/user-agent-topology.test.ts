@@ -31,6 +31,7 @@ import {
   sanitizeTopicName,
 } from '../../src/utils/sanitize.js';
 import { TopicMemory } from '../../src/memory/TopicMemory.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Test Helpers ─────────────────────────────────────────────────
 
@@ -197,7 +198,7 @@ describe('pipeline → TopicMemory storage', () => {
 
   afterEach(() => {
     topicMemory.close();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/user-agent-topology.test.ts:201' });
   });
 
   it('pipeline log entry feeds TopicMemory with sender identity', () => {
@@ -313,7 +314,7 @@ describe('pipeline → TopicMemory storage', () => {
     expect(context).not.toContain('User: How do I deploy?');
   });
 
-  it('JSONL round-trip preserves sender identity', () => {
+  it('JSONL round-trip preserves sender identity', async () => {
     // Create JSONL with sender identity (simulating pipeline log entries)
     const jsonlPath = path.join(tmpDir, 'messages.jsonl');
     const entries = [
@@ -335,7 +336,7 @@ describe('pipeline → TopicMemory storage', () => {
     fs.writeFileSync(jsonlPath, entries.map(e => JSON.stringify(e)).join('\n'));
 
     // Import
-    const count = topicMemory.importFromJsonl(jsonlPath);
+    const count = await topicMemory.importFromJsonl(jsonlPath);
     expect(count).toBe(3);
 
     // Verify identity survived round-trip
@@ -445,7 +446,7 @@ describe('schema migration: v1 → v2 upgrade', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/user-agent-topology.test.ts:450' });
   });
 
   it('v1 database gets sender columns added on open()', async () => {

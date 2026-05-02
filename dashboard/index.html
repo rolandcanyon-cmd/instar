@@ -1555,6 +1555,24 @@
     }
 
     /* ── Jobs Tab ─────────────────────────────────────────── */
+    .jobs-summary { display: flex; gap: 6px; padding: 0 12px 8px; flex-wrap: wrap; }
+    .jobs-summary-card { flex: 1; min-width: 50px; text-align: center; padding: 6px 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+    .jobs-summary-val { font-size: 16px; font-weight: 700; color: var(--text-bright); }
+    .jobs-summary-label { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.3px; }
+    .jobs-summary-card.failing .jobs-summary-val { color: var(--red); }
+    .jobs-summary-card.running .jobs-summary-val { color: var(--blue); }
+    .sparkline-legend { display: flex; gap: 10px; padding: 4px 0 8px; font-size: 10px; color: var(--text-dim); }
+    .sparkline-legend-item { display: flex; align-items: center; gap: 4px; }
+    .sparkline-legend-dot { width: 8px; height: 8px; border-radius: 2px; }
+    .sparkline-legend-dot.success { background: var(--accent); }
+    .sparkline-legend-dot.failure { background: var(--red); }
+    .sparkline-legend-dot.skipped { background: #555; }
+    .job-config-section { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 12px; }
+    .job-config-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+    .job-config-title:hover { color: var(--text); }
+    .job-config-grid { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 12px; }
+    .job-config-key { color: var(--text-dim); padding: 4px 0; }
+    .job-config-val { color: var(--text); padding: 4px 0; word-break: break-word; }
     .jobs-container {
       display: flex;
       grid-column: 1 / -1;
@@ -1929,7 +1947,99 @@
     .spark.s-pending { background: var(--blue); }
     .spark.s-skipped { background: #333; }
 
-    /* ── Discovery Tab ──────────────────────────────────────── */
+    /* ── Features Tab (was Discovery) ──────────────────────────── */
+    .features-container {
+      grid-column: 1 / -1;
+      overflow-y: auto;
+      background: var(--bg);
+      padding: 20px;
+    }
+    .features-main { max-width: 960px; margin: 0 auto; }
+    .features-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .features-header h2 { font-size: 16px; font-weight: 600; color: var(--text-bright); }
+    .features-subtitle { font-size: 12px; color: var(--text-dim); margin-bottom: 20px; line-height: 1.4; }
+    .features-refresh { font-size: 11px; padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border); background: transparent; color: var(--text-dim); cursor: pointer; }
+    .features-refresh:hover { border-color: var(--text-dim); color: var(--text); }
+
+    /* Autonomy Profile Card */
+    .autonomy-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px 22px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+    .autonomy-card-icon { font-size: 28px; flex-shrink: 0; }
+    .autonomy-card-info { flex: 1; }
+    .autonomy-card-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+    .autonomy-card-level { font-size: 16px; font-weight: 600; color: var(--text-bright); margin-bottom: 4px; text-transform: capitalize; }
+    .autonomy-card-desc { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
+    .autonomy-card-btn { font-size: 11px; padding: 6px 16px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; white-space: nowrap; }
+    .autonomy-card-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+    /* Profile Selector Modal */
+    .profile-selector { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 16px 0; }
+    .profile-option { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; cursor: pointer; transition: border-color 0.15s; }
+    .profile-option:hover { border-color: rgba(255,255,255,0.2); }
+    .profile-option.selected { border-color: var(--accent); background: rgba(74,222,128,0.05); }
+    .profile-option-name { font-size: 14px; font-weight: 600; color: var(--text-bright); margin-bottom: 4px; text-transform: capitalize; }
+    .profile-option-desc { font-size: 11px; color: var(--text-dim); line-height: 1.4; }
+    .profile-option-badge { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 3px; margin-top: 6px; }
+    .profile-option-badge.recommended { background: rgba(74,222,128,0.15); color: var(--accent); }
+
+    /* Feature Category Section */
+    .feat-category { margin-bottom: 24px; }
+    .feat-category-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .feat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+
+    /* Feature Card */
+    .feat-card {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s, transform 0.1s;
+    }
+    .feat-card:hover { border-color: rgba(255,255,255,0.15); transform: translateY(-1px); }
+    .feat-card-top { display: flex; align-items: center; gap: 10px; }
+    .feat-card-name { font-size: 14px; font-weight: 600; color: var(--text-bright); flex: 1; }
+    .feat-card-arrow { font-size: 11px; color: var(--text-dim); }
+    .feat-card-desc { font-size: 12px; color: var(--text-dim); line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+    /* Feature Toggle */
+    .feat-toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }
+    .feat-toggle input { opacity: 0; width: 0; height: 0; }
+    .feat-toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #333; border-radius: 20px; transition: 0.2s; }
+    .feat-toggle-slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background: #888; border-radius: 50%; transition: 0.2s; }
+    .feat-toggle input:checked + .feat-toggle-slider { background: rgba(74,222,128,0.3); }
+    .feat-toggle input:checked + .feat-toggle-slider:before { transform: translateX(16px); background: var(--accent); }
+
+    /* Feature Detail View */
+    .feat-detail-view { display: none; }
+    .feat-detail-view.active { display: block; }
+    .feat-detail-back { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); cursor: pointer; border: none; background: none; padding: 0; margin-bottom: 16px; }
+    .feat-detail-back:hover { color: var(--text); }
+    .feat-detail-header { margin-bottom: 20px; }
+    .feat-detail-title { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .feat-detail-title h3 { font-size: 18px; font-weight: 600; color: var(--text-bright); margin: 0; flex: 1; }
+    .feat-detail-category { font-size: 10px; padding: 2px 8px; border-radius: 3px; background: rgba(255,255,255,0.06); color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+    .feat-detail-description { font-size: 13px; color: var(--text-dim); line-height: 1.6; max-width: 700px; margin-bottom: 20px; }
+    .feat-detail-section { margin-bottom: 20px; }
+    .feat-detail-section-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .feat-data-item { display: flex; gap: 12px; padding: 10px 14px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
+    .feat-data-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+    .feat-data-content { flex: 1; }
+    .feat-data-label { font-weight: 500; color: var(--text-bright); margin-bottom: 2px; }
+    .feat-data-desc { color: var(--text-dim); font-size: 11px; line-height: 1.4; }
+    .feat-reversibility { font-size: 12px; color: var(--text-dim); line-height: 1.5; padding: 12px 14px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; }
+
     /* ── Systems Tab ──────────────────────────────────────────── */
     .systems-container { grid-column: 1 / -1; overflow-y: auto; background: var(--bg); padding: 20px; }
     .systems-main { max-width: 960px; margin: 0 auto; }
@@ -2026,250 +2136,7 @@
     .cap-content-empty { padding: 16px; text-align: center; color: var(--text-dim); font-size: 12px; }
     .cap-stat-card:hover { border-color: var(--accent); transition: border-color 0.15s; }
 
-    .discovery-container {
-      grid-column: 1 / -1;
-      overflow-y: auto;
-      background: var(--bg);
-      padding: 20px;
-    }
-
-    .discovery-main {
-      max-width: 900px;
-      margin: 0 auto;
-    }
-
-    .discovery-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 20px;
-    }
-
-    .discovery-header h2 {
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--text-bright);
-    }
-
-    .discovery-refresh {
-      font-size: 11px;
-      padding: 4px 12px;
-      border-radius: 4px;
-      border: 1px solid var(--border);
-      background: transparent;
-      color: var(--text-dim);
-      cursor: pointer;
-    }
-
-    .discovery-refresh:hover {
-      border-color: var(--text-dim);
-      color: var(--text);
-    }
-
-    .discovery-section {
-      margin-bottom: 24px;
-    }
-
-    .discovery-section h3 {
-      font-size: 13px;
-      font-weight: 600;
-      color: var(--text-bright);
-      margin-bottom: 12px;
-    }
-
-    .funnel-chart {
-      display: flex;
-      gap: 4px;
-      align-items: flex-end;
-      height: 120px;
-      padding: 12px 16px;
-      background: var(--bg-panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-    }
-
-    .funnel-bar {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 4px;
-    }
-
-    .funnel-bar-fill {
-      width: 100%;
-      border-radius: 3px 3px 0 0;
-      min-height: 2px;
-      transition: height 0.3s;
-    }
-
-    .funnel-bar-label {
-      font-size: 10px;
-      color: var(--text-dim);
-      text-align: center;
-      white-space: nowrap;
-    }
-
-    .funnel-bar-count {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--text-bright);
-    }
-
-    .discovery-filter-bar {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 12px;
-      flex-wrap: wrap;
-    }
-
-    .discovery-filter {
-      font-size: 11px;
-      padding: 2px 8px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      background: transparent;
-      color: var(--text-dim);
-      cursor: pointer;
-      transition: all 0.15s;
-    }
-
-    .discovery-filter:hover {
-      border-color: var(--text-dim);
-      color: var(--text);
-    }
-
-    .discovery-filter.active {
-      background: var(--accent-dim);
-      border-color: var(--accent-dim);
-      color: #000;
-    }
-
-    .feature-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-      gap: 10px;
-    }
-
-    .feature-card {
-      background: var(--bg-panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px 14px;
-      font-size: 12px;
-    }
-
-    .feature-card-top {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 6px;
-    }
-
-    .feature-card-name {
-      font-weight: 500;
-      color: var(--text-bright);
-      flex: 1;
-    }
-
-    .feature-state-badge {
-      font-size: 10px;
-      padding: 1px 6px;
-      border-radius: 3px;
-      font-weight: 600;
-    }
-
-    .feature-state-badge.enabled { background: #0f2f0f; color: var(--accent); }
-    .feature-state-badge.undiscovered { background: #1a1a1a; color: #666; }
-    .feature-state-badge.aware { background: #0f1f2f; color: var(--blue); }
-    .feature-state-badge.interested { background: #1f1f0f; color: #eab308; }
-    .feature-state-badge.deferred { background: #1a1a1a; color: #888; }
-    .feature-state-badge.declined { background: #2f0f0f; color: var(--red); }
-    .feature-state-badge.disabled { background: #1a1a1a; color: #555; }
-
-    .feature-card-desc {
-      color: var(--text-dim);
-      font-size: 11px;
-      line-height: 1.4;
-      margin-bottom: 4px;
-    }
-
-    .feature-card-meta {
-      display: flex;
-      gap: 8px;
-      color: var(--text-dim);
-      font-size: 10px;
-    }
-
-    .feature-card-meta .tier { text-transform: uppercase; letter-spacing: 0.5px; }
-    .feature-card-meta .cooldown { color: var(--orange); }
-
-    .event-log {
-      background: var(--bg-panel);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      max-height: 300px;
-      overflow-y: auto;
-    }
-
-    .event-row {
-      display: flex;
-      gap: 10px;
-      padding: 8px 14px;
-      border-bottom: 1px solid var(--border);
-      font-size: 11px;
-      align-items: center;
-    }
-
-    .event-row:last-child { border-bottom: none; }
-
-    .event-time {
-      color: var(--text-dim);
-      flex-shrink: 0;
-      width: 70px;
-    }
-
-    .event-feature {
-      color: var(--text-bright);
-      font-weight: 500;
-      flex-shrink: 0;
-      width: 140px;
-    }
-
-    .event-transition {
-      color: var(--text);
-      flex: 1;
-    }
-
-    .event-arrow { color: var(--text-dim); }
-
-    .digest-item {
-      background: var(--bg-panel);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px 14px;
-      margin-bottom: 8px;
-      font-size: 12px;
-    }
-
-    .digest-item-title {
-      color: var(--text-bright);
-      font-weight: 500;
-      margin-bottom: 2px;
-    }
-
-    .digest-item-desc {
-      color: var(--text-dim);
-      font-size: 11px;
-    }
-
-    /* Discovery metrics summary */
-    .discovery-metrics {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 16px;
-      flex-wrap: wrap;
-    }
+    /* (Legacy discovery styles removed — replaced by Features tab above) */
 
     .metric-card {
       flex: 1;
@@ -2542,10 +2409,17 @@
         <nav class="tab-bar">
           <button class="tab active" data-tab="sessions" onclick="switchTab('sessions')">Sessions <span class="tab-count" id="tabSessionCount">0</span></button>
           <button class="tab" data-tab="files" onclick="switchTab('files')">Files</button>
-          <button class="tab" data-tab="dropzone" onclick="switchTab('dropzone')">Drop Zone</button>
+          <button class="tab" data-tab="dropzone" onclick="switchTab('dropzone')">Send Content</button>
+          <button class="tab" data-tab="secrets" onclick="switchTab('secrets')">Secrets <span class="tab-count" id="tabSecretCount">0</span></button>
           <button class="tab" data-tab="jobs" onclick="switchTab('jobs')">Jobs <span class="tab-count" id="tabJobCount">0</span></button>
-          <button class="tab" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
-          <button class="tab" data-tab="systems" onclick="switchTab('systems')">Systems</button>
+          <button class="tab" data-tab="features" onclick="switchTab('features')">Features</button>
+          <button class="tab" data-tab="systems" onclick="switchTab('systems')">Health</button>
+          <button class="tab" data-tab="integrated-being" onclick="switchTab('integrated-being')">Integrated-Being</button>
+          <button class="tab" data-tab="pr-pipeline" onclick="switchTab('pr-pipeline')">PR Pipeline</button>
+          <button class="tab" data-tab="initiatives" onclick="switchTab('initiatives')">Initiatives <span class="tab-count" id="tabInitiativeCount">0</span></button>
+          <button class="tab" data-tab="commitments" onclick="switchTab('commitments')">Commitments <span class="tab-count" id="tabCommitmentCount">0</span></button>
+          <button class="tab" data-tab="tokens" onclick="switchTab('tokens')">Tokens</button>
+          <button class="tab" data-tab="threadline" onclick="switchTab('threadline')">Threadline</button>
         </nav>
       </div>
       <div class="vital-signs" id="vitalSigns">
@@ -2588,7 +2462,7 @@
       <div class="session-list" id="sessionList">
         <div class="empty-state" id="emptyState">
           <div class="icon">&#x1F4AD;</div>
-          <p>No running sessions<br>Sessions will appear here when spawned</p>
+          <p>No sessions running<br>Create one to start working with your agent</p>
         </div>
       </div>
     </aside>
@@ -2700,12 +2574,12 @@
     </div>
   </div>
 
-  <!-- Drop Zone tab -->
+  <!-- Send Content tab (was Drop Zone) -->
   <div class="dropzone-container" id="dropzoneTab" style="display:none">
     <div class="dropzone-panel">
       <div class="dropzone-header">
-        <h2>Drop Zone</h2>
-        <p class="dropzone-subtitle">Send large text content to your agent session</p>
+        <h2>Send Content</h2>
+        <p class="dropzone-subtitle">Paste text content to send directly to a running session</p>
       </div>
 
       <div class="dropzone-form">
@@ -2751,8 +2625,11 @@
             <option value="lastRun">Sort: Last Run</option>
           </select>
         </div>
+        <div style="font-size:11px;color:var(--text-dim);padding:0 12px 8px;line-height:1.4">Monitor and control your scheduled tasks</div>
+        <div id="jobsSummary" class="jobs-summary"></div>
         <div class="jobs-filter-bar" id="jobsFilterBar">
           <button class="jobs-filter-chip active" data-filter="all" onclick="setJobFilter('all')">All</button>
+          <button class="jobs-filter-chip" data-filter="running" onclick="setJobFilter('running')">Running</button>
           <button class="jobs-filter-chip" data-filter="failing" onclick="setJobFilter('failing')">Failing</button>
           <button class="jobs-filter-chip" data-filter="disabled" onclick="setJobFilter('disabled')">Disabled</button>
         </div>
@@ -2764,22 +2641,352 @@
         <div class="jobs-detail-empty" id="jobsDetailEmpty">
           <div style="text-align:center">
             <div style="font-size:24px;margin-bottom:8px">&#x2699;</div>
-            <p>Select a job to view details</p>
+            <p>Select a job to view its schedule, history, and configuration</p>
           </div>
         </div>
         <div class="jobs-detail-content" id="jobsDetailContent" style="display:none"></div>
       </div>
     </div>
 
-    <!-- Systems Tab -->
+    <!-- Integrated-Being Tab (Integrated-Being v1) -->
+    <div id="integratedBeingPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Integrated-Being</h2>
+        <div>
+          <button onclick="loadIntegratedBeing()" style="padding:6px 12px">Refresh</button>
+        </div>
+      </div>
+      <div id="ibPerMachineNotice" style="font-size:12px;color:var(--text-dim);display:none">
+        Integrated-Being on this machine only — cross-machine ledger visibility is not yet implemented.
+      </div>
+
+      <!-- Summary cards -->
+      <div id="ibSummaryCards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+        <div style="background:var(--panel);padding:14px;border-radius:8px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase">Total entries</div>
+          <div id="ibCardTotal" style="font-size:22px;font-weight:600">–</div>
+        </div>
+        <div style="background:var(--panel);padding:14px;border-radius:8px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase">Classifier fires</div>
+          <div id="ibCardClassifier" style="font-size:22px;font-weight:600">–</div>
+        </div>
+        <div style="background:var(--panel);padding:14px;border-radius:8px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase">Rotations</div>
+          <div id="ibCardRotations" style="font-size:22px;font-weight:600">–</div>
+        </div>
+        <div style="background:var(--panel);padding:14px;border-radius:8px;border:1px solid var(--border)">
+          <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase">Unclosed &gt; TTL</div>
+          <div id="ibCardUnclosed" style="font-size:22px;font-weight:600">–</div>
+        </div>
+      </div>
+
+      <!-- Filters -->
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <label style="font-size:12px;color:var(--text-dim)">Kind
+          <select id="ibFilterKind" onchange="loadIntegratedBeing()" style="margin-left:6px">
+            <option value="">(any)</option>
+            <option value="commitment">commitment</option>
+            <option value="agreement">agreement</option>
+            <option value="thread-opened">thread-opened</option>
+            <option value="thread-closed">thread-closed</option>
+            <option value="thread-abandoned">thread-abandoned</option>
+            <option value="decision">decision</option>
+            <option value="note">note</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--text-dim)">Counterparty
+          <select id="ibFilterCounterparty" onchange="loadIntegratedBeing()" style="margin-left:6px">
+            <option value="">(any)</option>
+            <option value="user">user</option>
+            <option value="agent">agent</option>
+            <option value="self">self</option>
+            <option value="system">system</option>
+          </select>
+        </label>
+        <label style="font-size:12px;color:var(--text-dim)">Limit
+          <input type="number" id="ibFilterLimit" value="50" min="1" max="200" style="width:60px;margin-left:6px" onchange="loadIntegratedBeing()">
+        </label>
+      </div>
+
+      <!-- Recent entries table -->
+      <div style="background:var(--panel);border-radius:8px;border:1px solid var(--border);overflow:hidden">
+        <table style="width:100%;border-collapse:collapse;font-size:12px">
+          <thead>
+            <tr style="background:var(--bg-alt)">
+              <th style="text-align:left;padding:8px">ID</th>
+              <th style="text-align:left;padding:8px">Time</th>
+              <th style="text-align:left;padding:8px">Kind</th>
+              <th style="text-align:left;padding:8px">Subject</th>
+              <th style="text-align:left;padding:8px">Counterparty</th>
+              <th style="text-align:left;padding:8px">Provenance</th>
+              <th style="text-align:left;padding:8px">Supersedes</th>
+            </tr>
+          </thead>
+          <tbody id="ibEntriesTbody">
+            <tr><td colspan="7" style="padding:14px;color:var(--text-dim);text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Chain explorer -->
+      <div style="background:var(--panel);border-radius:8px;border:1px solid var(--border);padding:12px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:8px">Chain explorer</div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="text" id="ibChainInput" placeholder="12-hex entry id" style="flex:1;padding:6px">
+          <button onclick="walkIntegratedBeingChain()" style="padding:6px 12px">Walk chain</button>
+        </div>
+        <pre id="ibChainResult" style="margin-top:10px;max-height:200px;overflow:auto;font-size:11px"></pre>
+      </div>
+
+      <!-- Bindings subtab (slice 7) -->
+      <div id="ibBindingsSection" style="background:var(--panel);border-radius:8px;border:1px solid var(--border);padding:12px;display:none">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+          <div style="font-size:13px;font-weight:600">Session bindings (v2)</div>
+          <button onclick="loadIntegratedBeingBindings()" style="padding:4px 10px;font-size:11px">Refresh</button>
+        </div>
+        <div id="ibBindingsNotice" style="font-size:11px;color:var(--text-dim);margin-bottom:8px">
+          Each registered session has a binding token. Revoke to invalidate it — subsequent writes from that session fail 401. Revocation is logged as a subsystem-asserted note.
+        </div>
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead>
+            <tr style="background:var(--bg-alt)">
+              <th style="text-align:left;padding:6px">Session ID</th>
+              <th style="text-align:left;padding:6px">Label</th>
+              <th style="text-align:left;padding:6px">Registered</th>
+              <th style="text-align:left;padding:6px">Last active</th>
+              <th style="text-align:left;padding:6px">Absolute TTL</th>
+              <th style="text-align:left;padding:6px">Status</th>
+              <th style="text-align:left;padding:6px">Action</th>
+            </tr>
+          </thead>
+          <tbody id="ibBindingsTbody">
+            <tr><td colspan="7" style="padding:14px;color:var(--text-dim);text-align:center">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- PR Pipeline Tab (PR-REVIEW-HARDENING-SPEC Phase A) -->
+    <!-- Read-only: NO action buttons that mutate eligibility. All PR-authored -->
+    <!-- content rendered via textContent, never innerHTML — XSS defense rule -->
+    <!-- for the dashboard per spec §"Dashboard surface rules". -->
+    <div id="prPipelinePanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">PR Pipeline</h2>
+        <div>
+          <button onclick="loadPrPipeline()" style="padding:6px 12px">Refresh</button>
+        </div>
+      </div>
+      <div id="prPipelinePhaseNotice" style="font-size:12px;color:var(--text-dim)"></div>
+      <div id="prPipelineEmpty" style="padding:40px;text-align:center;color:var(--text-dim);display:none">
+        No PR activity to display.
+      </div>
+      <div id="prPipelineList" style="display:flex;flex-direction:column;gap:12px"></div>
+    </div>
+
+    <!-- Initiatives Tab — multi-phase long-running work -->
+    <div id="initiativesPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Initiatives</h2>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="initiativesFilter" style="padding:6px 10px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px" onchange="loadInitiatives()">
+            <option value="active">Active</option>
+            <option value="">All</option>
+            <option value="completed">Completed</option>
+            <option value="archived">Archived</option>
+            <option value="abandoned">Abandoned</option>
+          </select>
+          <button onclick="loadInitiatives()" style="padding:6px 12px">Refresh</button>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Multi-phase long-running work. Signals: <span style="color:#e27d3b">needs-user</span>,
+        <span style="color:#d65f5f">next-check-due</span>,
+        <span style="color:#4a9a4a">ready-to-advance</span>,
+        <span style="color:#888">stale (&gt;7d)</span>.
+      </div>
+      <div id="initiativesDigest" style="display:none;padding:12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-dim)"></div>
+      <div id="initiativesEmpty" style="padding:40px;text-align:center;color:var(--text-dim);display:none">
+        No initiatives to display. Create one via <code>POST /initiatives</code>.
+      </div>
+      <div id="initiativesList" style="display:flex;flex-direction:column;gap:12px"></div>
+    </div>
+
+    <!-- Commitments Tab (Open Promises) -->
+    <div id="secretsPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <h2 style="margin:0">Secrets</h2>
+        <div style="display:flex;gap:8px">
+          <button onclick="createTestSecretRequest()" style="padding:6px 12px" title="Create a short-lived test Secret Drop request">Create test request</button>
+          <button onclick="loadSecrets()" style="padding:6px 12px">Refresh</button>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Secret Drop — one-time-use links for users to submit credentials safely (never through chat).
+        Links expire automatically and are destroyed after submission.
+      </div>
+      <div id="secretsEmpty" style="padding:40px;text-align:center;color:var(--text-dim);display:none">
+        No pending secret requests.
+      </div>
+      <div id="secretsList" style="display:flex;flex-direction:column;gap:12px"></div>
+    </div>
+
+    <div id="commitmentsPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Commitments</h2>
+        <button onclick="loadCommitments()" style="padding:6px 12px">Refresh</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Open promises — beacon-watched commitments (⏳). States:
+        <span style="color:#4a9a4a">pending</span>,
+        <span style="color:#e27d3b">atRisk</span>,
+        <span style="color:#888">suppressed</span>.
+      </div>
+      <div id="commitmentsEmpty" style="padding:40px;text-align:center;color:var(--text-dim);display:none">
+        No open promises.
+      </div>
+      <div id="commitmentsList" style="display:flex;flex-direction:column;gap:12px"></div>
+    </div>
+
+    <!-- Tokens Tab — read-only token-usage observability -->
+    <div id="tokensPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Tokens</h2>
+        <button onclick="loadTokens()" style="padding:6px 12px">Refresh</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Token usage rolled up from Claude Code session transcripts. Last 24 hours unless noted.
+      </div>
+
+      <!-- Summary card -->
+      <div id="tokensSummaryCard" style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-weight:600">Last 24h</div>
+        <div id="tokensSummaryBody" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;font-size:13px">
+          <div style="color:var(--text-dim)">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Top sessions -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-weight:600">Top Sessions</div>
+        <div id="tokensSessionsBody" style="font-size:13px">
+          <div style="color:var(--text-dim)">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Orphans -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-weight:600">Idle Sessions (&gt; 30 min)</div>
+        <div id="tokensOrphansBody" style="font-size:13px">
+          <div style="color:var(--text-dim)">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Threadline Tab — agent-to-agent conversations + Telegram bridge settings -->
+    <div id="threadlineTab" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Threadline</h2>
+        <button onclick="loadThreadlineBridgeConfig()" style="padding:6px 12px">Refresh</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Threadline is your agent's secure channel to other AI agents. The Telegram bridge mirrors those conversations into per-thread Telegram topics so you can watch every exchange. Quiet by default — flip the master switch below to opt in.
+      </div>
+
+      <!-- Bridge settings card -->
+      <div id="tlBridgeCard" style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:14px">
+        <div style="font-weight:600">Telegram bridge settings</div>
+        <div id="tlBridgeStatus" style="font-size:12px;color:var(--text-dim)">Loading…</div>
+
+        <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px">
+          <input type="checkbox" id="tlBridgeEnabled" style="margin-top:3px" />
+          <span>
+            <strong>Bridge enabled (master switch)</strong>
+            <div style="color:var(--text-dim);font-size:12px;margin-top:2px">When off, no threadline traffic reaches Telegram, regardless of the toggles below.</div>
+          </span>
+        </label>
+
+        <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px">
+          <input type="checkbox" id="tlBridgeAutoCreate" style="margin-top:3px" />
+          <span>
+            <strong>Auto-create Telegram topics for new threads</strong>
+            <div style="color:var(--text-dim);font-size:12px;margin-top:2px">Default off. When off, a brand-new agent reaching out won't spawn a Telegram topic unless you've allow-listed them below.</div>
+          </span>
+        </label>
+
+        <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px">
+          <input type="checkbox" id="tlBridgeMirrorExisting" style="margin-top:3px" />
+          <span>
+            <strong>Mirror messages into existing topics</strong>
+            <div style="color:var(--text-dim);font-size:12px;margin-top:2px">Default on. Once a Telegram topic exists for a thread, both inbound and outbound messages on that thread show up there.</div>
+          </span>
+        </label>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div>
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Allow-list</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Always auto-create topics for these remote agents (overrides "auto-create off").</div>
+            <ul id="tlBridgeAllowList" style="list-style:none;padding:0;margin:0;font-size:13px;display:flex;flex-direction:column;gap:4px"></ul>
+            <div style="display:flex;gap:6px;margin-top:8px">
+              <input type="text" id="tlBridgeAllowInput" placeholder="agent fingerprint or name" style="flex:1;padding:6px 8px;font-size:12px" />
+              <button onclick="tlBridgeAddListEntry('allowList', 'tlBridgeAllowInput')" style="padding:6px 10px;font-size:12px">Add</button>
+            </div>
+          </div>
+          <div>
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Deny-list</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Never auto-create topics for these remote agents (overrides "auto-create on").</div>
+            <ul id="tlBridgeDenyList" style="list-style:none;padding:0;margin:0;font-size:13px;display:flex;flex-direction:column;gap:4px"></ul>
+            <div style="display:flex;gap:6px;margin-top:8px">
+              <input type="text" id="tlBridgeDenyInput" placeholder="agent fingerprint or name" style="flex:1;padding:6px 8px;font-size:12px" />
+              <button onclick="tlBridgeAddListEntry('denyList', 'tlBridgeDenyInput')" style="padding:6px 10px;font-size:12px">Add</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="tlBridgeError" style="color:var(--err, #c44);font-size:12px;display:none"></div>
+      </div>
+
+      <!-- Conversation observability — threads list + message stream + search -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:0;display:flex;flex-direction:column;min-height:480px">
+        <!-- Toolbar -->
+        <div style="display:flex;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)">
+          <div style="font-weight:600">Conversations</div>
+          <div style="flex:1"></div>
+          <input type="search" id="tlObsSearchInput" placeholder="search messages…" style="padding:6px 8px;font-size:12px;width:220px" oninput="tlObsSearchDebounced(this.value)" />
+          <select id="tlObsHasTopicFilter" onchange="tlObsLoadThreads()" style="padding:6px 8px;font-size:12px">
+            <option value="">all threads</option>
+            <option value="yes">with Telegram topic</option>
+            <option value="no">without Telegram topic</option>
+          </select>
+          <input type="text" id="tlObsRemoteFilter" placeholder="agent filter" style="padding:6px 8px;font-size:12px;width:140px" oninput="tlObsLoadThreadsDebounced()" />
+          <button onclick="tlObsLoadThreads()" style="padding:6px 10px;font-size:12px">Refresh</button>
+        </div>
+
+        <!-- Two-pane: threads list + active thread -->
+        <div style="display:grid;grid-template-columns:280px 1fr;flex:1;min-height:420px">
+          <ul id="tlObsThreadsList" style="list-style:none;padding:0;margin:0;border-right:1px solid var(--border);overflow-y:auto;max-height:520px">
+            <li style="padding:16px;color:var(--text-dim);font-size:12px">Loading…</li>
+          </ul>
+          <div id="tlObsConversation" style="padding:16px;overflow-y:auto;max-height:520px;display:flex;flex-direction:column;gap:10px">
+            <div style="color:var(--text-dim);font-size:12px;font-style:italic">Select a thread on the left to view the conversation.</div>
+          </div>
+        </div>
+
+        <!-- Search results -->
+        <div id="tlObsSearchResults" style="display:none;border-top:1px solid var(--border);padding:12px 16px;max-height:280px;overflow-y:auto"></div>
+      </div>
+    </div>
+
+    <!-- Health Tab (was Systems) -->
     <div class="systems-container" id="systemsTab" style="display:none">
       <div class="systems-main">
         <!-- Overview (card grid) -->
         <div id="systemsOverview">
           <div class="systems-header">
-            <h2>Systems</h2>
+            <h2>Health</h2>
             <button class="systems-refresh" onclick="loadSystems()">Refresh</button>
           </div>
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.4">Your agent's health and running processes</div>
           <div id="systemsBanner">
             <div style="padding:20px;color:var(--text-dim);text-align:center">Loading...</div>
           </div>
@@ -2789,54 +2996,57 @@
         </div>
         <!-- Detail view (single capability) -->
         <div class="cap-detail-view" id="systemsDetailView">
-          <button class="cap-detail-back" onclick="showSystemsOverview()">&#9664; Back to overview</button>
+          <button class="cap-detail-back" onclick="showSystemsOverview()">&#9664; Back to Health</button>
           <div id="systemsDetailContent"></div>
         </div>
       </div>
     </div>
 
-    <!-- Discovery Tab -->
-    <div class="discovery-container" id="discoveryTab" style="display:none">
-      <div class="discovery-main">
-        <div class="discovery-header">
-          <h2>Feature Discovery</h2>
-          <button class="discovery-refresh" onclick="loadDiscovery()">Refresh</button>
+    <!-- Features Tab (was Discovery) -->
+    <div class="features-container" id="featuresTab" style="display:none">
+      <div class="features-main">
+        <div class="features-header">
+          <h2>Features</h2>
+          <button class="features-refresh" onclick="loadFeatures()">Refresh</button>
         </div>
+        <div class="features-subtitle">Browse and configure your agent's capabilities. Features are opt-in and can be enabled or disabled at any time.</div>
 
-        <!-- Funnel Visualization -->
-        <div class="discovery-section">
-          <h3>Discovery Funnel</h3>
-          <div class="funnel-chart" id="funnelChart">
-            <div style="padding:20px;color:var(--text-dim);text-align:center">Loading...</div>
+        <!-- Autonomy Profile -->
+        <div class="autonomy-card" id="autonomyCard">
+          <div class="autonomy-card-icon" id="autonomyIcon">&#x1F6E1;</div>
+          <div class="autonomy-card-info">
+            <div class="autonomy-card-label">Autonomy Profile</div>
+            <div class="autonomy-card-level" id="autonomyLevel">Loading...</div>
+            <div class="autonomy-card-desc" id="autonomyDesc"></div>
           </div>
+          <button class="autonomy-card-btn" onclick="showProfileSelector()">Change</button>
         </div>
 
-        <!-- Feature States Grid -->
-        <div class="discovery-section">
-          <h3>Feature States</h3>
-          <div class="discovery-filter-bar">
-            <button class="discovery-filter active" data-filter="all" onclick="setDiscoveryFilter('all')">All</button>
-            <button class="discovery-filter" data-filter="enabled" onclick="setDiscoveryFilter('enabled')">Enabled</button>
-            <button class="discovery-filter" data-filter="undiscovered" onclick="setDiscoveryFilter('undiscovered')">Undiscovered</button>
-            <button class="discovery-filter" data-filter="aware" onclick="setDiscoveryFilter('aware')">Aware</button>
-            <button class="discovery-filter" data-filter="cooldown" onclick="setDiscoveryFilter('cooldown')">In Cooldown</button>
-          </div>
-          <div class="feature-grid" id="featureGrid"></div>
+        <!-- Feature Categories (populated by JS) -->
+        <div id="featureCatalog">
+          <div style="padding:20px;color:var(--text-dim);text-align:center">Loading features...</div>
         </div>
+      </div>
 
-        <!-- Digest Section -->
-        <div class="discovery-section" id="digestSection" style="display:none">
-          <h3>Digest</h3>
-          <div id="digestContent"></div>
-        </div>
+      <!-- Feature Detail View (hidden by default) -->
+      <div class="features-main feat-detail-view" id="featDetailView">
+        <button class="feat-detail-back" onclick="showFeaturesOverview()">&#9664; Back to Features</button>
+        <div id="featDetailContent"></div>
+      </div>
 
-        <!-- Event Log -->
-        <div class="discovery-section">
-          <h3>Recent Events</h3>
-          <div class="event-log" id="eventLog">
-            <div style="padding:12px;color:var(--text-dim);text-align:center">No events yet</div>
-          </div>
+      <!-- Profile Selector (hidden by default) -->
+      <div class="features-main feat-detail-view" id="profileSelectorView">
+        <button class="feat-detail-back" onclick="showFeaturesOverview()">&#9664; Back to Features</button>
+        <div class="feat-detail-header">
+          <div class="feat-detail-title"><h3>Choose Autonomy Profile</h3></div>
+          <div class="feat-detail-description">Your autonomy profile controls how independently your agent operates. Higher autonomy means fewer interruptions, but less oversight.</div>
         </div>
+        <div class="profile-selector" id="profileSelector"></div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+          <button class="autonomy-card-btn" onclick="showFeaturesOverview()">Cancel</button>
+          <button class="autonomy-card-btn" id="profileConfirmBtn" style="border-color:var(--accent);color:var(--accent)" onclick="confirmProfileChange()">Apply Profile</button>
+        </div>
+        <div id="profileHistory" style="margin-top:24px"></div>
       </div>
     </div>
 
@@ -3131,20 +3341,20 @@
           if (tele.toolsUsed && tele.toolsUsed.length > 0) {
             const toolList = tele.toolsUsed.slice(0, 4).join(', ');
             const extra = tele.toolsUsed.length > 4 ? ` +${tele.toolsUsed.length - 4}` : '';
-            parts.push(`<span class="telemetry-tag">${escapeHtml(toolList)}${extra}</span>`);
+            parts.push(`<span class="telemetry-tag" title="Tools used in this session">${escapeHtml(toolList)}${extra}</span>`);
           }
           if (tele.subagentsSpawned && tele.subagentsSpawned.length > 0) {
-            parts.push(`<span class="telemetry-tag active-subagents">${tele.subagentsSpawned.length} subagent${tele.subagentsSpawned.length > 1 ? 's' : ''}</span>`);
+            parts.push(`<span class="telemetry-tag active-subagents" title="Background tasks spawned by this session">${tele.subagentsSpawned.length} background task${tele.subagentsSpawned.length > 1 ? 's' : ''}</span>`);
           }
           if (tele.lastActivity) {
             const lastMs = Date.now() - new Date(tele.lastActivity).getTime();
             const lastMins = Math.floor(lastMs / 60000);
             if (lastMins > 10) {
-              parts.push(`<span class="telemetry-tag stale">idle ${lastMins}m</span>`);
+              parts.push(`<span class="telemetry-tag stale" title="No activity for ${lastMins} minutes">waiting ${lastMins}m</span>`);
             }
           }
           if (tele.eventCount) {
-            parts.push(`<span class="telemetry-tag">${tele.eventCount} events</span>`);
+            parts.push(`<span class="telemetry-tag" title="Total events in this session">${tele.eventCount} events</span>`);
           }
           if (parts.length > 0) {
             telemetryHtml = `<div class="session-telemetry">${parts.join('')}</div>`;
@@ -3180,6 +3390,7 @@
 
       activeSession = tmuxSession;
       userIsFollowing = true; // Reset scroll tracking on session switch
+      hideResumeButton(); // Carry-over button from prior session would be misleading
       historyLinesLoaded = 2000; // Reset history state for new session
       historyLoading = false;
       historyExhausted = false;
@@ -3193,7 +3404,7 @@
       document.getElementById('terminalView').style.display = 'flex';
       document.getElementById('terminalView').style.flexDirection = 'column';
       document.getElementById('terminalView').style.height = '100%';
-      document.getElementById('termSessionName').textContent = session.name;
+      document.getElementById('termSessionName').textContent = session.platformName || session.name;
 
       const badge = document.getElementById('termModelBadge');
       if (session.model) {
@@ -3293,15 +3504,20 @@
         if (atBottom && !userIsFollowing) {
           // User scrolled back to bottom — resume following and apply pending output
           userIsFollowing = true;
+          hideResumeButton();
           if (pendingOutputData) {
             const data = pendingOutputData;
             pendingOutputData = null;
             term.clear();
-            term.write(data);
-            term.scrollToBottom();
+            // term.write is async — scroll after write completes so the buffer is populated.
+            term.write(data, () => { term.scrollToBottom(); });
           }
-        } else if (!atBottom) {
+        } else if (!atBottom && userIsFollowing) {
+          // User scrolled up — pause follow and surface the resume button
+          // even if no new output is pending. The button is the always-available
+          // "take me back to live" control.
           userIsFollowing = false;
+          showResumeButton();
         }
 
         // Infinite scroll: load more history when scrolled near the top
@@ -3329,12 +3545,13 @@
             const atBottom = buf.baseY === 0 || (buf.baseY - buf.viewportY) <= 5;
             if (atBottom) {
               userIsFollowing = true;
+              hideResumeButton();
               if (pendingOutputData) {
                 const data = pendingOutputData;
                 pendingOutputData = null;
                 term.clear();
-                term.write(data);
-                term.scrollToBottom();
+                // term.write is async — scroll after write completes so the buffer is populated.
+                term.write(data, () => { term.scrollToBottom(); });
               }
             }
           }
@@ -3408,23 +3625,20 @@
         btn.style.cssText = 'position:absolute;bottom:12px;left:50%;transform:translateX(-50%);z-index:10;background:var(--accent);color:#000;border:none;padding:6px 16px;border-radius:4px;font-size:12px;cursor:pointer;font-weight:600;opacity:0.95;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
         btn.onclick = () => {
           userIsFollowing = true;
+          const snapToBottom = () => {
+            term.scrollToBottom();
+            const container = document.getElementById('terminalContainer');
+            if (container) container.scrollIntoView({ block: 'end', behavior: 'instant' });
+          };
           if (pendingOutputData) {
             const data = pendingOutputData;
             pendingOutputData = null;
             term.clear();
-            term.write(data);
-            // Delay scrollToBottom until after xterm renders the written data
-            requestAnimationFrame(() => {
-              term.scrollToBottom();
-              // Also scroll the browser viewport to show the terminal bottom
-              const container = document.getElementById('terminalContainer');
-              if (container) container.scrollIntoView({ block: 'end', behavior: 'instant' });
-            });
+            // term.write is async — use its completion callback so scroll runs
+            // after the buffer is populated, not against a stale viewport.
+            term.write(data, snapToBottom);
           } else {
-            // No pending data — just snap to bottom of existing content
-            term.scrollToBottom();
-            const container = document.getElementById('terminalContainer');
-            if (container) container.scrollIntoView({ block: 'end', behavior: 'instant' });
+            snapToBottom();
           }
           hideResumeButton();
         };
@@ -3773,16 +3987,68 @@
         onDeactivate: () => { disconnectJobsSSE(); },
       },
       {
-        id: 'discovery',
-        panels: ['discoveryTab'],
+        id: 'features',
+        panels: ['featuresTab'],
         display: ['flex'],
-        onActivate: () => { if (!discoveryLoaded) loadDiscovery(); },
+        onActivate: () => { if (!featuresLoaded) loadFeatures(); },
       },
       {
         id: 'systems',
         panels: ['systemsTab'],
         display: ['flex'],
         onActivate: () => { loadSystems(); },
+      },
+      {
+        id: 'integrated-being',
+        panels: ['integratedBeingPanel'],
+        display: ['flex'],
+        onActivate: () => { if (typeof loadIntegratedBeing === 'function') loadIntegratedBeing(); if (typeof loadIntegratedBeingBindings === 'function') loadIntegratedBeingBindings(); if (typeof startIntegratedBeingPoll === 'function') startIntegratedBeingPoll(); },
+        onDeactivate: () => { if (typeof stopIntegratedBeingPoll === 'function') stopIntegratedBeingPoll(); },
+      },
+      {
+        id: 'pr-pipeline',
+        panels: ['prPipelinePanel'],
+        display: ['flex'],
+        onActivate: () => { if (typeof loadPrPipeline === 'function') loadPrPipeline(); },
+      },
+      {
+        id: 'initiatives',
+        panels: ['initiativesPanel'],
+        display: ['flex'],
+        onActivate: () => { if (typeof loadInitiatives === 'function') loadInitiatives(); },
+      },
+      {
+        id: 'commitments',
+        panels: ['commitmentsPanel'],
+        display: ['flex'],
+        onActivate: () => { if (typeof loadCommitments === 'function') loadCommitments(); },
+      },
+      {
+        id: 'tokens',
+        panels: ['tokensPanel'],
+        display: ['flex'],
+        onActivate: () => { if (typeof loadTokens === 'function') loadTokens(); },
+      },
+      {
+        id: 'threadline',
+        panels: ['threadlineTab'],
+        display: ['flex'],
+        onActivate: () => {
+          if (typeof loadThreadlineBridgeConfig === 'function') loadThreadlineBridgeConfig();
+          if (typeof tlObsLoadThreads === 'function') tlObsLoadThreads();
+        },
+      },
+      {
+        id: 'secrets',
+        panels: ['secretsPanel'],
+        display: ['flex'],
+        onActivate: () => {
+          if (typeof loadSecrets === 'function') loadSecrets();
+          if (typeof startSecretsTicker === 'function') startSecretsTicker();
+        },
+        onDeactivate: () => {
+          if (typeof stopSecretsTicker === 'function') stopSecretsTicker();
+        },
       },
     ];
 
@@ -3864,15 +4130,357 @@
       return langMap[ext] || null;
     }
 
-    async function apiFetch(url) {
+    async function apiFetch(url, options = {}) {
+      const { headers: extraHeaders = {}, ...rest } = options;
       const resp = await fetch(url, {
-        headers: { 'Authorization': `Bearer ${token}` },
+        headers: { 'Authorization': `Bearer ${token}`, ...extraHeaders },
+        ...rest,
       });
       if (!resp.ok) {
         const data = await resp.json().catch(() => ({}));
         throw new Error(data.error || `HTTP ${resp.status}`);
       }
       return resp.json();
+    }
+
+    // ── Tokens Tab ──────────────────────────────────────────────────
+    function fmtTokens(n) {
+      if (n == null) return '0';
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+      return String(n);
+    }
+    function fmtRelTime(ts) {
+      if (!ts) return '—';
+      const diff = Date.now() - ts;
+      const min = Math.floor(diff / 60000);
+      if (min < 1) return 'just now';
+      if (min < 60) return min + 'm ago';
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return hr + 'h ago';
+      return Math.floor(hr / 24) + 'd ago';
+    }
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+    async function loadTokens() {
+      const summaryEl = document.getElementById('tokensSummaryBody');
+      const sessionsEl = document.getElementById('tokensSessionsBody');
+      const orphansEl = document.getElementById('tokensOrphansBody');
+      try {
+        const [summaryResp, sessionsResp, orphansResp] = await Promise.all([
+          apiFetch('/tokens/summary'),
+          apiFetch('/tokens/sessions?limit=10'),
+          apiFetch('/tokens/orphans?idleMs=' + (30 * 60 * 1000)),
+        ]);
+        const s = summaryResp.summary || {};
+        summaryEl.innerHTML = `
+          <div><div style="color:var(--text-dim)">Total tokens</div><div style="font-size:18px;font-weight:600">${fmtTokens(s.totalTokens)}</div></div>
+          <div><div style="color:var(--text-dim)">Input</div><div>${fmtTokens(s.totalInput)}</div></div>
+          <div><div style="color:var(--text-dim)">Output</div><div>${fmtTokens(s.totalOutput)}</div></div>
+          <div><div style="color:var(--text-dim)">Cache read</div><div>${fmtTokens(s.totalCacheRead)}</div></div>
+          <div><div style="color:var(--text-dim)">Cache create</div><div>${fmtTokens(s.totalCacheCreate)}</div></div>
+          <div><div style="color:var(--text-dim)">Events</div><div>${fmtTokens(s.eventCount)}</div></div>
+          <div><div style="color:var(--text-dim)">Sessions</div><div>${fmtTokens(s.sessionsActive)}</div></div>
+        `;
+
+        const sessions = sessionsResp.sessions || [];
+        if (sessions.length === 0) {
+          sessionsEl.innerHTML = '<div style="color:var(--text-dim)">No sessions in window.</div>';
+        } else {
+          sessionsEl.innerHTML = `
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead><tr style="text-align:left;color:var(--text-dim)">
+                <th style="padding:6px 8px">Session</th>
+                <th style="padding:6px 8px">Project</th>
+                <th style="padding:6px 8px;text-align:right">Tokens</th>
+                <th style="padding:6px 8px;text-align:right">Events</th>
+                <th style="padding:6px 8px">Last activity</th>
+              </tr></thead>
+              <tbody>
+                ${sessions.map(r => `
+                  <tr style="border-top:1px solid var(--border)">
+                    <td style="padding:6px 8px;font-family:monospace">${escapeHtml((r.sessionId || '').slice(0, 8))}</td>
+                    <td style="padding:6px 8px">${escapeHtml(r.projectPath || '—')}</td>
+                    <td style="padding:6px 8px;text-align:right">${fmtTokens(r.totalTokens)}</td>
+                    <td style="padding:6px 8px;text-align:right">${fmtTokens(r.eventCount)}</td>
+                    <td style="padding:6px 8px">${fmtRelTime(r.lastTs)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `;
+        }
+
+        const orphans = orphansResp.orphans || [];
+        if (orphans.length === 0) {
+          orphansEl.innerHTML = '<div style="color:var(--text-dim)">No idle sessions.</div>';
+        } else {
+          orphansEl.innerHTML = orphans.map(o => `
+            <div style="padding:6px 0;border-top:1px solid var(--border);display:flex;justify-content:space-between;font-family:monospace;font-size:12px">
+              <span>${escapeHtml((o.sessionId || '').slice(0, 12))}</span>
+              <span style="color:var(--text-dim)">${escapeHtml(o.projectPath || '—')}</span>
+              <span>${fmtRelTime(o.lastTs)}</span>
+            </div>
+          `).join('');
+        }
+      } catch (err) {
+        const msg = `<div style="color:var(--red)">Error: ${escapeHtml(err.message || String(err))}</div>`;
+        summaryEl.innerHTML = msg;
+        sessionsEl.innerHTML = '';
+        orphansEl.innerHTML = '';
+      }
+    }
+
+    // ── Threadline → Telegram bridge settings ──────────────────
+    let tlBridgeSettings = null;
+    let tlBridgeWiring = false;
+
+    async function loadThreadlineBridgeConfig() {
+      const statusEl = document.getElementById('tlBridgeStatus');
+      const errEl = document.getElementById('tlBridgeError');
+      if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+      try {
+        const resp = await apiFetch('/threadline/telegram-bridge/config');
+        tlBridgeSettings = resp;
+        renderThreadlineBridgeConfig();
+        if (statusEl) statusEl.textContent = `Bridge is ${resp.enabled ? 'ENABLED' : 'OFF'} · auto-create ${resp.autoCreateTopics ? 'on' : 'off'} · mirror existing ${resp.mirrorExisting ? 'on' : 'off'}.`;
+      } catch (err) {
+        if (statusEl) statusEl.textContent = '';
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = `Could not load bridge config: ${err.message || String(err)}`; }
+      }
+    }
+
+    function renderThreadlineBridgeConfig() {
+      if (!tlBridgeSettings) return;
+      tlBridgeWiring = true;
+      try {
+        document.getElementById('tlBridgeEnabled').checked = !!tlBridgeSettings.enabled;
+        document.getElementById('tlBridgeAutoCreate').checked = !!tlBridgeSettings.autoCreateTopics;
+        document.getElementById('tlBridgeMirrorExisting').checked = !!tlBridgeSettings.mirrorExisting;
+        renderTlBridgeListEntries('allowList', 'tlBridgeAllowList', tlBridgeSettings.allowList || []);
+        renderTlBridgeListEntries('denyList', 'tlBridgeDenyList', tlBridgeSettings.denyList || []);
+      } finally {
+        tlBridgeWiring = false;
+      }
+    }
+
+    function renderTlBridgeListEntries(field, listElId, entries) {
+      const ul = document.getElementById(listElId);
+      if (!ul) return;
+      if (entries.length === 0) {
+        ul.innerHTML = '<li style="color:var(--text-dim);font-size:12px;font-style:italic">(empty)</li>';
+        return;
+      }
+      ul.innerHTML = entries.map(e => `
+        <li style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:12px">
+          <span>${escapeHtml(e)}</span>
+          <button onclick="tlBridgeRemoveListEntry('${field}', ${JSON.stringify(e).replace(/'/g, "\\'")})" style="padding:2px 8px;font-size:11px">remove</button>
+        </li>
+      `).join('');
+    }
+
+    async function tlBridgePatchConfig(patch) {
+      const errEl = document.getElementById('tlBridgeError');
+      if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+      try {
+        const resp = await apiFetch('/threadline/telegram-bridge/config', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+        tlBridgeSettings = resp;
+        renderThreadlineBridgeConfig();
+        const statusEl = document.getElementById('tlBridgeStatus');
+        if (statusEl) statusEl.textContent = `Saved · bridge is ${resp.enabled ? 'ENABLED' : 'OFF'}.`;
+      } catch (err) {
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = `Update failed: ${err.message || String(err)}`; }
+        // Reload to roll back the optimistic UI
+        loadThreadlineBridgeConfig();
+      }
+    }
+
+    function tlBridgeAddListEntry(field, inputId) {
+      const input = document.getElementById(inputId);
+      const val = (input?.value || '').trim();
+      if (!val) return;
+      const current = (tlBridgeSettings?.[field] || []).slice();
+      if (!current.includes(val)) current.push(val);
+      tlBridgePatchConfig({ [field]: current });
+      if (input) input.value = '';
+    }
+
+    function tlBridgeRemoveListEntry(field, entry) {
+      const current = (tlBridgeSettings?.[field] || []).filter(x => x !== entry);
+      tlBridgePatchConfig({ [field]: current });
+    }
+
+    // Wire up toggle change-handlers once the panel exists
+    document.addEventListener('DOMContentLoaded', () => {
+      const wire = (id, field) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change', () => {
+          if (tlBridgeWiring) return;
+          tlBridgePatchConfig({ [field]: el.checked });
+        });
+      };
+      wire('tlBridgeEnabled', 'enabled');
+      wire('tlBridgeAutoCreate', 'autoCreateTopics');
+      wire('tlBridgeMirrorExisting', 'mirrorExisting');
+    });
+
+    // ── Threadline observability — threads list + conversation view ──
+    let tlObsActiveThreadId = null;
+    let tlObsLoadThreadsTimer = null;
+    let tlObsSearchTimer = null;
+
+    function tlObsLoadThreadsDebounced() {
+      if (tlObsLoadThreadsTimer) clearTimeout(tlObsLoadThreadsTimer);
+      tlObsLoadThreadsTimer = setTimeout(tlObsLoadThreads, 300);
+    }
+
+    function tlObsSearchDebounced(value) {
+      if (tlObsSearchTimer) clearTimeout(tlObsSearchTimer);
+      tlObsSearchTimer = setTimeout(() => tlObsRunSearch(value), 300);
+    }
+
+    async function tlObsLoadThreads() {
+      const list = document.getElementById('tlObsThreadsList');
+      if (!list) return;
+      const remoteAgent = document.getElementById('tlObsRemoteFilter')?.value?.trim() || '';
+      const hasTopic = document.getElementById('tlObsHasTopicFilter')?.value || '';
+      const params = new URLSearchParams();
+      if (remoteAgent) params.set('remoteAgent', remoteAgent);
+      if (hasTopic) params.set('hasTopic', hasTopic);
+      try {
+        const resp = await apiFetch('/threadline/observability/threads?' + params.toString());
+        const threads = resp.threads || [];
+        if (threads.length === 0) {
+          list.innerHTML = '<li style="padding:16px;color:var(--text-dim);font-size:12px;font-style:italic">No threads yet.</li>';
+          return;
+        }
+        list.innerHTML = threads.map(t => tlObsRenderThreadRow(t)).join('');
+      } catch (err) {
+        list.innerHTML = `<li style="padding:16px;color:var(--red)">Error: ${escapeHtml(err.message || String(err))}</li>`;
+      }
+    }
+
+    function tlObsRenderThreadRow(t) {
+      const lastSeen = t.lastSeen ? fmtRelTime(t.lastSeen) : '—';
+      const bridgeBadge = t.bridge
+        ? '<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:#3b82f6;color:#fff;font-size:10px;margin-left:6px">TG</span>'
+        : '';
+      const spawnBadge = t.hasSpawnedSession
+        ? '<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:#16a34a;color:#fff;font-size:10px;margin-left:4px">S</span>'
+        : '';
+      const isActive = tlObsActiveThreadId === t.threadId ? 'background:rgba(59,130,246,0.08);' : '';
+      return `
+        <li onclick="tlObsLoadThread('${t.threadId.replace(/'/g, "\\'")}')"
+            style="padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;${isActive}">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="font-weight:600;font-size:13px">${escapeHtml(t.remoteAgentName)}${bridgeBadge}${spawnBadge}</div>
+            <div style="font-size:11px;color:var(--text-dim)">${escapeHtml(lastSeen)}</div>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:monospace">
+            ${escapeHtml(t.threadId.slice(0, 16))}…
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:2px">
+            ${t.messageCount} msgs · ${t.inboundCount} in / ${t.outboundCount} out
+            ${typeof t.avgResponseLatencyMs === 'number' ? ' · ~' + Math.round(t.avgResponseLatencyMs / 1000) + 's reply' : ''}
+          </div>
+        </li>
+      `;
+    }
+
+    async function tlObsLoadThread(threadId) {
+      tlObsActiveThreadId = threadId;
+      tlObsLoadThreads(); // Re-render threads list to highlight active row
+      const conv = document.getElementById('tlObsConversation');
+      if (!conv) return;
+      conv.innerHTML = '<div style="color:var(--text-dim);font-size:12px">Loading…</div>';
+      try {
+        const detail = await apiFetch(`/threadline/observability/threads/${encodeURIComponent(threadId)}`);
+        conv.innerHTML = tlObsRenderConversation(detail);
+      } catch (err) {
+        conv.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${escapeHtml(err.message || String(err))}</div>`;
+      }
+    }
+
+    function tlObsRenderConversation(detail) {
+      const header = `
+        <div style="border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:10px">
+          <div style="font-weight:600;font-size:14px">${escapeHtml(detail.remoteAgentName)}</div>
+          <div style="font-family:monospace;font-size:11px;color:var(--text-dim)">${escapeHtml(detail.threadId)}</div>
+          <div style="display:flex;gap:14px;font-size:11px;color:var(--text-dim);margin-top:6px;flex-wrap:wrap">
+            <span>${detail.messageCount} messages</span>
+            <span>${detail.inboundCount} in / ${detail.outboundCount} out</span>
+            <span>first: ${escapeHtml(fmtRelTime(detail.firstSeen))}</span>
+            <span>last: ${escapeHtml(fmtRelTime(detail.lastSeen))}</span>
+            ${typeof detail.avgResponseLatencyMs === 'number' ? '<span>avg reply: ' + Math.round(detail.avgResponseLatencyMs/1000) + 's</span>' : ''}
+            ${detail.bridge ? '<span>📨 topic ' + detail.bridge.topicId + '</span>' : '<span style="color:var(--text-dim);font-style:italic">no Telegram topic</span>'}
+            ${detail.hasSpawnedSession ? '<span>🧵 spawn-session</span>' : ''}
+          </div>
+        </div>
+      `;
+      const messages = (detail.messages || []).map(m => tlObsRenderMessage(m)).join('');
+      return header + messages;
+    }
+
+    function tlObsRenderMessage(m) {
+      const isIn = m.direction === 'in';
+      const bg = isIn ? 'rgba(99,102,241,0.10)' : 'rgba(34,197,94,0.10)';
+      const border = isIn ? '#6366f1' : '#22c55e';
+      const arrow = isIn ? '←' : '→';
+      const meta = `${escapeHtml(m.timestamp)} · ${escapeHtml(m.id.slice(0, 8))}${m.outcome ? ' · ' + escapeHtml(m.outcome) : ''} · trust:${escapeHtml(m.trustLevel)}`;
+      return `
+        <div style="border-left:3px solid ${border};background:${bg};padding:8px 10px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+            <div style="font-weight:600;font-size:12px">
+              ${arrow} ${escapeHtml(m.remoteAgentName)}
+            </div>
+            <div style="font-size:11px;color:var(--text-dim)">${escapeHtml(fmtRelTime(m.timestamp))}</div>
+          </div>
+          <div style="font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.4">${escapeHtml(m.text)}</div>
+          <div style="font-family:monospace;font-size:10px;color:var(--text-dim);margin-top:4px">${meta}</div>
+        </div>
+      `;
+    }
+
+    async function tlObsRunSearch(query) {
+      const panel = document.getElementById('tlObsSearchResults');
+      if (!panel) return;
+      const q = (query || '').trim();
+      if (!q) { panel.style.display = 'none'; return; }
+      panel.style.display = 'block';
+      panel.innerHTML = '<div style="color:var(--text-dim);font-size:12px">Searching…</div>';
+      try {
+        const resp = await apiFetch('/threadline/observability/search?q=' + encodeURIComponent(q) + '&limit=30');
+        const hits = resp.hits || [];
+        if (hits.length === 0) {
+          panel.innerHTML = '<div style="color:var(--text-dim);font-size:12px">No matches.</div>';
+          return;
+        }
+        panel.innerHTML = `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${hits.length} match${hits.length === 1 ? '' : 'es'} (click to open thread)</div>` +
+          hits.map(h => `
+            <div onclick="tlObsLoadThread('${h.message.threadId.replace(/'/g, "\\'")}')"
+                 style="padding:6px 8px;border-bottom:1px solid var(--border);cursor:pointer;font-size:12px">
+              <div style="display:flex;justify-content:space-between">
+                <span style="font-weight:600">${h.message.direction === 'in' ? '←' : '→'} ${escapeHtml(h.message.remoteAgentName)}</span>
+                <span style="font-size:11px;color:var(--text-dim)">${escapeHtml(fmtRelTime(h.message.timestamp))}</span>
+              </div>
+              <div style="margin-top:2px;line-height:1.4">${tlObsRenderSnippet(h.snippet)}</div>
+            </div>
+          `).join('');
+      } catch (err) {
+        panel.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${escapeHtml(err.message || String(err))}</div>`;
+      }
+    }
+
+    function tlObsRenderSnippet(s) {
+      // Server returns matches wrapped in «...» — render as <mark>
+      return escapeHtml(s).replace(/«/g, '<mark style="background:#fef08a;color:#000">').replace(/»/g, '</mark>');
     }
 
     async function loadFileTree() {
@@ -4638,7 +5246,7 @@
               <span class="dz-paste-meta">${chars} chars &middot; ${age}</span>
             </div>
             <div style="display:flex;align-items:center;gap:8px">
-              <span class="dz-paste-status ${p.status}">${p.status}</span>
+              <span class="dz-paste-status ${p.status}">${p.status === 'notified' ? 'delivered' : p.status === 'queued' || p.status === 'written' ? 'waiting' : p.status}</span>
               <button class="dz-paste-delete" onclick="deletePaste('${esc(p.pasteId)}')" title="Delete">&times;</button>
             </div>
           </div>`;
@@ -4674,10 +5282,10 @@
           const chars = data.contentLength?.toLocaleString() || content.length.toLocaleString();
           if (data.status === 'notified') {
             status.className = 'dropzone-status success';
-            status.textContent = `Sent ${chars} chars to session "${data.sessionName}"`;
+            status.textContent = `Delivered ${chars} chars to session "${data.sessionName}"`;
           } else {
             status.className = 'dropzone-status queued';
-            status.textContent = `Queued ${chars} chars \u2014 will be delivered when a session starts.`;
+            status.textContent = `Waiting for session \u2014 ${chars} chars will be delivered when a session starts.`;
           }
           status.style.display = 'block';
 
@@ -4763,8 +5371,8 @@
         const sessVital = document.getElementById('vitalSessions');
         const cur = h.sessions?.current ?? 0;
         const max = h.sessions?.max ?? 0;
-        sessEl.textContent = cur + '/' + max;
-        if (cur >= max) {
+        sessEl.textContent = cur + (max > 0 ? '/' + max : '') + ' session' + (cur !== 1 ? 's' : '');
+        if (max > 0 && cur >= max) {
           sessVital.className = 'vital warn';
         } else {
           sessVital.className = 'vital';
@@ -4874,11 +5482,25 @@
         const data = await apiFetch('/jobs');
         const jobs = data.jobs || data;
         jobsData = Array.isArray(jobs) ? jobs : [];
+        renderJobsSummary();
         renderJobList();
       } catch (e) {
         document.getElementById('jobsList').innerHTML =
           '<div style="padding:20px;color:var(--red);text-align:center">Failed to load jobs</div>';
       }
+    }
+
+    function renderJobsSummary() {
+      const total = jobsData.length;
+      const running = jobsData.filter(j => j.state && j.state.lastResult === 'pending').length;
+      const failing = jobsData.filter(j => j.enabled && (j.state?.consecutiveFailures || 0) > 0).length;
+      const disabled = jobsData.filter(j => !j.enabled).length;
+      const healthy = total - failing - disabled;
+      document.getElementById('jobsSummary').innerHTML = `
+        <div class="jobs-summary-card"><div class="jobs-summary-val">${total}</div><div class="jobs-summary-label">Total</div></div>
+        <div class="jobs-summary-card${running > 0 ? ' running' : ''}"><div class="jobs-summary-val">${running}</div><div class="jobs-summary-label">Running</div></div>
+        <div class="jobs-summary-card${failing > 0 ? ' failing' : ''}"><div class="jobs-summary-val">${failing}</div><div class="jobs-summary-label">Failing</div></div>
+        <div class="jobs-summary-card"><div class="jobs-summary-val">${disabled}</div><div class="jobs-summary-label">Disabled</div></div>`;
     }
 
     function setJobFilter(filter) {
@@ -4894,6 +5516,9 @@
       const sort = document.getElementById('jobsSort').value;
 
       let filtered = jobsData.filter(j => {
+        if (jobFilter === 'running') {
+          return j.state && j.state.lastResult === 'pending';
+        }
         if (jobFilter === 'failing') {
           const s = j.state || {};
           return (s.consecutiveFailures || 0) > 0;
@@ -4943,6 +5568,8 @@
         const lastResult = s.lastResult || '—';
         const lastTime = s.lastRun ? timeAgo(new Date(s.lastRun)) : 'never';
         const isActive = selectedJob === j.slug ? ' active' : '';
+        const displayName = j.name || j.slug;
+        const desc = j.description ? '<div style="font-size:10px;color:var(--text-dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(j.description) + '</div>' : '';
 
         const priorityBadge = (j.priority === 'critical' || j.priority === 'high')
           ? '<span class="priority-badge ' + esc(j.priority) + '">' + esc(j.priority) + '</span>' : '';
@@ -4950,9 +5577,10 @@
         return '<div class="job-item' + isActive + '" onclick="selectJob(\'' + esc(j.slug) + '\')">'
           + '<div class="job-item-top">'
           + '<span class="job-status-dot ' + dotClass + '"></span>'
-          + '<span class="job-item-name">' + esc(j.slug) + '</span>'
+          + '<span class="job-item-name">' + esc(displayName) + '</span>'
           + (failures > 0 ? '<span class="job-failure-count">' + failures + ' fail</span>' : '')
           + '</div>'
+          + desc
           + '<div class="job-item-meta">'
           + '<span>' + esc(schedule) + '</span>'
           + '<span class="model-badge">' + esc(j.model || '—') + '</span>'
@@ -4991,23 +5619,46 @@
       let statusText = 'Healthy';
       let statusClass = 'success';
       if (!job.enabled) { statusText = 'Disabled'; statusClass = ''; }
-      else if (failures >= 3) { statusText = 'Failing (' + failures + ' consecutive)'; statusClass = 'error'; }
-      else if (failures > 0) { statusText = 'Warning (' + failures + ' failures)'; statusClass = 'error'; }
-      else if (isRunning) { statusText = 'Running'; statusClass = ''; }
+      else if (failures >= 3) { statusText = 'This job has failed ' + failures + ' times in a row'; statusClass = 'error'; }
+      else if (failures > 0) { statusText = failures + ' recent failure' + (failures > 1 ? 's' : ''); statusClass = 'error'; }
+      else if (isRunning) { statusText = 'Running now'; statusClass = ''; }
 
-      const tags = (job.tags || []).map(t => esc(t)).join(', ') || '—';
+      const displayName = job.name || job.slug;
+      const nextTimeAbs = s.nextScheduled ? new Date(s.nextScheduled).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
+      const lastTimeAbs = s.lastRun ? new Date(s.lastRun).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Never';
+
+      // Supervision explanation
+      const supervisionLabels = { tier0: 'Basic (no AI verification)', tier1: 'AI-supervised (Haiku validates)', tier2: 'Full AI (Sonnet/Opus handles reasoning)' };
+      const execTypeLabels = { skill: 'Runs a skill', prompt: 'Runs a prompt', script: 'Runs a script' };
+
+      // Build config section
+      let configHtml = '<div class="job-config-section">'
+        + '<div class="job-config-title" onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display===\'none\'?\'grid\':\'none\'">&#9654; Configuration</div>'
+        + '<div class="job-config-grid" style="display:none">'
+        + '<div class="job-config-key">Schedule</div><div class="job-config-val">' + esc(schedule) + ' (' + esc(job.schedule) + ')</div>'
+        + '<div class="job-config-key">Model</div><div class="job-config-val">' + esc(job.model || 'default') + '</div>'
+        + '<div class="job-config-key">Priority</div><div class="job-config-val">' + esc(job.priority || 'medium') + '</div>'
+        + '<div class="job-config-key">Execution</div><div class="job-config-val">' + esc(execTypeLabels[job.execute?.type] || job.execute?.type || '—') + '</div>';
+      if (job.supervision) {
+        configHtml += '<div class="job-config-key">Supervision</div><div class="job-config-val">' + esc(supervisionLabels[job.supervision] || job.supervision) + '</div>';
+      }
+      if (job.tags && job.tags.length > 0) {
+        configHtml += '<div class="job-config-key">Tags</div><div class="job-config-val">' + job.tags.map(t => esc(t)).join(', ') + '</div>';
+      }
+      if (job.gate) {
+        configHtml += '<div class="job-config-key">Pre-flight check</div><div class="job-config-val">Yes (runs before each execution)</div>';
+      }
+      if (job.machines && job.machines.length > 0) {
+        configHtml += '<div class="job-config-key">Machines</div><div class="job-config-val">' + job.machines.map(m => esc(m)).join(', ') + '</div>';
+      }
+      configHtml += '</div></div>';
 
       detail.innerHTML = '<div class="job-detail-header">'
         + '<div>'
         + '<button class="back-btn" onclick="jobsGoBack()" style="display:none;margin-right:8px">&larr;</button>'
-        + '<h3>' + esc(job.slug) + '</h3>'
-        + '<div class="job-desc">' + esc(job.description || job.name || '') + '</div>'
-        + '<div class="job-meta-line">'
-        + '<span>' + esc(job.schedule) + ' (' + esc(schedule) + ')</span>'
-        + '<span class="model-badge">' + esc(job.model || '—') + '</span>'
-        + (job.priority ? '<span class="priority-badge ' + esc(job.priority) + '">' + esc(job.priority) + '</span>' : '')
-        + '<span>Tags: ' + tags + '</span>'
-        + '</div></div>'
+        + '<h3>' + esc(displayName) + '</h3>'
+        + '<div class="job-desc">' + esc(job.description || '') + '</div>'
+        + '</div>'
         + '<div class="job-detail-actions">'
         + '<button class="job-run-btn" id="jobRunBtn" onclick="runJob(\'' + esc(job.slug) + '\')"'
         + (isRunning ? ' disabled' : '') + '>'
@@ -5018,14 +5669,16 @@
         + '</div></div>'
         + '<div class="job-state-card">'
         + '<div class="state-row"><span>Status</span><span class="state-val ' + statusClass + '">' + esc(statusText) + '</span></div>'
-        + '<div class="state-row"><span>Last Run</span><span class="state-val">' + esc(lastTime) + '</span></div>'
+        + '<div class="state-row"><span>Last Run</span><span class="state-val">' + esc(lastTimeAbs) + ' (' + esc(lastTime) + ')</span></div>'
         + '<div class="state-row"><span>Last Result</span><span class="state-val ' + (lastResult === 'success' ? 'success' : failures > 0 ? 'error' : '') + '">' + esc(lastResult) + '</span></div>'
-        + (s.lastError ? '<div class="state-row"><span>Error</span><span class="state-val error">' + esc(s.lastError) + '</span></div>' : '')
-        + '<div class="state-row"><span>Next Run</span><span class="state-val">' + esc(nextTime) + '</span></div>'
+        + (s.lastError ? '<div class="state-row"><span>Error</span><span class="state-val error" style="word-break:break-word">' + esc(s.lastError) + '</span></div>' : '')
+        + '<div class="state-row"><span>Next Run</span><span class="state-val">' + esc(nextTimeAbs) + '</span></div>'
         + '</div>'
         + '<div id="jobSparkline" class="job-sparkline"></div>'
+        + '<div class="sparkline-legend"><div class="sparkline-legend-item"><div class="sparkline-legend-dot success"></div>Success</div><div class="sparkline-legend-item"><div class="sparkline-legend-dot failure"></div>Failure</div><div class="sparkline-legend-item"><div class="sparkline-legend-dot skipped"></div>Skipped</div></div>'
         + '<div class="job-history-section"><h4>Run History</h4>'
-        + '<div id="jobHistoryTable">Loading...</div></div>';
+        + '<div id="jobHistoryTable">Loading...</div></div>'
+        + configHtml;
 
       // Show back button on mobile
       if (window.innerWidth <= 768) {
@@ -5072,12 +5725,12 @@
             const result = r.result || '—';
             const dur = r.durationSeconds != null ? r.durationSeconds + 's'
               : r.durationMs != null ? Math.round(r.durationMs / 1000) + 's' : '—';
-            const error = r.error ? esc(r.error).substring(0, 80) : '—';
+            const error = r.error ? esc(r.error) : '—';
             return '<tr>'
               + '<td>' + esc(time) + '</td>'
               + '<td><span class="result-badge ' + esc(result) + '">' + esc(result) + '</span></td>'
               + '<td>' + esc(dur) + '</td>'
-              + '<td style="color:var(--text-dim);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + error + '</td>'
+              + '<td style="color:var(--text-dim);max-width:300px;word-break:break-word" title="' + esc(r.error || '') + '">' + error + '</td>'
               + '</tr>';
           }).join('') + '</tbody></table>';
       } catch (e) {
@@ -5240,198 +5893,1105 @@
       }
     }
 
-    // ── Discovery Tab ──────────────────────────────────────
-    let discoveryLoaded = false;
-    let discoveryData = null;
-    let discoveryFilter = 'all';
+    // ── Features Tab (was Discovery) ──────────────────────────
+    let featuresLoaded = false;
+    let featuresData = null;  // { features: [], autonomy: {} }
+    let selectedProfile = null;
 
-    const FUNNEL_COLORS = {
-      undiscovered: '#444',
-      aware: 'var(--blue)',
-      interested: '#eab308',
-      deferred: '#888',
-      declined: 'var(--red)',
-      enabled: 'var(--accent)',
-      disabled: '#555',
+    const AUTONOMY_PROFILES = {
+      cautious: { icon: '&#x1F6E1;', desc: 'You approve everything. Maximum oversight, minimum agent independence.' },
+      supervised: { icon: '&#x1F441;', desc: 'Routine tasks run automatically. You approve important decisions. Recommended for most users.' },
+      collaborative: { icon: '&#x1F91D;', desc: 'Agent handles most decisions independently. Keeps you informed of what it does.' },
+      autonomous: { icon: '&#x1F680;', desc: 'Full self-governance. Agent handles everything and reports results.' },
     };
 
-    const FUNNEL_ORDER = ['undiscovered', 'aware', 'interested', 'deferred', 'declined', 'enabled', 'disabled'];
+    const CATEGORY_LABELS = {
+      communication: 'Communication',
+      infrastructure: 'Infrastructure',
+      intelligence: 'Intelligence',
+      safety: 'Safety & Trust',
+    };
+    const CATEGORY_ORDER = ['safety', 'communication', 'infrastructure', 'intelligence'];
 
-    async function loadDiscovery() {
-      discoveryLoaded = true;
+    async function loadFeatures() {
+      featuresLoaded = true;
       try {
-        discoveryData = await apiFetch('/features/analytics');
-        renderDiscoveryMetrics();
-        renderFunnel();
-        renderFeatureGrid();
-        renderDigest();
-        renderEventLog();
+        const [rawFeatures, autonomy] = await Promise.all([
+          apiFetch('/features'),
+          apiFetch('/autonomy').catch(() => ({ profile: 'supervised' })),
+        ]);
+        // API returns { features: [{ definition: {...}, state: {...} }] }
+        const featureList = rawFeatures?.features || rawFeatures || [];
+        const flattened = featureList.map(f => {
+          if (f.definition) {
+            return { ...f.definition, ...f.state, discoveryState: f.state?.discoveryState, enabled: f.state?.enabled };
+          }
+          return f;
+        });
+        featuresData = { features: flattened, autonomy: autonomy || {} };
+        renderAutonomyCard();
+        renderFeatureCatalog();
       } catch (e) {
-        document.getElementById('funnelChart').innerHTML =
-          '<div style="padding:20px;color:var(--red);text-align:center">Failed to load discovery data</div>';
+        document.getElementById('featureCatalog').innerHTML =
+          '<div style="padding:20px;color:var(--red);text-align:center">Failed to load features</div>';
       }
     }
 
-    function renderDiscoveryMetrics() {
-      if (!discoveryData) return;
-      const d = discoveryData;
-      const metricsHtml = `
-        <div class="discovery-metrics">
-          <div class="metric-card">
-            <div class="metric-value">${d.totalFeatures}</div>
-            <div class="metric-label">Total Features</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-value">${d.enabledCount}</div>
-            <div class="metric-label">Enabled</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-value">${Math.round(d.discoveryRate * 100)}%</div>
-            <div class="metric-label">Discovery Rate</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-value">${d.cooldowns.filter(c => c.cooldownExpiresAt).length}</div>
-            <div class="metric-label">In Cooldown</div>
-          </div>
-        </div>`;
-      // Insert before funnel
-      const section = document.querySelector('.discovery-section');
-      if (section && !document.getElementById('discoveryMetrics')) {
-        const div = document.createElement('div');
-        div.id = 'discoveryMetrics';
-        div.innerHTML = metricsHtml;
-        section.parentNode.insertBefore(div, section);
-      }
+    function renderAutonomyCard() {
+      if (!featuresData) return;
+      const profile = featuresData.autonomy.profile || featuresData.autonomy.autonomyProfile || 'supervised';
+      const info = AUTONOMY_PROFILES[profile] || AUTONOMY_PROFILES.supervised;
+      document.getElementById('autonomyIcon').innerHTML = info.icon;
+      document.getElementById('autonomyLevel').textContent = profile;
+      document.getElementById('autonomyDesc').textContent = info.desc;
     }
 
-    function renderFunnel() {
-      if (!discoveryData) return;
-      const funnel = discoveryData.funnel;
-      const maxVal = Math.max(1, ...Object.values(funnel));
-      const chart = document.getElementById('funnelChart');
+    function renderFeatureCatalog() {
+      if (!featuresData) return;
+      const catalog = document.getElementById('featureCatalog');
+      const features = featuresData.features;
 
-      chart.innerHTML = FUNNEL_ORDER.map(state => {
-        const count = funnel[state] || 0;
-        const height = Math.max(2, (count / maxVal) * 80);
-        const color = FUNNEL_COLORS[state] || '#444';
-        return `<div class="funnel-bar">
-          <div class="funnel-bar-count">${count}</div>
-          <div class="funnel-bar-fill" style="height:${height}px;background:${color}"></div>
-          <div class="funnel-bar-label">${state}</div>
-        </div>`;
-      }).join('');
-    }
-
-    function setDiscoveryFilter(filter) {
-      discoveryFilter = filter;
-      document.querySelectorAll('.discovery-filter').forEach(c => {
-        c.classList.toggle('active', c.dataset.filter === filter);
-      });
-      renderFeatureGrid();
-    }
-
-    function renderFeatureGrid() {
-      if (!discoveryData) return;
-      const grid = document.getElementById('featureGrid');
-      const cooldowns = discoveryData.cooldowns || [];
-
-      let filtered = cooldowns;
-      if (discoveryFilter === 'enabled') {
-        filtered = cooldowns.filter(c => c.discoveryState === 'enabled');
-      } else if (discoveryFilter === 'undiscovered') {
-        filtered = cooldowns.filter(c => c.discoveryState === 'undiscovered');
-      } else if (discoveryFilter === 'aware') {
-        filtered = cooldowns.filter(c => ['aware', 'interested', 'deferred'].includes(c.discoveryState));
-      } else if (discoveryFilter === 'cooldown') {
-        filtered = cooldowns.filter(c => c.cooldownExpiresAt || c.quieted);
+      // Group by category
+      const groups = {};
+      for (const f of features) {
+        const cat = f.category || 'other';
+        if (!groups[cat]) groups[cat] = [];
+        groups[cat].push(f);
       }
 
-      if (filtered.length === 0) {
-        grid.innerHTML = '<div style="padding:16px;color:var(--text-dim);text-align:center">No features match filter</div>';
-        return;
-      }
-
-      grid.innerHTML = filtered.map(c => {
-        const cooldownNote = c.cooldownExpiresAt
-          ? '<span class="cooldown">cooldown until ' + new Date(c.cooldownExpiresAt).toLocaleTimeString() + '</span>'
-          : c.quieted ? '<span class="cooldown">quieted (' + c.surfaceCount + '/' + c.maxSurfaces + ')</span>' : '';
-
-        return `<div class="feature-card">
-          <div class="feature-card-top">
-            <span class="feature-card-name">${esc(c.featureName)}</span>
-            <span class="feature-state-badge ${esc(c.discoveryState)}">${esc(c.discoveryState)}</span>
-          </div>
-          <div class="feature-card-meta">
-            <span>surfaced ${c.surfaceCount}/${c.maxSurfaces}</span>
-            ${cooldownNote}
-          </div>
-        </div>`;
-      }).join('');
-    }
-
-    function renderDigest() {
-      if (!discoveryData) return;
-      const section = document.getElementById('digestSection');
-      const content = document.getElementById('digestContent');
-      const changed = discoveryData.changedDisabled || [];
-      const unused = discoveryData.unusedEnabled || [];
-
-      if (changed.length === 0 && unused.length === 0) {
-        section.style.display = 'none';
-        return;
-      }
-
-      section.style.display = '';
       let html = '';
-
-      if (changed.length > 0) {
-        html += '<h4 style="font-size:12px;color:var(--text-dim);margin-bottom:8px">Disabled features with updates</h4>';
-        html += changed.map(f =>
-          `<div class="digest-item">
-            <div class="digest-item-title">${esc(f.featureName)}</div>
-            <div class="digest-item-desc">Version ${esc(f.currentVersion)} available</div>
-          </div>`
-        ).join('');
+      for (const cat of CATEGORY_ORDER) {
+        const items = groups[cat];
+        if (!items || items.length === 0) continue;
+        const label = CATEGORY_LABELS[cat] || cat;
+        html += `<div class="feat-category">
+          <div class="feat-category-title">${esc(label)}</div>
+          <div class="feat-grid">`;
+        for (const f of items) {
+          const isEnabled = f.discoveryState === 'enabled' || f.enabled;
+          const oneLiner = f.oneLiner || f.description || '';
+          html += `<div class="feat-card" onclick="showFeatureDetail('${esc(f.id)}')">
+            <div class="feat-card-top">
+              <span class="feat-card-name">${esc(f.name)}</span>
+              <label class="feat-toggle" onclick="event.stopPropagation()">
+                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleFeature('${esc(f.id)}', this.checked)">
+                <span class="feat-toggle-slider"></span>
+              </label>
+              <span class="feat-card-arrow">&#9654;</span>
+            </div>
+            <div class="feat-card-desc">${esc(oneLiner)}</div>
+          </div>`;
+        }
+        html += '</div></div>';
       }
 
-      if (unused.length > 0) {
-        html += '<h4 style="font-size:12px;color:var(--text-dim);margin:12px 0 8px">Enabled but unused (&gt;15 days)</h4>';
-        html += unused.map(f =>
-          `<div class="digest-item">
-            <div class="digest-item-title">${esc(f.featureName)}</div>
-            <div class="digest-item-desc">${f.daysSinceActivity} days since last activity</div>
-          </div>`
-        ).join('');
+      // Handle uncategorized
+      for (const cat of Object.keys(groups)) {
+        if (CATEGORY_ORDER.includes(cat)) continue;
+        const items = groups[cat];
+        html += `<div class="feat-category">
+          <div class="feat-category-title">${esc(cat)}</div>
+          <div class="feat-grid">`;
+        for (const f of items) {
+          const isEnabled = f.discoveryState === 'enabled' || f.enabled;
+          html += `<div class="feat-card" onclick="showFeatureDetail('${esc(f.id)}')">
+            <div class="feat-card-top">
+              <span class="feat-card-name">${esc(f.name)}</span>
+              <label class="feat-toggle" onclick="event.stopPropagation()">
+                <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleFeature('${esc(f.id)}', this.checked)">
+                <span class="feat-toggle-slider"></span>
+              </label>
+              <span class="feat-card-arrow">&#9654;</span>
+            </div>
+            <div class="feat-card-desc">${esc(f.oneLiner || f.description || '')}</div>
+          </div>`;
+        }
+        html += '</div></div>';
       }
 
-      content.innerHTML = html;
+      catalog.innerHTML = html || '<div style="padding:20px;color:var(--text-dim);text-align:center">No features found</div>';
     }
 
-    function renderEventLog() {
-      if (!discoveryData) return;
-      const log = document.getElementById('eventLog');
-      const events = discoveryData.recentEvents || [];
+    async function toggleFeature(featureId, enable) {
+      try {
+        const to = enable ? 'enabled' : 'disabled';
+        await apiFetch(`/features/${featureId}/transition`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to }),
+        });
+        // Refresh features data
+        featuresLoaded = false;
+        await loadFeatures();
+      } catch (e) {
+        showToast('Failed to update feature: ' + (e.message || e), 'error');
+        featuresLoaded = false;
+        await loadFeatures(); // Reset toggle state
+      }
+    }
 
-      if (events.length === 0) {
-        log.innerHTML = '<div style="padding:12px;color:var(--text-dim);text-align:center">No events yet</div>';
+    function showFeatureDetail(featureId) {
+      if (!featuresData) return;
+      const f = featuresData.features.find(feat => feat.id === featureId);
+      if (!f) return;
+
+      // Hide overview, show detail
+      document.getElementById('featureCatalog').parentNode.querySelector('.features-header').style.display = 'none';
+      document.getElementById('featureCatalog').parentNode.querySelector('.features-subtitle').style.display = 'none';
+      document.getElementById('autonomyCard').style.display = 'none';
+      document.getElementById('featureCatalog').style.display = 'none';
+      document.getElementById('featDetailView').classList.add('active');
+
+      const isEnabled = f.discoveryState === 'enabled' || f.enabled;
+      const content = document.getElementById('featDetailContent');
+
+      let dataHtml = '';
+      if (f.dataImplications && f.dataImplications.length > 0) {
+        dataHtml = `<div class="feat-detail-section">
+          <div class="feat-detail-section-title">Data & Privacy</div>
+          ${f.dataImplications.map(d => `
+            <div class="feat-data-item">
+              <div class="feat-data-icon">&#x1F4CB;</div>
+              <div class="feat-data-content">
+                <div class="feat-data-label">${esc(d.dataType)}</div>
+                <div class="feat-data-desc">${esc(d.description || '')}${d.retention ? ' Retention: ' + esc(d.retention) + '.' : ''}${d.destination ? ' Destination: ' + esc(d.destination) + '.' : ''}</div>
+              </div>
+            </div>`).join('')}
+        </div>`;
+      }
+
+      let reversibilityHtml = '';
+      if (f.reversibilityNote) {
+        reversibilityHtml = `<div class="feat-detail-section">
+          <div class="feat-detail-section-title">How to Undo</div>
+          <div class="feat-reversibility">${esc(f.reversibilityNote)}</div>
+        </div>`;
+      }
+
+      content.innerHTML = `
+        <div class="feat-detail-header">
+          <div class="feat-detail-title">
+            <h3>${esc(f.name)}</h3>
+            <span class="feat-detail-category">${esc(CATEGORY_LABELS[f.category] || f.category || '')}</span>
+            <label class="feat-toggle">
+              <input type="checkbox" ${isEnabled ? 'checked' : ''} onchange="toggleFeature('${esc(f.id)}', this.checked)">
+              <span class="feat-toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+        <div class="feat-detail-description">${esc(f.fullDescription || f.oneLiner || f.description || '')}</div>
+        ${dataHtml}
+        ${reversibilityHtml}
+      `;
+    }
+
+    function showFeaturesOverview() {
+      document.getElementById('featDetailView').classList.remove('active');
+      document.getElementById('profileSelectorView').classList.remove('active');
+      const container = document.getElementById('featureCatalog').parentNode;
+      container.querySelector('.features-header').style.display = '';
+      container.querySelector('.features-subtitle').style.display = '';
+      document.getElementById('autonomyCard').style.display = '';
+      document.getElementById('featureCatalog').style.display = '';
+    }
+
+    function showProfileSelector() {
+      // Hide overview, show selector
+      document.getElementById('featureCatalog').parentNode.querySelector('.features-header').style.display = 'none';
+      document.getElementById('featureCatalog').parentNode.querySelector('.features-subtitle').style.display = 'none';
+      document.getElementById('autonomyCard').style.display = 'none';
+      document.getElementById('featureCatalog').style.display = 'none';
+      document.getElementById('profileSelectorView').classList.add('active');
+
+      const currentProfile = featuresData?.autonomy?.profile || featuresData?.autonomy?.autonomyProfile || 'supervised';
+      selectedProfile = currentProfile;
+
+      const selector = document.getElementById('profileSelector');
+      selector.innerHTML = Object.entries(AUTONOMY_PROFILES).map(([key, info]) => {
+        const isSelected = key === currentProfile;
+        const isCurrent = key === currentProfile;
+        const recommended = key === 'supervised' ? '<div class="profile-option-badge recommended">Recommended</div>' : '';
+        return `<div class="profile-option${isSelected ? ' selected' : ''}" onclick="selectProfile('${key}')">
+          <div class="profile-option-name">${info.icon} ${key}</div>
+          <div class="profile-option-desc">${info.desc}</div>
+          ${isCurrent ? '<div class="profile-option-badge" style="background:rgba(255,255,255,0.06);color:var(--text-dim)">Current</div>' : ''}
+          ${recommended}
+        </div>`;
+      }).join('');
+
+      // Load profile history
+      loadProfileHistory();
+    }
+
+    function selectProfile(profile) {
+      selectedProfile = profile;
+      document.querySelectorAll('.profile-option').forEach(el => {
+        el.classList.toggle('selected', el.querySelector('.profile-option-name').textContent.toLowerCase().includes(profile));
+      });
+    }
+
+    async function confirmProfileChange() {
+      if (!selectedProfile) return;
+      const currentProfile = featuresData?.autonomy?.profile || featuresData?.autonomy?.autonomyProfile || 'supervised';
+      if (selectedProfile === currentProfile) {
+        showFeaturesOverview();
         return;
       }
 
-      log.innerHTML = events.slice(0, 30).map(e => {
-        const time = new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const date = new Date(e.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
-        const surfaceLabel = e.surfacedAs ? ` (${e.surfacedAs})` : '';
-        return `<div class="event-row">
-          <span class="event-time">${esc(date)} ${esc(time)}</span>
-          <span class="event-feature">${esc(e.featureId)}</span>
-          <span class="event-transition">
-            <span class="feature-state-badge ${esc(e.previousState)}">${esc(e.previousState)}</span>
-            <span class="event-arrow">&rarr;</span>
-            <span class="feature-state-badge ${esc(e.newState)}">${esc(e.newState)}</span>
-            ${surfaceLabel}
-          </span>
-        </div>`;
-      }).join('');
+      try {
+        await apiFetch('/autonomy/profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile: selectedProfile }),
+        });
+        // Refresh autonomy data
+        const autonomy = await apiFetch('/autonomy').catch(() => ({ profile: selectedProfile }));
+        featuresData.autonomy = autonomy;
+        renderAutonomyCard();
+        showToast('Autonomy profile updated to ' + selectedProfile, 'success');
+        showFeaturesOverview();
+      } catch (e) {
+        showToast('Failed to change profile: ' + (e.message || e), 'error');
+      }
+    }
+
+    async function loadProfileHistory() {
+      try {
+        const history = await apiFetch('/autonomy/history');
+        const container = document.getElementById('profileHistory');
+        if (!history || history.length === 0) {
+          container.innerHTML = '';
+          return;
+        }
+        container.innerHTML = `
+          <div class="feat-detail-section-title">Profile History</div>
+          ${history.slice(0, 10).map(h => {
+            const time = h.timestamp ? new Date(h.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+            return `<div style="display:flex;gap:10px;padding:6px 0;font-size:12px;border-bottom:1px solid var(--border)">
+              <span style="color:var(--text-dim);min-width:100px">${esc(time)}</span>
+              <span style="color:var(--text)">${esc(h.from || '?')} &rarr; ${esc(h.to || '?')}</span>
+              ${h.reason ? '<span style="color:var(--text-dim);flex:1">' + esc(h.reason) + '</span>' : ''}
+            </div>`;
+          }).join('')}`;
+      } catch (e) {
+        // History not available, that's fine
+      }
+    }
+
+    // ── PR Pipeline Tab (PR-REVIEW-HARDENING-SPEC Phase A) ───────
+    //
+    // Fetches /pr-gate/metrics on panel activation and renders the
+    // current pipeline state. Hard rules (enforced structurally here):
+    //   - NO action buttons that mutate eligibility (read-only tab).
+    //   - NO innerHTML — all PR content goes through textContent.
+    //   - NO form submissions to /pr-gate/* endpoints.
+    //   - On 404 (prGate.phase='off' — commit 8), render a disabled
+    //     placeholder rather than erroring.
+    async function loadPrPipeline() {
+      const list = document.getElementById('prPipelineList');
+      const notice = document.getElementById('prPipelinePhaseNotice');
+      const empty = document.getElementById('prPipelineEmpty');
+      // Reset view via DOM mutation, not innerHTML, to keep the
+      // "never inject content as HTML" invariant trivially true.
+      while (list.firstChild) list.removeChild(list.firstChild);
+      notice.textContent = 'Loading…';
+      empty.style.display = 'none';
+
+      // Use raw fetch (not apiFetch) so we can distinguish 404 (gate
+      // disabled, expected during phase=off) from other errors without
+      // apiFetch's throw-on-non-ok behavior.
+      let res = null;
+      let httpStatus = 0;
+      try {
+        const raw = await fetch('/pr-gate/metrics', {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        httpStatus = raw.status;
+        if (raw.ok) res = await raw.json();
+      } catch {
+        res = null;
+      }
+
+      if (httpStatus === 404 || (res && res.disabled === true)) {
+        notice.textContent = 'Gate disabled (phase=off). No pipeline activity recorded yet.';
+        empty.style.display = 'block';
+        return;
+      }
+      if (!res) {
+        notice.textContent = 'PR Pipeline metrics unavailable. Endpoint did not respond.';
+        empty.style.display = 'block';
+        return;
+      }
+
+      const phase = typeof res.phase === 'string' ? res.phase : 'unknown';
+      notice.textContent = `Phase: ${phase}`;
+
+      const entries = Array.isArray(res.entries) ? res.entries : [];
+      if (entries.length === 0) {
+        empty.style.display = 'block';
+        return;
+      }
+
+      for (const entry of entries) {
+        const card = document.createElement('div');
+        card.style.background = 'var(--panel)';
+        card.style.padding = '12px';
+        card.style.borderRadius = '6px';
+        card.style.border = '1px solid var(--border)';
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.marginBottom = '6px';
+
+        const left = document.createElement('div');
+        left.style.fontWeight = '600';
+        const pr = typeof entry.pr_number === 'number' ? `PR #${entry.pr_number}` : 'PR #—';
+        const sha = typeof entry.head_sha === 'string' ? ` @ ${entry.head_sha.slice(0, 8)}` : '';
+        left.textContent = pr + sha;
+
+        const right = document.createElement('div');
+        right.style.fontSize = '12px';
+        right.style.color = entry.eligible ? 'var(--accent)' : 'var(--text-dim)';
+        right.textContent = entry.eligible ? 'eligible' : 'not eligible';
+
+        header.appendChild(left);
+        header.appendChild(right);
+        card.appendChild(header);
+
+        if (typeof entry.reason === 'string' && entry.reason.length > 0) {
+          const reason = document.createElement('div');
+          reason.style.fontSize = '13px';
+          reason.style.color = 'var(--text-dim)';
+          reason.textContent = entry.reason;
+          card.appendChild(reason);
+        }
+
+        if (typeof entry.created_at === 'string') {
+          const time = document.createElement('div');
+          time.style.fontSize = '11px';
+          time.style.color = 'var(--text-dim)';
+          time.style.marginTop = '4px';
+          time.textContent = entry.created_at;
+          card.appendChild(time);
+        }
+
+        list.appendChild(card);
+      }
+    }
+
+    // ── Initiatives Tab (INITIATIVE-TRACKER-SPEC v1) ─────────────
+    //
+    // Fetches /initiatives and /initiatives/digest on panel activation.
+    // Read-only: no buttons here mutate the tracker. All content goes
+    // through textContent; no innerHTML. Matches the PR Pipeline tab's
+    // XSS-safe pattern.
+    async function loadInitiatives() {
+      const list = document.getElementById('initiativesList');
+      const empty = document.getElementById('initiativesEmpty');
+      const digestBox = document.getElementById('initiativesDigest');
+      const filter = document.getElementById('initiativesFilter');
+      const countBadge = document.getElementById('tabInitiativeCount');
+
+      while (list.firstChild) list.removeChild(list.firstChild);
+      while (digestBox.firstChild) digestBox.removeChild(digestBox.firstChild);
+      digestBox.style.display = 'none';
+      empty.style.display = 'none';
+
+      let itemsRes = null;
+      let digestRes = null;
+      try {
+        const statusQ = filter && filter.value ? `?status=${encodeURIComponent(filter.value)}` : '';
+        const [a, b] = await Promise.all([
+          apiFetch('/initiatives' + statusQ).catch(() => null),
+          apiFetch('/initiatives/digest').catch(() => null),
+        ]);
+        itemsRes = a;
+        digestRes = b;
+      } catch { /* handled by null check below */ }
+
+      if (!itemsRes) {
+        empty.style.display = 'block';
+        empty.textContent = 'Initiative tracker unavailable.';
+        if (countBadge) countBadge.textContent = '0';
+        return;
+      }
+
+      const items = Array.isArray(itemsRes.items) ? itemsRes.items : [];
+      if (countBadge) countBadge.textContent = String(items.length);
+
+      // Digest summary (actionable signals)
+      if (digestRes && Array.isArray(digestRes.items) && digestRes.items.length > 0) {
+        const title = document.createElement('div');
+        title.style.fontWeight = '600';
+        title.style.marginBottom = '6px';
+        title.textContent = `${digestRes.items.length} signal${digestRes.items.length === 1 ? '' : 's'}`;
+        digestBox.appendChild(title);
+        for (const d of digestRes.items) {
+          const row = document.createElement('div');
+          row.style.fontSize = '13px';
+          row.style.padding = '3px 0';
+          const colorMap = {
+            'needs-user': '#e27d3b',
+            'next-check-due': '#d65f5f',
+            'ready-to-advance': '#4a9a4a',
+            'stale': '#888',
+          };
+          const tag = document.createElement('span');
+          tag.style.color = colorMap[d.reason] || 'var(--text-dim)';
+          tag.style.marginRight = '6px';
+          tag.textContent = `[${d.reason}]`;
+          const label = document.createElement('span');
+          label.textContent = `${d.title} — ${d.detail}`;
+          row.appendChild(tag);
+          row.appendChild(label);
+          digestBox.appendChild(row);
+        }
+        digestBox.style.display = 'block';
+      }
+
+      if (items.length === 0) {
+        empty.style.display = 'block';
+        empty.textContent = 'No initiatives to display. Create one via POST /initiatives.';
+        return;
+      }
+
+      for (const ini of items) {
+        const card = document.createElement('div');
+        card.style.background = 'var(--panel)';
+        card.style.padding = '12px';
+        card.style.borderRadius = '6px';
+        card.style.border = '1px solid var(--border)';
+
+        const header = document.createElement('div');
+        header.style.display = 'flex';
+        header.style.justifyContent = 'space-between';
+        header.style.alignItems = 'center';
+        header.style.marginBottom = '6px';
+
+        const titleEl = document.createElement('div');
+        titleEl.style.fontWeight = '600';
+        titleEl.textContent = ini.title || ini.id || '(untitled)';
+        header.appendChild(titleEl);
+
+        const status = document.createElement('span');
+        status.style.fontSize = '11px';
+        status.style.padding = '2px 8px';
+        status.style.borderRadius = '999px';
+        const statusColors = {
+          active: 'var(--accent)',
+          completed: '#4a9a4a',
+          archived: 'var(--text-dim)',
+          abandoned: '#d65f5f',
+        };
+        status.style.background = statusColors[ini.status] || 'var(--text-dim)';
+        status.style.color = '#fff';
+        status.textContent = ini.status || 'unknown';
+        header.appendChild(status);
+        card.appendChild(header);
+
+        if (ini.description) {
+          const desc = document.createElement('div');
+          desc.style.fontSize = '13px';
+          desc.style.color = 'var(--text-dim)';
+          desc.style.marginBottom = '8px';
+          desc.textContent = ini.description;
+          card.appendChild(desc);
+        }
+
+        // Phase pills
+        if (Array.isArray(ini.phases) && ini.phases.length > 0) {
+          const phaseRow = document.createElement('div');
+          phaseRow.style.display = 'flex';
+          phaseRow.style.gap = '6px';
+          phaseRow.style.flexWrap = 'wrap';
+          phaseRow.style.marginBottom = '8px';
+          const phaseColors = {
+            pending: 'var(--text-dim)',
+            'in-progress': 'var(--accent)',
+            done: '#4a9a4a',
+            blocked: '#d65f5f',
+          };
+          for (const p of ini.phases) {
+            const pill = document.createElement('span');
+            pill.style.fontSize = '11px';
+            pill.style.padding = '2px 8px';
+            pill.style.borderRadius = '4px';
+            pill.style.border = `1px solid ${phaseColors[p.status] || 'var(--border)'}`;
+            pill.style.color = phaseColors[p.status] || 'var(--text)';
+            pill.textContent = `${p.name} · ${p.status}`;
+            phaseRow.appendChild(pill);
+          }
+          card.appendChild(phaseRow);
+        }
+
+        // Meta row
+        const meta = document.createElement('div');
+        meta.style.fontSize = '11px';
+        meta.style.color = 'var(--text-dim)';
+        const lastTouched = ini.lastTouchedAt ? ini.lastTouchedAt.slice(0, 10) : '';
+        const needsUser = ini.needsUser ? ' · needs you' : '';
+        const blockerCount = Array.isArray(ini.blockers) && ini.blockers.length > 0
+          ? ` · ${ini.blockers.length} blocker${ini.blockers.length === 1 ? '' : 's'}`
+          : '';
+        meta.textContent = `Last touched: ${lastTouched}${needsUser}${blockerCount}`;
+        card.appendChild(meta);
+
+        if (ini.needsUser && ini.needsUserReason) {
+          const reason = document.createElement('div');
+          reason.style.fontSize = '12px';
+          reason.style.marginTop = '4px';
+          reason.style.color = '#e27d3b';
+          reason.textContent = `→ ${ini.needsUserReason}`;
+          card.appendChild(reason);
+        }
+
+        list.appendChild(card);
+      }
+    }
+
+    // ── Commitments Tab (PROMISE-BEACON-SPEC — Open Promises) ────
+    // Fetches /commitments?status=active and renders beacon-watched
+    // pending + atRisk commitments with a "Mark delivered" action.
+    // All content goes through textContent; no innerHTML. XSS-safe.
+    async function loadCommitments() {
+      const list = document.getElementById('commitmentsList');
+      const empty = document.getElementById('commitmentsEmpty');
+      const countBadge = document.getElementById('tabCommitmentCount');
+      while (list.firstChild) list.removeChild(list.firstChild);
+      empty.style.display = 'none';
+
+      let res = null;
+      try {
+        res = await apiFetch('/commitments?status=active');
+      } catch { /* fall through */ }
+
+      if (!res || !res.enabled) {
+        empty.style.display = 'block';
+        empty.textContent = 'CommitmentTracker not available.';
+        if (countBadge) countBadge.textContent = '0';
+        return;
+      }
+      const items = Array.isArray(res.commitments) ? res.commitments : [];
+      // Show only beacon-watched pending + atRisk.
+      const open = items.filter(c => c.beaconEnabled && c.status === 'pending');
+      if (countBadge) countBadge.textContent = String(open.length);
+      if (open.length === 0) {
+        empty.style.display = 'block';
+        empty.textContent = 'No open promises.';
+        return;
+      }
+
+      const fmtTs = (iso) => {
+        if (!iso) return '—';
+        try { return new Date(iso).toLocaleString(); } catch { return iso; }
+      };
+
+      for (const c of open) {
+        const card = document.createElement('div');
+        card.style.cssText = 'padding:14px;border:1px solid var(--border);border-radius:6px;background:var(--bg-dim);display:flex;flex-direction:column;gap:8px';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex;justify-content:space-between;gap:12px;align-items:flex-start';
+        const summary = document.createElement('div');
+        summary.style.cssText = 'flex:1;font-weight:600;line-height:1.3';
+        summary.textContent = (c.agentResponse || c.userRequest || '(no summary)').slice(0, 160);
+        header.appendChild(summary);
+
+        // State badge.
+        const badge = document.createElement('span');
+        const atRisk = !!c.atRisk;
+        const suppressed = !!c.beaconSuppressed;
+        const [badgeText, badgeBg] = suppressed
+          ? [`suppressed: ${c.beaconSuppressionReason || '?'}`, '#555']
+          : atRisk
+            ? ['atRisk', '#e27d3b']
+            : ['pending', '#4a9a4a'];
+        badge.textContent = badgeText;
+        badge.style.cssText = `font-size:11px;padding:3px 8px;border-radius:4px;background:${badgeBg};color:#fff;white-space:nowrap`;
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const meta = document.createElement('div');
+        meta.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:6px;font-size:12px;color:var(--text-dim)';
+        const rows = [
+          ['id', c.id],
+          ['topic', c.topicId != null ? String(c.topicId) : '—'],
+          ['cadence', c.cadenceMs ? `${Math.round(c.cadenceMs / 1000)}s` : '—'],
+          ['heartbeats', String(c.heartbeatCount ?? 0)],
+          ['lastHeartbeat', fmtTs(c.lastHeartbeatAt)],
+          ['nextUpdateDue', fmtTs(c.nextUpdateDueAt)],
+          ['softDeadline', fmtTs(c.softDeadlineAt)],
+          ['hardDeadline', fmtTs(c.hardDeadlineAt)],
+        ];
+        for (const [k, v] of rows) {
+          const cell = document.createElement('div');
+          const kEl = document.createElement('span');
+          kEl.textContent = `${k}: `;
+          kEl.style.opacity = '0.7';
+          const vEl = document.createElement('span');
+          vEl.textContent = v;
+          vEl.style.color = 'var(--text)';
+          cell.appendChild(kEl);
+          cell.appendChild(vEl);
+          meta.appendChild(cell);
+        }
+        card.appendChild(meta);
+
+        // Actions.
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;align-items:center';
+        const deliverBtn = document.createElement('button');
+        deliverBtn.textContent = 'Mark delivered';
+        deliverBtn.style.cssText = 'padding:6px 10px;cursor:pointer';
+        deliverBtn.addEventListener('click', async () => {
+          deliverBtn.disabled = true;
+          try {
+            await apiFetch(`/commitments/${encodeURIComponent(c.id)}/deliver`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            await loadCommitments();
+          } catch (err) {
+            deliverBtn.disabled = false;
+            alert('Deliver failed: ' + (err && err.message ? err.message : String(err)));
+          }
+        });
+        actions.appendChild(deliverBtn);
+        card.appendChild(actions);
+
+        list.appendChild(card);
+      }
+    }
+
+    // ── Secrets Tab ──────────────────────────────────────────────
+    let secretsTickerTimer = null;
+    let secretsLastPending = [];
+
+    function formatCountdown(ms) {
+      if (ms <= 0) return 'expired';
+      const totalSec = Math.floor(ms / 1000);
+      const m = Math.floor(totalSec / 60);
+      const s = totalSec % 60;
+      if (m > 0) return `${m}m ${s}s`;
+      return `${s}s`;
+    }
+
+    function renderSecretsCountdowns() {
+      const now = Date.now();
+      for (const p of secretsLastPending) {
+        const el = document.getElementById(`secretCountdown-${p.token}`);
+        if (!el) continue;
+        const remaining = p.expiresAt - now;
+        el.textContent = formatCountdown(remaining);
+        if (remaining <= 0) {
+          el.style.color = '#c66';
+        }
+      }
+    }
+
+    function startSecretsTicker() {
+      stopSecretsTicker();
+      secretsTickerTimer = setInterval(renderSecretsCountdowns, 1000);
+    }
+
+    function stopSecretsTicker() {
+      if (secretsTickerTimer) {
+        clearInterval(secretsTickerTimer);
+        secretsTickerTimer = null;
+      }
+    }
+
+    async function loadSecrets() {
+      const list = document.getElementById('secretsList');
+      const empty = document.getElementById('secretsEmpty');
+      const countBadge = document.getElementById('tabSecretCount');
+      while (list.firstChild) list.removeChild(list.firstChild);
+      empty.style.display = 'none';
+
+      let res = null;
+      try {
+        res = await apiFetch('/secrets/pending');
+      } catch { /* fall through */ }
+
+      const pending = (res && Array.isArray(res.pending)) ? res.pending : [];
+      secretsLastPending = pending;
+
+      // Badge shows non-expired count.
+      const now = Date.now();
+      const liveCount = pending.filter(p => p.expiresAt > now).length;
+      if (countBadge) countBadge.textContent = String(liveCount);
+
+      if (pending.length === 0) {
+        empty.style.display = 'block';
+        empty.textContent = 'No pending secret requests.';
+        return;
+      }
+
+      const fmtTs = (ms) => {
+        if (!ms) return '—';
+        try { return new Date(ms).toLocaleString(); } catch { return String(ms); }
+      };
+
+      for (const p of pending) {
+        const card = document.createElement('div');
+        card.style.cssText = 'padding:14px;border:1px solid var(--border);border-radius:6px;background:var(--bg-dim);display:flex;flex-direction:column;gap:8px';
+
+        const header = document.createElement('div');
+        header.style.cssText = 'display:flex;justify-content:space-between;gap:12px;align-items:flex-start';
+        const label = document.createElement('div');
+        label.style.cssText = 'flex:1;font-weight:600;line-height:1.3';
+        label.textContent = p.label || '(no label)';
+        header.appendChild(label);
+
+        const badge = document.createElement('span');
+        const expired = !!p.expired;
+        badge.textContent = expired ? 'expired' : 'pending';
+        badge.style.cssText = `font-size:11px;padding:3px 8px;border-radius:4px;background:${expired ? '#c66' : '#4a9a4a'};color:#fff;white-space:nowrap`;
+        header.appendChild(badge);
+        card.appendChild(header);
+
+        const meta = document.createElement('div');
+        meta.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px;font-size:12px;color:var(--text-dim)';
+
+        const rows = [
+          ['token', (p.token || '').slice(0, 12) + '…'],
+          ['topic', p.topicId != null ? String(p.topicId) : '—'],
+          ['created', fmtTs(p.createdAt)],
+          ['expires', fmtTs(p.expiresAt)],
+        ];
+        for (const [k, v] of rows) {
+          const cell = document.createElement('div');
+          const kEl = document.createElement('span');
+          kEl.textContent = `${k}: `;
+          kEl.style.opacity = '0.7';
+          const vEl = document.createElement('span');
+          vEl.textContent = v;
+          vEl.style.color = 'var(--text)';
+          cell.appendChild(kEl);
+          cell.appendChild(vEl);
+          meta.appendChild(cell);
+        }
+
+        const countdownCell = document.createElement('div');
+        const cLabel = document.createElement('span');
+        cLabel.textContent = 'expires in: ';
+        cLabel.style.opacity = '0.7';
+        const cVal = document.createElement('span');
+        cVal.id = `secretCountdown-${p.token}`;
+        cVal.style.color = 'var(--text)';
+        cVal.style.fontVariantNumeric = 'tabular-nums';
+        cVal.textContent = formatCountdown(p.expiresAt - now);
+        countdownCell.appendChild(cLabel);
+        countdownCell.appendChild(cVal);
+        meta.appendChild(countdownCell);
+
+        card.appendChild(meta);
+
+        // Links and actions.
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+
+        const url = p.tunnelUrl || p.localUrl;
+        if (url) {
+          const openBtn = document.createElement('a');
+          openBtn.textContent = 'Open drop link';
+          openBtn.href = url;
+          openBtn.target = '_blank';
+          openBtn.rel = 'noopener noreferrer';
+          openBtn.style.cssText = 'padding:6px 10px;border:1px solid var(--border);border-radius:4px;text-decoration:none;color:var(--text);cursor:pointer';
+          actions.appendChild(openBtn);
+
+          const copyBtn = document.createElement('button');
+          copyBtn.textContent = 'Copy link';
+          copyBtn.style.cssText = 'padding:6px 10px;cursor:pointer';
+          copyBtn.addEventListener('click', async () => {
+            try {
+              await navigator.clipboard.writeText(url);
+              copyBtn.textContent = 'Copied';
+              setTimeout(() => { copyBtn.textContent = 'Copy link'; }, 1200);
+            } catch {
+              copyBtn.textContent = 'Copy failed';
+            }
+          });
+          actions.appendChild(copyBtn);
+        }
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.style.cssText = 'padding:6px 10px;cursor:pointer';
+        cancelBtn.addEventListener('click', async () => {
+          cancelBtn.disabled = true;
+          try {
+            await apiFetch(`/secrets/pending/${encodeURIComponent(p.token)}`, { method: 'DELETE' });
+            await loadSecrets();
+          } catch (err) {
+            cancelBtn.disabled = false;
+            alert('Cancel failed: ' + (err && err.message ? err.message : String(err)));
+          }
+        });
+        actions.appendChild(cancelBtn);
+
+        card.appendChild(actions);
+        list.appendChild(card);
+      }
+    }
+
+    async function createTestSecretRequest() {
+      try {
+        const res = await apiFetch('/secrets/request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            label: 'Dashboard test request',
+            description: 'Created from the Secrets tab for verification. Safe to cancel.',
+            ttlMs: 5 * 60 * 1000,
+          }),
+        });
+        await loadSecrets();
+        const url = (res && (res.tunnelUrl || res.localUrl)) || '';
+        if (url) {
+          try { await navigator.clipboard.writeText(url); } catch { /* ignore */ }
+        }
+      } catch (err) {
+        alert('Test request failed: ' + (err && err.message ? err.message : String(err)));
+      }
+    }
+
+    // ── Integrated-Being Tab (v1) ────────────────────────────────
+    let integratedBeingPollTimer = null;
+
+    async function loadIntegratedBeing() {
+      const limit = document.getElementById('ibFilterLimit')?.value || 50;
+      const kind = document.getElementById('ibFilterKind')?.value || '';
+      const cpType = document.getElementById('ibFilterCounterparty')?.value || '';
+      const qs = new URLSearchParams({ limit: String(limit) });
+      if (cpType) qs.set('counterpartyType', cpType);
+      try {
+        const [recentRes, statsRes] = await Promise.all([
+          apiFetch(`/shared-state/recent?${qs.toString()}`).catch(() => null),
+          apiFetch('/shared-state/stats').catch(() => null),
+        ]);
+        const tbody = document.getElementById('ibEntriesTbody');
+        if (!recentRes || !recentRes.entries) {
+          tbody.innerHTML = '<tr><td colspan="7" style="padding:14px;color:var(--text-dim);text-align:center">Integrated-Being disabled or unavailable</td></tr>';
+        } else {
+          let entries = recentRes.entries;
+          if (kind) entries = entries.filter(e => e.kind === kind);
+          if (entries.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="7" style="padding:14px;color:var(--text-dim);text-align:center">No entries</td></tr>';
+          } else {
+            // Build a map of commitmentId → effective-status derivation
+            // from supersession pointers: if a later note with subject
+            // starting "expired:" or "stranded:" or "resolved:"/"cancelled:"
+            // points back at a commitment, that commitment's effective
+            // status flips to the supersession. (Slice 5 + slice 6.)
+            const supersessionByTarget = new Map();
+            for (const ent of entries) {
+              if (ent.supersedes) {
+                const existing = supersessionByTarget.get(ent.supersedes);
+                // Prefer most-recent note with a lifecycle prefix.
+                if (!existing || new Date(ent.t) > new Date(existing.t)) {
+                  supersessionByTarget.set(ent.supersedes, ent);
+                }
+              }
+            }
+            const disputeCountByTarget = new Map();
+            for (const ent of entries) {
+              if (ent.disputes) {
+                disputeCountByTarget.set(
+                  ent.disputes,
+                  (disputeCountByTarget.get(ent.disputes) || 0) + 1,
+                );
+              }
+            }
+            const esc2 = (s) => esc(String(s == null ? '' : s));
+            const badge = (label, bg, fg) =>
+              `<span style="display:inline-block;padding:1px 6px;font-size:10px;border-radius:3px;background:${bg};color:${fg};margin-right:4px">${esc2(label)}</span>`;
+            tbody.innerHTML = entries.map(e => {
+              const ts = (e.t || '').slice(0, 19).replace('T', ' ');
+              let subjectCell = esc2(e.subject);
+              let kindCell = esc2(e.kind);
+              // Commitment-kind enrichment (slice 6): badges for mechanism
+              // type, deadline w/ overdue highlight, refStatus, and any
+              // derived effective-status from the supersession chain.
+              if (e.kind === 'commitment' && e.commitment) {
+                const mech = e.commitment.mechanism || {};
+                const mechBg = mech.type === 'passive-wait' ? '#d4a017' : '#4a6a8a';
+                kindCell = badge('commitment', '#6a4a8a', '#fff')
+                  + badge(mech.type || '(?)', mechBg, '#fff');
+                if (mech.refStatus && mech.refStatus !== 'valid') {
+                  kindCell += badge('ref:' + mech.refStatus, '#888', '#fff');
+                }
+                if (e.commitment.deadline) {
+                  const dlMs = Date.parse(e.commitment.deadline);
+                  const overdue = !Number.isNaN(dlMs) && dlMs < Date.now();
+                  const dlLabel = (e.commitment.deadline || '').slice(0, 16).replace('T', ' ');
+                  subjectCell += '<div style="font-size:11px;color:'
+                    + (overdue ? '#e74c3c' : 'var(--text-dim)')
+                    + ';margin-top:2px">'
+                    + (overdue ? '⚠ overdue ' : 'due ')
+                    + esc2(dlLabel)
+                    + '</div>';
+                }
+                // Effective status from supersession chain.
+                const superseder = supersessionByTarget.get(e.id);
+                if (superseder && typeof superseder.subject === 'string') {
+                  const s = superseder.subject;
+                  let statusLabel = 'resolved';
+                  let statusBg = '#27ae60';
+                  if (s.startsWith('expired:')) { statusLabel = 'expired'; statusBg = '#e74c3c'; }
+                  else if (s.startsWith('stranded:')) { statusLabel = 'stranded'; statusBg = '#e67e22'; }
+                  else if (s.startsWith('cancelled:')) { statusLabel = 'cancelled'; statusBg = '#7f8c8d'; }
+                  subjectCell = badge(statusLabel, statusBg, '#fff') + subjectCell;
+                }
+                const disputes = disputeCountByTarget.get(e.id) || 0;
+                if (disputes > 0) {
+                  subjectCell = badge('disputed × ' + disputes, '#c0392b', '#fff') + subjectCell;
+                }
+              } else if (e.kind === 'note' && e.disputes) {
+                // Dispute note — highlight the disputes-pointer.
+                kindCell = badge('note', '#444', '#fff') + badge('dispute', '#c0392b', '#fff');
+              } else if (e.kind === 'note' && typeof e.subject === 'string' && e.subject.startsWith('expired:')) {
+                kindCell = badge('note', '#444', '#fff') + badge('expired', '#e74c3c', '#fff');
+              } else if (e.kind === 'note' && typeof e.subject === 'string' && e.subject.startsWith('stranded:')) {
+                kindCell = badge('note', '#444', '#fff') + badge('stranded', '#e67e22', '#fff');
+              }
+              const ptr = e.supersedes
+                ? 'supersedes:' + e.supersedes
+                : e.disputes
+                ? 'disputes:' + e.disputes
+                : '';
+              return `
+              <tr style="border-top:1px solid var(--border)">
+                <td style="padding:6px;font-family:monospace">${esc2(e.id)}</td>
+                <td style="padding:6px">${esc2(ts)}</td>
+                <td style="padding:6px">${kindCell}</td>
+                <td style="padding:6px">${subjectCell}</td>
+                <td style="padding:6px">${esc2(e.counterparty?.type)}/${esc2(e.counterparty?.name)}</td>
+                <td style="padding:6px;font-size:11px;color:var(--text-dim)">${esc2(e.provenance)}${e.source ? ' · '+esc2(e.source):''}</td>
+                <td style="padding:6px;font-family:monospace;font-size:11px">${esc2(ptr)}</td>
+              </tr>`;
+            }).join('');
+          }
+        }
+        if (statsRes) {
+          document.getElementById('ibCardTotal').textContent =
+            String(Object.values(statsRes.counts || {}).reduce((a, b) => a + b, 0));
+          document.getElementById('ibCardClassifier').textContent = String(statsRes.classifierFired ?? 0);
+          document.getElementById('ibCardRotations').textContent = String(statsRes.rotationCount ?? 0);
+          document.getElementById('ibCardUnclosed').textContent = String(statsRes.unclosedThreadsOverTtl ?? 0);
+        }
+        // Show per-machine notice if paired
+        try {
+          const machines = await apiFetch('/machines').catch(() => null);
+          if (machines && Array.isArray(machines.machines) && machines.machines.length > 1) {
+            document.getElementById('ibPerMachineNotice').style.display = 'block';
+          }
+        } catch {}
+      } catch (err) {
+        console.error('[integrated-being] load error', err);
+      }
+    }
+
+    async function loadIntegratedBeingBindings() {
+      // GET /shared-state/sessions returns 503 when v2Enabled=false.
+      // In that case, keep the Bindings section hidden.
+      const section = document.getElementById('ibBindingsSection');
+      const tbody = document.getElementById('ibBindingsTbody');
+      try {
+        const res = await apiFetch('/shared-state/sessions').catch(() => null);
+        if (!res || !Array.isArray(res.sessions)) {
+          if (section) section.style.display = 'none';
+          return;
+        }
+        if (section) section.style.display = 'block';
+        if (res.sessions.length === 0) {
+          tbody.innerHTML = '<tr><td colspan="7" style="padding:14px;color:var(--text-dim);text-align:center">No sessions registered</td></tr>';
+          return;
+        }
+        const nowMs = Date.now();
+        const esc2 = (s) => esc(String(s == null ? '' : s));
+        tbody.innerHTML = res.sessions.map(s => {
+          const ttlMs = Date.parse(s.absoluteExpiresAt || '') - nowMs;
+          const ttlLabel = Number.isFinite(ttlMs)
+            ? (ttlMs < 0 ? 'expired' : Math.round(ttlMs / 3600000) + 'h')
+            : '';
+          const status = s.revoked
+            ? '<span style="color:#e74c3c">revoked</span>'
+            : (Date.parse(s.absoluteExpiresAt || '') < nowMs
+              ? '<span style="color:#888">expired</span>'
+              : (s.hasWritten ? '<span style="color:#27ae60">active</span>' : '<span style="color:var(--text-dim)">bound</span>'));
+          const idShort = (s.sessionId || '').slice(0, 8) + '…';
+          const action = s.revoked
+            ? '<span style="color:var(--text-dim);font-size:10px">—</span>'
+            : `<button onclick="revokeIntegratedBeingBinding('${esc2(s.sessionId)}')" style="padding:2px 8px;font-size:10px;background:#c0392b;color:#fff;border:none;border-radius:3px;cursor:pointer">Revoke</button>`;
+          return `
+            <tr style="border-top:1px solid var(--border)">
+              <td style="padding:4px;font-family:monospace" title="${esc2(s.sessionId)}">${esc2(idShort)}</td>
+              <td style="padding:4px">${esc2(s.label || '')}</td>
+              <td style="padding:4px">${esc2((s.registeredAt || '').slice(0, 16).replace('T', ' '))}</td>
+              <td style="padding:4px">${esc2((s.lastActiveAt || '').slice(0, 16).replace('T', ' '))}</td>
+              <td style="padding:4px">${esc2(ttlLabel)}</td>
+              <td style="padding:4px">${status}</td>
+              <td style="padding:4px">${action}</td>
+            </tr>`;
+        }).join('');
+      } catch (err) {
+        console.error('[integrated-being-v2] bindings load error', err);
+        if (section) section.style.display = 'none';
+      }
+    }
+
+    async function revokeIntegratedBeingBinding(sid) {
+      if (!sid) return;
+      if (!confirm('Revoke the binding for session ' + sid.slice(0, 8) + '…?\n\nThis invalidates the session token. Subsequent writes from that session will fail 401.')) return;
+      try {
+        const res = await apiFetch(`/shared-state/sessions/${encodeURIComponent(sid)}/revoke`, {
+          method: 'POST',
+          headers: { 'X-Instar-Request': '1' },
+        });
+        if (res && res.revoked) {
+          await loadIntegratedBeingBindings();
+          await loadIntegratedBeing();
+        } else {
+          alert('Revocation did not succeed — see console for details.');
+          console.warn('[integrated-being-v2] revoke unexpected', res);
+        }
+      } catch (err) {
+        console.error('[integrated-being-v2] revoke error', err);
+        alert('Revoke failed: ' + (err && err.message ? err.message : err));
+      }
+    }
+
+    function startIntegratedBeingPoll() {
+      if (integratedBeingPollTimer) return;
+      integratedBeingPollTimer = setInterval(() => {
+        loadIntegratedBeing();
+        loadIntegratedBeingBindings();
+      }, 30000);
+    }
+    function stopIntegratedBeingPoll() {
+      if (integratedBeingPollTimer) {
+        clearInterval(integratedBeingPollTimer);
+        integratedBeingPollTimer = null;
+      }
+    }
+
+    async function walkIntegratedBeingChain() {
+      const id = (document.getElementById('ibChainInput')?.value || '').trim();
+      const out = document.getElementById('ibChainResult');
+      if (!/^[0-9a-f]{12}$/.test(id)) {
+        out.textContent = 'Invalid id — expected 12 hex characters.';
+        return;
+      }
+      try {
+        const res = await apiFetch(`/shared-state/chain/${id}`);
+        out.textContent = JSON.stringify(res.chain, null, 2);
+      } catch (err) {
+        out.textContent = String(err && err.message ? err.message : err);
+      }
     }
 
     // ── Systems Tab ──────────────────────────────────────────────
@@ -5501,7 +7061,7 @@
             <div class="cap-card-metric">${esc(cap.metric)}</div>
           </div>`;
         }).join('');
-        capsEl.innerHTML = `<div class="cap-section-title">Active Capabilities</div><div class="cap-grid">${cards}</div>`;
+        capsEl.innerHTML = `<div class="cap-section-title">Active Subsystems</div><div class="cap-grid">${cards}</div>`;
       } else {
         capsEl.innerHTML = '';
       }
@@ -5526,8 +7086,8 @@
     function buildPreviewStats(stats) {
       if (!stats || typeof stats !== 'object') return '';
       const map = {
-        recoveries: 'Recoveries', interventions: 'Interventions', activeCases: 'Active',
-        coherencePassed: 'Passed', coherenceFailed: 'Failed', memoryPercent: 'Memory',
+        recoveries: 'Recovered', interventions: 'Auto-fixed', activeCases: 'Active',
+        coherencePassed: 'Checks OK', coherenceFailed: 'Issues', memoryPercent: 'Memory',
         enabledJobs: 'Jobs', activeJobSessions: 'Running', queueLength: 'Queued',
         weeklyUsage: 'Weekly', fiveHourRate: '5h Rate',
         topicMappings: 'Topics', totalMessages: 'Messages',
@@ -5612,15 +7172,15 @@
     function buildStatCards(stats, capId) {
       if (!stats || typeof stats !== 'object') return '';
       const map = {
-        interventions: 'Interventions', recoveries: 'Recoveries', sessionDeaths: 'Deaths',
-        llmOverrides: 'LLM Overrides', activeCases: 'Active Cases', totalTriages: 'Triages',
+        interventions: 'Auto-fixes', recoveries: 'Recovered', sessionDeaths: 'Crashes',
+        llmOverrides: 'AI Decisions', activeCases: 'Active Issues', totalTriages: 'Investigated',
         cooldowns: 'Cooldowns',
-        coherenceChecks: 'Checks', coherencePassed: 'Passed', coherenceFailed: 'Failed', coherenceCorrected: 'Corrected',
+        coherenceChecks: 'Consistency Checks', coherencePassed: 'Passed', coherenceFailed: 'Issues Found', coherenceCorrected: 'Auto-corrected',
         memoryPercent: 'Memory %', memoryFreeGB: 'Free GB', memoryTotalGB: 'Total GB',
-        trackedProcesses: 'Tracked', orphanProcesses: 'Orphans', totalMemoryMB: 'Memory MB',
+        trackedProcesses: 'Processes', orphanProcesses: 'Cleanup Needed', totalMemoryMB: 'Memory MB',
         totalJobs: 'Total Jobs', enabledJobs: 'Enabled', queueLength: 'Queued', activeJobSessions: 'Running',
         weeklyUsage: 'Weekly %', fiveHourRate: '5h Rate %',
-        topicMappings: 'Topics', pendingStalls: 'Pending', totalMessages: 'Messages',
+        topicMappings: 'Topics', pendingStalls: 'Needs Attention', totalMessages: 'Messages',
         proposals: 'Proposals', learnings: 'Learnings', learningsApplied: 'Applied',
         gaps: 'Gaps', actions: 'Actions', overdueActions: 'Overdue',
       };

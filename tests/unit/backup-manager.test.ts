@@ -28,13 +28,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { BackupManager } from '../../src/core/BackupManager.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'instar-backup-test-'));
 }
 
 function cleanup(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/backup-manager.test.ts:38' });
 }
 
 describe('BackupManager', () => {
@@ -155,6 +156,57 @@ describe('BackupManager', () => {
       const snapshot = manager.createSnapshot('manual');
 
       expect(snapshot.files.some(f => f.startsWith('machine/'))).toBe(false);
+    });
+
+    // ── BLOCKED_PATH_PREFIXES ─────────────────────────────────────
+    //
+    // The equality-semantic BLOCKED_FILES set cannot catch arbitrary paths
+    // under .instar/secrets/ — it only blocks on literal matches like
+    // 'secrets' or 'config.json'. A user or migrator adding an entry like
+    // '.instar/secrets/pr-gate/tokens.json' would slip past. The
+    // BLOCKED_PATH_PREFIXES set closes that hole with startsWith semantics.
+    it('never backs up paths under .instar/secrets/ prefix even if in includeFiles', () => {
+      fs.mkdirSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate'), { recursive: true });
+      fs.writeFileSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate', 'tokens.json'), '{"t": "sekrit"}');
+      fs.writeFileSync(path.join(stateDir, '.instar', 'secrets', 'canary-keys.json'), '{"k": "x"}');
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const manager = new BackupManager(stateDir, {
+        includeFiles: ['AGENT.md', '.instar/secrets/pr-gate/tokens.json', '.instar/secrets/canary-keys.json'],
+      });
+      const snapshot = manager.createSnapshot('manual');
+
+      expect(snapshot.files).toContain('AGENT.md');
+      expect(snapshot.files.some(f => f.includes('.instar/secrets/'))).toBe(false);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping blocked-prefix path: .instar/secrets/pr-gate/tokens.json'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Skipping blocked-prefix path: .instar/secrets/canary-keys.json'));
+    });
+
+    it('prefix blocklist handles redundant path segments via path.normalize', () => {
+      fs.mkdirSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate'), { recursive: true });
+      fs.writeFileSync(path.join(stateDir, '.instar', 'secrets', 'pr-gate', 'server-secrets.json'), '{}');
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const manager = new BackupManager(stateDir, {
+        includeFiles: ['AGENT.md', '.instar/./secrets/pr-gate/server-secrets.json'],
+      });
+      const snapshot = manager.createSnapshot('manual');
+
+      expect(snapshot.files.some(f => f.includes('.instar/secrets/'))).toBe(false);
+      expect(warnSpy).toHaveBeenCalled();
+    });
+
+    it('DEFAULT_CONFIG.includeFiles contains no entries under .instar/secrets/', () => {
+      // Defense in depth: even if a bug adds a secrets-path entry to the
+      // defaults, this test catches it before any agent snapshots secrets.
+      const manager = new BackupManager(stateDir);
+      // Access the effective defaults via a snapshot of an empty stateDir —
+      // we don't care what files are there, we care that no default path
+      // is under .instar/secrets/.
+      const defaults = (manager as unknown as { config: { includeFiles: string[] } }).config.includeFiles;
+      for (const entry of defaults) {
+        expect(path.normalize(entry).startsWith('.instar/secrets/')).toBe(false);
+      }
     });
   });
 
@@ -306,7 +358,7 @@ describe('BackupManager', () => {
 
       // Delete a file from the snapshot
       const snapshotMemory = path.join(stateDir, 'backups', snapshot.id, 'MEMORY.md');
-      fs.unlinkSync(snapshotMemory);
+      SafeFsExecutor.safeUnlinkSync(snapshotMemory, { operation: 'tests/unit/backup-manager.test.ts:362' });
 
       // Update manifest to remove integrity hash so it doesn't fail on that
       const manifestPath = path.join(stateDir, 'backups', snapshot.id, 'manifest.json');
@@ -323,7 +375,7 @@ describe('BackupManager', () => {
       const snapshot = manager.createSnapshot('manual');
 
       // Delete relationships
-      fs.rmSync(path.join(stateDir, 'relationships'), { recursive: true });
+      SafeFsExecutor.safeRmSync(path.join(stateDir, 'relationships'), { recursive: true, operation: 'tests/unit/backup-manager.test.ts:380' });
       expect(fs.existsSync(path.join(stateDir, 'relationships'))).toBe(false);
 
       manager.restoreSnapshot(snapshot.id);
@@ -472,15 +524,45 @@ describe('BackupManager', () => {
   });
 
   describe('custom config', () => {
-    it('uses custom includeFiles', () => {
+    it('unions custom includeFiles with defaults (never replaces)', () => {
+      // User-supplied includeFiles are ADDED to the defaults; migrators and
+      // user config extend the backup set without risk of stripping
+      // identity/memory defaults. Pre-change semantics were replace — that
+      // footgun is what this commit closes.
+      fs.writeFileSync(path.join(stateDir, 'custom-state.json'), '{"x": 1}');
       const manager = new BackupManager(stateDir, {
-        includeFiles: ['AGENT.md'],
+        includeFiles: ['custom-state.json'],
       });
       const snapshot = manager.createSnapshot('manual');
 
-      expect(snapshot.files).toEqual(['AGENT.md']);
-      expect(snapshot.files).not.toContain('MEMORY.md');
-      expect(snapshot.files).not.toContain('jobs.json');
+      expect(snapshot.files).toContain('custom-state.json');
+      expect(snapshot.files).toContain('AGENT.md');
+      expect(snapshot.files).toContain('MEMORY.md');
+      expect(snapshot.files).toContain('jobs.json');
+    });
+
+    it('missing config.backup does not crash (defaults only)', () => {
+      // ctx.config.backup is optional; routes pass it straight through.
+      // Constructor must tolerate undefined.
+      const manager = new BackupManager(stateDir, undefined);
+      const snapshot = manager.createSnapshot('manual');
+
+      expect(snapshot.files).toContain('AGENT.md');
+      expect(snapshot.files).toContain('MEMORY.md');
+    });
+
+    it('dedupes entries present in both defaults and user config', () => {
+      // If a user or migrator re-specifies a default path, it appears once,
+      // not twice, in the snapshot.
+      const manager = new BackupManager(stateDir, {
+        includeFiles: ['AGENT.md', 'MEMORY.md'],
+      });
+      const snapshot = manager.createSnapshot('manual');
+
+      const agentCount = snapshot.files.filter((f) => f === 'AGENT.md').length;
+      const memoryCount = snapshot.files.filter((f) => f === 'MEMORY.md').length;
+      expect(agentCount).toBe(1);
+      expect(memoryCount).toBe(1);
     });
 
     it('uses custom maxSnapshots', () => {

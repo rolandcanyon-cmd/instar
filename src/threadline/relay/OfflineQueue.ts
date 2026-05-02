@@ -13,7 +13,7 @@ import type { MessageEnvelope, AgentFingerprint } from './types.js';
 
 export interface OfflineQueueConfig {
   /** Default TTL in milliseconds */
-  defaultTtlMs: number; // default 3600000 (1 hour)
+  defaultTtlMs: number; // default 86400000 (24 hours)
   /** Max messages per sender→recipient pair */
   maxPerSenderPerRecipient: number; // default 100
   /** Max total messages per recipient (across all senders) */
@@ -85,7 +85,7 @@ export interface IOfflineQueue {
 // ── In-Memory Implementation ─────────────────────────────────────────
 
 const DEFAULT_CONFIG: OfflineQueueConfig = {
-  defaultTtlMs: 3_600_000, // 1 hour
+  defaultTtlMs: 86_400_000, // 24 hours
   maxPerSenderPerRecipient: 100,
   maxPerRecipient: 500,
   maxPayloadBytesPerRecipient: 10 * 1024 * 1024, // 10MB

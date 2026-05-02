@@ -21,6 +21,7 @@ import type {
   WorkAnnouncement,
   LeadershipState,
 } from '../../src/core/CoordinationProtocol.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 function makeCoordinator(
   tmpDir: string,
@@ -57,7 +58,7 @@ describe('CoordinationProtocol', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/coordination-protocol.test.ts:61' });
   });
 
   // ── Construction ────────────────────────────────────────────────

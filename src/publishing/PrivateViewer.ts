@@ -13,8 +13,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { marked } from 'marked';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 // ── Types ──────────────────────────────────────────────────────────
+
+export interface PrivateViewMetadata {
+  /** Source that created this view (e.g. { type: 'job', id: 'coherence-audit' }) */
+  source?: { type: string; id: string };
+  /** Arbitrary key-value pairs for linking views to originating contexts */
+  [key: string]: unknown;
+}
 
 export interface PrivateView {
   id: string;
@@ -24,6 +32,8 @@ export interface PrivateView {
   pinHash?: string;
   createdAt: string;
   updatedAt?: string;
+  /** Optional metadata for linking views to jobs, features, etc. */
+  metadata?: PrivateViewMetadata;
 }
 
 export interface PrivateViewerConfig {
@@ -48,7 +58,7 @@ export class PrivateViewer {
    * Store markdown content for private viewing.
    * If a PIN is provided, the view requires PIN entry before content is shown.
    */
-  create(title: string, markdown: string, pin?: string): PrivateView {
+  create(title: string, markdown: string, pin?: string, metadata?: PrivateViewMetadata): PrivateView {
     const id = crypto.randomUUID();
     // Ensure monotonically increasing timestamps even within same millisecond
     let now = Date.now();
@@ -65,6 +75,9 @@ export class PrivateViewer {
     };
     if (pin) {
       view.pinHash = crypto.createHash('sha256').update(pin).digest('hex');
+    }
+    if (metadata && Object.keys(metadata).length > 0) {
+      view.metadata = metadata;
     }
     this.save(view);
     return view;
@@ -123,7 +136,7 @@ export class PrivateViewer {
     const filePath = path.join(this.viewsDir, `${id}.json`);
     try {
       if (!fs.existsSync(filePath)) return false;
-      fs.unlinkSync(filePath);
+      SafeFsExecutor.safeUnlinkSync(filePath, { operation: 'src/publishing/PrivateViewer.ts:139' });
       return true;
     } catch {
       return false;

@@ -20,11 +20,12 @@
  * - Empty/edge cases
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { TopicMemory, type TopicMessage } from '../../src/memory/TopicMemory.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('TopicMemory', () => {
   let tmpDir: string;
@@ -38,7 +39,7 @@ describe('TopicMemory', () => {
 
   afterEach(() => {
     topicMemory.close();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/topic-memory.test.ts:42' });
   });
 
   // ── Message Operations ──────────────────────────────────────
@@ -388,7 +389,7 @@ describe('TopicMemory', () => {
   });
 
   describe('JSONL import with sender identity', () => {
-    it('imports sender identity from JSONL entries', () => {
+    it('imports sender identity from JSONL entries', async () => {
       const jsonlPath = path.join(tmpDir, 'messages-with-sender.jsonl');
       const lines = [
         JSON.stringify({
@@ -403,7 +404,7 @@ describe('TopicMemory', () => {
       ];
       fs.writeFileSync(jsonlPath, lines.join('\n'));
 
-      const count = topicMemory.importFromJsonl(jsonlPath);
+      const count = await topicMemory.importFromJsonl(jsonlPath);
       expect(count).toBe(2);
 
       const messages = topicMemory.getRecentMessages(100);
@@ -413,7 +414,7 @@ describe('TopicMemory', () => {
       expect(messages[1].senderName).toBeUndefined(); // Agent message
     });
 
-    it('imports JSONL entries without sender identity (pre-migration)', () => {
+    it('imports JSONL entries without sender identity (pre-migration)', async () => {
       const jsonlPath = path.join(tmpDir, 'messages-old.jsonl');
       const lines = [
         JSON.stringify({
@@ -424,7 +425,7 @@ describe('TopicMemory', () => {
       ];
       fs.writeFileSync(jsonlPath, lines.join('\n'));
 
-      const count = topicMemory.importFromJsonl(jsonlPath);
+      const count = await topicMemory.importFromJsonl(jsonlPath);
       expect(count).toBe(1);
 
       const messages = topicMemory.getRecentMessages(100);
@@ -726,7 +727,7 @@ describe('TopicMemory', () => {
   // ── JSONL Import ────────────────────────────────────────────
 
   describe('importFromJsonl', () => {
-    it('imports messages from JSONL file', () => {
+    it('imports messages from JSONL file', async () => {
       const jsonlPath = path.join(tmpDir, 'messages.jsonl');
       const lines = [
         JSON.stringify({ messageId: 1, topicId: 100, text: 'Hello', fromUser: true, timestamp: '2026-02-24T12:00:00Z', sessionName: null }),
@@ -735,7 +736,7 @@ describe('TopicMemory', () => {
       ];
       fs.writeFileSync(jsonlPath, lines.join('\n'));
 
-      const count = topicMemory.importFromJsonl(jsonlPath);
+      const count = await topicMemory.importFromJsonl(jsonlPath);
       expect(count).toBe(3);
 
       const messages100 = topicMemory.getRecentMessages(100);
@@ -745,7 +746,7 @@ describe('TopicMemory', () => {
       expect(messages200).toHaveLength(1);
     });
 
-    it('skips entries without topicId', () => {
+    it('skips entries without topicId', async () => {
       const jsonlPath = path.join(tmpDir, 'messages.jsonl');
       const lines = [
         JSON.stringify({ messageId: 1, topicId: null, text: 'No topic', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
@@ -753,29 +754,137 @@ describe('TopicMemory', () => {
       ];
       fs.writeFileSync(jsonlPath, lines.join('\n'));
 
-      const count = topicMemory.importFromJsonl(jsonlPath);
+      const count = await topicMemory.importFromJsonl(jsonlPath);
       expect(count).toBe(1);
     });
 
-    it('is idempotent — reimport does not duplicate', () => {
+    it('is idempotent — reimport does not duplicate', async () => {
       const jsonlPath = path.join(tmpDir, 'messages.jsonl');
       fs.writeFileSync(jsonlPath, JSON.stringify({ messageId: 1, topicId: 100, text: 'Hello', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }));
 
-      topicMemory.importFromJsonl(jsonlPath);
-      const count2 = topicMemory.importFromJsonl(jsonlPath);
+      await topicMemory.importFromJsonl(jsonlPath);
+      const count2 = await topicMemory.importFromJsonl(jsonlPath);
       expect(count2).toBe(0);
 
       expect(topicMemory.getRecentMessages(100)).toHaveLength(1);
     });
 
-    it('returns 0 for missing file', () => {
-      const count = topicMemory.importFromJsonl('/nonexistent/path.jsonl');
+    it('returns 0 for missing file', async () => {
+      const count = await topicMemory.importFromJsonl('/nonexistent/path.jsonl');
       expect(count).toBe(0);
+    });
+
+    it('returns 0 for an empty file and leaves the DB untouched', async () => {
+      const jsonlPath = path.join(tmpDir, 'empty.jsonl');
+      fs.writeFileSync(jsonlPath, '');
+
+      const count = await topicMemory.importFromJsonl(jsonlPath);
+      expect(count).toBe(0);
+      expect(topicMemory.stats().totalMessages).toBe(0);
+    });
+
+    it('tolerates blank lines between JSONL entries', async () => {
+      const jsonlPath = path.join(tmpDir, 'blanks.jsonl');
+      const body = [
+        '',
+        JSON.stringify({ messageId: 1, topicId: 100, text: 'First', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
+        '',
+        JSON.stringify({ messageId: 2, topicId: 100, text: 'Second', fromUser: false, timestamp: '2026-02-24T12:01:00Z' }),
+        '',
+      ].join('\n');
+      fs.writeFileSync(jsonlPath, body);
+
+      const count = await topicMemory.importFromJsonl(jsonlPath);
+      expect(count).toBe(2);
+    });
+
+    it('returns a Promise<number> (async signature)', () => {
+      const jsonlPath = path.join(tmpDir, 'signature.jsonl');
+      fs.writeFileSync(jsonlPath, '');
+
+      const result = topicMemory.importFromJsonl(jsonlPath);
+      expect(result).toBeInstanceOf(Promise);
+      return expect(result).resolves.toBe(0);
+    });
+
+    it('counts malformed JSON lines and surfaces them via getLastImportStats()', async () => {
+      const jsonlPath = path.join(tmpDir, 'corrupt.jsonl');
+      const body = [
+        JSON.stringify({ messageId: 1, topicId: 100, text: 'Valid', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
+        '{ not valid json',                                              // malformed
+        'also not json at all',                                          // malformed
+        JSON.stringify({ messageId: 2, topicId: 100, text: 'Valid 2', fromUser: false, timestamp: '2026-02-24T12:01:00Z' }),
+        '{"messageId":3}',                                               // valid json, missing topicId/text
+      ].join('\n');
+      fs.writeFileSync(jsonlPath, body);
+
+      const count = await topicMemory.importFromJsonl(jsonlPath);
+      expect(count).toBe(2);
+
+      const stats = topicMemory.getLastImportStats();
+      expect(stats).not.toBeNull();
+      expect(stats!.imported).toBe(2);
+      expect(stats!.malformed).toBe(2);
+      expect(stats!.missingFields).toBe(1);
+    });
+
+    it('logs a single summary warning when malformed lines are present', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const jsonlPath = path.join(tmpDir, 'warn.jsonl');
+        fs.writeFileSync(jsonlPath, [
+          JSON.stringify({ messageId: 1, topicId: 100, text: 'Ok', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
+          'garbage line',
+        ].join('\n'));
+
+        await topicMemory.importFromJsonl(jsonlPath);
+
+        const matchingCalls = warnSpy.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('importFromJsonl') && call[0].includes('malformed_json=1'),
+        );
+        expect(matchingCalls.length).toBe(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('does NOT log a warning when the JSONL is clean (quiet by default)', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const jsonlPath = path.join(tmpDir, 'clean.jsonl');
+        fs.writeFileSync(jsonlPath, [
+          JSON.stringify({ messageId: 1, topicId: 100, text: 'Ok', fromUser: true, timestamp: '2026-02-24T12:00:00Z' }),
+          JSON.stringify({ messageId: 2, topicId: 100, text: 'Ok2', fromUser: false, timestamp: '2026-02-24T12:01:00Z' }),
+          '',
+        ].join('\n'));
+
+        await topicMemory.importFromJsonl(jsonlPath);
+
+        const matchingCalls = warnSpy.mock.calls.filter(
+          (call) => typeof call[0] === 'string' && call[0].includes('importFromJsonl'),
+        );
+        expect(matchingCalls.length).toBe(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('getLastImportStats() returns null before any import runs', async () => {
+      // Fresh instance, no import yet
+      const freshDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fresh-tm-'));
+      const fresh = new TopicMemory(freshDir);
+      await fresh.open();
+      try {
+        expect(fresh.getLastImportStats()).toBeNull();
+      } finally {
+        fresh.close();
+        SafeFsExecutor.safeRmSync(freshDir, { recursive: true, force: true, operation: 'tests/unit/topic-memory.test.ts:882' });
+      }
     });
   });
 
   describe('rebuild', () => {
-    it('clears existing messages and reimports', () => {
+    it('clears existing messages and reimports', async () => {
       // Insert a message directly
       topicMemory.insertMessage({
         messageId: 999, topicId: 100, text: 'Direct insert',
@@ -788,7 +897,7 @@ describe('TopicMemory', () => {
         messageId: 1, topicId: 200, text: 'From JSONL', fromUser: true, timestamp: '2026-02-24T12:01:00Z',
       }));
 
-      const count = topicMemory.rebuild(jsonlPath);
+      const count = await topicMemory.rebuild(jsonlPath);
       expect(count).toBe(1);
 
       // Old message should be gone
@@ -797,16 +906,25 @@ describe('TopicMemory', () => {
       expect(topicMemory.getRecentMessages(200)).toHaveLength(1);
     });
 
-    it('preserves summaries across rebuild', () => {
+    it('preserves summaries across rebuild', async () => {
       topicMemory.saveTopicSummary(100, 'Important summary', 10, 5);
 
       const jsonlPath = path.join(tmpDir, 'messages.jsonl');
       fs.writeFileSync(jsonlPath, '');
-      topicMemory.rebuild(jsonlPath);
+      await topicMemory.rebuild(jsonlPath);
 
       const summary = topicMemory.getTopicSummary(100);
       expect(summary).not.toBeNull();
       expect(summary!.summary).toBe('Important summary');
+    });
+
+    it('returns a Promise<number> (async signature)', () => {
+      const jsonlPath = path.join(tmpDir, 'signature-rebuild.jsonl');
+      fs.writeFileSync(jsonlPath, '');
+
+      const result = topicMemory.rebuild(jsonlPath);
+      expect(result).toBeInstanceOf(Promise);
+      return expect(result).resolves.toBe(0);
     });
   });
 
@@ -1007,12 +1125,12 @@ describe('TopicMemory', () => {
       expect(uninit.listTopics()).toHaveLength(0);
     });
 
-    it('importFromJsonl returns 0', () => {
-      expect(uninit.importFromJsonl('/nonexistent')).toBe(0);
+    it('importFromJsonl returns 0', async () => {
+      await expect(uninit.importFromJsonl('/nonexistent')).resolves.toBe(0);
     });
 
-    it('rebuild returns 0', () => {
-      expect(uninit.rebuild('/nonexistent')).toBe(0);
+    it('rebuild returns 0', async () => {
+      await expect(uninit.rebuild('/nonexistent')).resolves.toBe(0);
     });
 
     it('getMessageCount returns 0', () => {

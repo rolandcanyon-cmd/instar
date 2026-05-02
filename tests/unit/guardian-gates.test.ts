@@ -22,6 +22,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { refreshHooksAndSettings } from '../../src/commands/init.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ function createTestProject(port: number = 4321): TestProject {
   return {
     dir,
     stateDir,
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/guardian-gates.test.ts:58' }),
   };
 }
 
@@ -112,9 +113,9 @@ describe('Guardian Job Gates', () => {
       project = createTestProject();
       const gate = getGateCommand(project, 'degradation-digest');
 
-      // Create empty events file
+      // Create empty events file at the path DegradationReporter actually writes
       fs.writeFileSync(
-        path.join(project.stateDir, 'state', 'degradation-events.json'),
+        path.join(project.stateDir, 'degradations.json'),
         '[]'
       );
 
@@ -126,9 +127,9 @@ describe('Guardian Job Gates', () => {
       project = createTestProject();
       const gate = getGateCommand(project, 'degradation-digest');
 
-      // Create events file with actual events
+      // Create events file at the path DegradationReporter actually writes
       fs.writeFileSync(
-        path.join(project.stateDir, 'state', 'degradation-events.json'),
+        path.join(project.stateDir, 'degradations.json'),
         JSON.stringify([{
           feature: 'telegram',
           primary: 'send message',

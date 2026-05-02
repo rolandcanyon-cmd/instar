@@ -22,6 +22,7 @@ import {
   type LocalAgent,
   type DiscoveredGitHubAgent,
 } from '../../src/commands/discovery.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -29,7 +30,7 @@ function createTempDir(): { dir: string; cleanup: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-security-'));
   return {
     dir,
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/DiscoverySecurity.test.ts:33' }),
   };
 }
 

@@ -18,6 +18,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -101,7 +102,7 @@ function atomicWrite(filePath: string, data: string): void {
     fs.writeFileSync(tmpPath, data);
     fs.renameSync(tmpPath, filePath);
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/threadline/AgentTrustManager.ts:105' }); } catch { /* ignore */ }
     throw err;
   }
 }
@@ -146,10 +147,20 @@ export class AgentTrustManager {
   // ── Profile Access ──────────────────────────────────────────────
 
   /**
-   * Get trust profile for an agent. Returns null if no profile exists.
+   * Get trust profile for an agent by name or fingerprint.
+   * Checks direct key match first (name or fingerprint), then scans
+   * profile display names for backwards compatibility.
    */
-  getProfile(agentName: string): AgentTrustProfile | null {
-    return this.profiles[agentName] ?? null;
+  getProfile(agentNameOrFingerprint: string): AgentTrustProfile | null {
+    // Direct key lookup (works for both name-keyed and fingerprint-keyed profiles)
+    if (this.profiles[agentNameOrFingerprint]) {
+      return this.profiles[agentNameOrFingerprint];
+    }
+    // Scan display names (for fingerprint-keyed profiles looked up by name)
+    for (const profile of Object.values(this.profiles)) {
+      if (profile.agent === agentNameOrFingerprint) return profile;
+    }
+    return null;
   }
 
   /**
@@ -199,19 +210,31 @@ export class AgentTrustManager {
   /**
    * Get or create a trust profile keyed by fingerprint.
    * For relay agents, the fingerprint IS the identity.
+   * Relay agents default to 'verified' (can send messages) rather than
+   * 'untrusted' (probes only), since they've already authenticated with the relay.
+   *
+   * IMPORTANT: Always keys by fingerprint to avoid collisions between
+   * same-named agents on different machines. Display name is stored in
+   * the profile's `agent` field for human readability.
    */
   getOrCreateProfileByFingerprint(fingerprint: string, displayName?: string): AgentTrustProfile {
     // Check if profile already exists by fingerprint
     const existing = this.getProfileByFingerprint(fingerprint);
-    if (existing) return existing;
+    if (existing) {
+      // Update display name if provided and different
+      if (displayName && existing.agent !== displayName && existing.agent === fingerprint) {
+        existing.agent = displayName;
+        this.scheduleSave();
+      }
+      return existing;
+    }
 
-    // Create new profile keyed by fingerprint
+    // Create new profile keyed by fingerprint to prevent same-name collisions
     const now = new Date().toISOString();
-    const key = displayName ?? fingerprint;
-    this.profiles[key] = {
-      agent: key,
+    this.profiles[fingerprint] = {
+      agent: displayName ?? fingerprint,
       fingerprint,
-      level: 'untrusted',
+      level: 'verified',
       source: 'setup-default',
       history: {
         messagesReceived: 0,
@@ -221,13 +244,13 @@ export class AgentTrustManager {
         lastInteraction: '',
         streakSinceIncident: 0,
       },
-      allowedOperations: [...DEFAULT_ALLOWED_OPS.untrusted],
+      allowedOperations: [...DEFAULT_ALLOWED_OPS.verified],
       blockedOperations: [],
       createdAt: now,
       updatedAt: now,
     };
     this.save();
-    return this.profiles[key];
+    return this.profiles[fingerprint];
   }
 
   /**
@@ -251,6 +274,8 @@ export class AgentTrustManager {
 
   /**
    * Set trust level by fingerprint.
+   * Operates directly on the fingerprint-keyed profile to avoid
+   * name collision issues with setTrustLevel's name-based lookup.
    */
   setTrustLevelByFingerprint(
     fingerprint: string,
@@ -260,7 +285,7 @@ export class AgentTrustManager {
     displayName?: string,
   ): boolean {
     const profile = this.getOrCreateProfileByFingerprint(fingerprint, displayName);
-    return this.setTrustLevel(profile.agent, level, source, reason);
+    return this.applyTrustLevel(profile, level, source, reason);
   }
 
   /**
@@ -277,7 +302,7 @@ export class AgentTrustManager {
   // ── Trust Level Management ──────────────────────────────────────
 
   /**
-   * Set trust level for an agent.
+   * Set trust level for an agent (by name).
    * UPGRADES require source: 'user-granted' or 'paired-machine-granted'.
    * Returns true if the change was applied, false if rejected.
    */
@@ -288,7 +313,20 @@ export class AgentTrustManager {
     reason?: string
   ): boolean {
     const profile = this.getOrCreateProfile(agentName);
+    return this.applyTrustLevel(profile, level, source, reason);
+  }
+
+  /**
+   * Core trust level application logic. Shared by name-based and fingerprint-based paths.
+   */
+  private applyTrustLevel(
+    profile: AgentTrustProfile,
+    level: AgentTrustLevel,
+    source: AgentTrustSource,
+    reason?: string,
+  ): boolean {
     const previousLevel = profile.level;
+    const agentName = profile.agent;
 
     // Upgrades require user-granted or paired-machine-granted source
     if (this.compareTrust(level, previousLevel) > 0) {

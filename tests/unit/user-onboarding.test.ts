@@ -21,6 +21,7 @@ import {
   buildUserProfile,
   getDefaultAutonomyConfig,
 } from '../../src/users/UserOnboarding.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── generateVerificationCode ────────────────────────────────────────
 
@@ -351,7 +352,7 @@ describe('JoinRequestManager', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/user-onboarding.test.ts:355' });
   });
 
   it('createRequest persists to file', () => {

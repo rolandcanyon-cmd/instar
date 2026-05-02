@@ -236,8 +236,8 @@ export function loadConfig(projectDir?: string): InstarConfig {
     // Non-fatal — config works without secrets (just missing the secret values)
   }
 
-  const tmuxPath = detectTmuxPath();
-  const claudePath = detectClaudePath();
+  const tmuxPath = fileConfig.sessions?.tmuxPath || detectTmuxPath();
+  const claudePath = fileConfig.sessions?.claudePath || detectClaudePath();
 
   if (!tmuxPath) {
     throw new Error('tmux not found. Install with: brew install tmux (macOS) or apt install tmux (Linux)');
@@ -261,6 +261,8 @@ export function loadConfig(projectDir?: string): InstarConfig {
     ],
     authToken: fileConfig.authToken as string | undefined,
     port: (fileConfig.port as number | undefined) ?? 4040,
+    anthropicApiKey: fileConfig.sessions?.anthropicApiKey as string | undefined,
+    anthropicBaseUrl: fileConfig.sessions?.anthropicBaseUrl as string | undefined,
   };
 
   const scheduler: JobSchedulerConfig = {
@@ -273,6 +275,7 @@ export function loadConfig(projectDir?: string): InstarConfig {
       critical: 92,
       shutdown: 95,
     },
+    authToken: fileConfig.authToken as string | undefined,
   };
 
   // Auto-generate contextSigningKey if not present (persists to config file)
@@ -300,6 +303,11 @@ export function loadConfig(projectDir?: string): InstarConfig {
   }
 
   return {
+    // Spread fileConfig as base so all optional fields (safety, evolution,
+    // agentAutonomy, externalOperations, autonomyProfile, notifications,
+    // responseReview, inputGuard, dashboard, moltbridge, etc.) pass through.
+    // Explicitly constructed fields below override the spread.
+    ...fileConfig,
     projectName,
     projectDir: resolvedProjectDir,
     stateDir,
@@ -315,6 +323,10 @@ export function loadConfig(projectDir?: string): InstarConfig {
       memoryMonitoring: true,
       healthCheckIntervalMs: 30000,
       ...fileConfig.monitoring,
+      // Watchdog default-enabled so compaction-idle detection runs everywhere.
+      // Cost is ~free (30s poll cadence with structural process check first).
+      // Without this, sessions that compact via Telegram/Slack go dead silently.
+      watchdog: fileConfig.monitoring?.watchdog ?? { enabled: true },
       // Telemetry defaults: strictly opt-in
       telemetry: fileConfig.monitoring?.telemetry ?? { enabled: false },
     },

@@ -7,6 +7,7 @@ import { IntegrityManager } from '../../src/knowledge/IntegrityManager.js';
 import { TreeTraversal } from '../../src/knowledge/TreeTraversal.js';
 import { ProbeRegistry } from '../../src/knowledge/ProbeRegistry.js';
 import type { SelfKnowledgeNode } from '../../src/knowledge/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('IntegrityManager', () => {
   let tmpDir: string;
@@ -23,7 +24,7 @@ describe('IntegrityManager', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/IntegrityManager.test.ts:27' });
   });
 
   it('signs a file and verifies it passes', () => {
@@ -65,7 +66,7 @@ describe('IntegrityManager', () => {
     fs.writeFileSync(filePath, '# Temporary');
 
     manager.sign(filePath);
-    fs.unlinkSync(filePath);
+    SafeFsExecutor.safeUnlinkSync(filePath, { operation: 'tests/unit/IntegrityManager.test.ts:70' });
 
     const result = manager.verify(filePath);
     expect(result.valid).toBe(false);
@@ -139,7 +140,7 @@ describe('TreeTraversal with IntegrityManager', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/IntegrityManager.test.ts:145' });
   });
 
   it('serves content when integrity check passes', async () => {

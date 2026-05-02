@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DispatchConfig } from './types.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 export interface Dispatch {
   dispatchId: string;
@@ -566,7 +567,7 @@ export class DispatchManager {
     if (applied.length === 0) {
       // Remove context file if no applied dispatches
       if (fs.existsSync(this.contextFile)) {
-        fs.unlinkSync(this.contextFile);
+        SafeFsExecutor.safeUnlinkSync(this.contextFile, { operation: 'src/core/DispatchManager.ts:570' });
       }
       return;
     }
@@ -627,7 +628,7 @@ export class DispatchManager {
       fs.writeFileSync(tmpPath, JSON.stringify(items, null, 2));
       fs.renameSync(tmpPath, this.dispatchFile);
     } catch (err) {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/core/DispatchManager.ts:632' }); } catch { /* ignore */ }
       throw err;
     }
   }

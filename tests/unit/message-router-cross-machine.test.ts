@@ -22,6 +22,7 @@ import { MessageDelivery } from '../../src/messaging/MessageDelivery.js';
 import { MessageFormatter } from '../../src/messaging/MessageFormatter.js';
 import { sign, verify, generateSigningKeyPair } from '../../src/core/MachineIdentity.js';
 import type { MessageEnvelope, SignedPayload } from '../../src/messaging/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ function createTempDir(): string {
 }
 
 function cleanup(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/message-router-cross-machine.test.ts:34' });
 }
 
 function createMockTmuxOps() {
@@ -233,9 +234,9 @@ describe('MessageRouter — Cross-Machine', () => {
       expect(fs.existsSync(outboundFile)).toBe(true);
 
       // Cleanup outbound
-      fs.rmSync(outboundFile, { force: true });
-      try { fs.rmdirSync(outboundDir); } catch { /* ignore */ }
-      try { fs.rmdirSync(path.join(os.homedir(), '.instar', 'messages', 'outbound')); } catch { /* ignore */ }
+      SafeFsExecutor.safeRmSync(outboundFile, { force: true, operation: 'tests/unit/message-router-cross-machine.test.ts:238' });
+      try { SafeFsExecutor.safeRmdirSync(outboundDir, { operation: 'tests/unit/message-router-cross-machine.test.ts:240' }); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeRmdirSync(path.join(os.homedir(), '.instar', 'messages', 'outbound'), { operation: 'tests/unit/message-router-cross-machine.test.ts:242' }); } catch { /* ignore */ }
     });
 
     it('fails when target machine is not active', async () => {
@@ -275,9 +276,9 @@ describe('MessageRouter — Cross-Machine', () => {
         // Cleanup outbound
         const outboundDir = path.join(os.homedir(), '.instar', 'messages', 'outbound', REMOTE_MACHINE);
         const outboundFile = path.join(outboundDir, `${result.messageId}.json`);
-        fs.rmSync(outboundFile, { force: true });
-        try { fs.rmdirSync(outboundDir); } catch { /* ignore */ }
-        try { fs.rmdirSync(path.join(os.homedir(), '.instar', 'messages', 'outbound')); } catch { /* ignore */ }
+        SafeFsExecutor.safeRmSync(outboundFile, { force: true, operation: 'tests/unit/message-router-cross-machine.test.ts:283' });
+        try { SafeFsExecutor.safeRmdirSync(outboundDir, { operation: 'tests/unit/message-router-cross-machine.test.ts:285' }); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeRmdirSync(path.join(os.homedir(), '.instar', 'messages', 'outbound'), { operation: 'tests/unit/message-router-cross-machine.test.ts:287' }); } catch { /* ignore */ }
       } finally {
         global.fetch = originalFetch;
       }

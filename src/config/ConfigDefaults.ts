@@ -19,6 +19,11 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
   monitoring: {
     memoryMonitoring: true,
     healthCheckIntervalMs: 30000,
+    // Default-on so SessionWatchdog runs everywhere — required for the
+    // compaction-idle polling fallback to actually fire.
+    watchdog: {
+      enabled: true,
+    },
     promptGate: {
       enabled: true,
       autoApprove: {
@@ -34,6 +39,18 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
     relayEnabled: false,
     visibility: 'public',
     capabilities: ['chat'],
+  },
+  // Backup overrides. `includeFiles` is set-unioned with BackupManager's
+  // DEFAULT_CONFIG.includeFiles — the empty default here means users and
+  // migrators can ADD paths (e.g. pr-pipeline state) without displacing
+  // the built-in identity/memory defaults.
+  backup: {
+    includeFiles: [] as string[],
+  },
+  // PR-REVIEW-HARDENING-SPEC Phase A default: all /pr-gate/* routes
+  // 404 until explicitly flipped by Phase B+. Runtime kill-switch.
+  prGate: {
+    phase: 'off' as const,
   },
 };
 

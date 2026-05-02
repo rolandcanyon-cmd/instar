@@ -27,6 +27,7 @@ import { generateSkillManifest } from '../../../src/threadline/OpenClawSkillMani
 import { AgentTrustManager } from '../../../src/threadline/AgentTrustManager.js';
 import { ComputeMeter } from '../../../src/threadline/ComputeMeter.js';
 import { ContextThreadMap } from '../../../src/threadline/ContextThreadMap.js';
+import { SafeFsExecutor } from '../../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -127,7 +128,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/e2e/threadline/OpenClawBridgeE2E.test.ts:131' });
 });
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -320,7 +321,7 @@ describe('OpenClawBridge E2E', () => {
         expect(r2).toContain('[bridge-error]');
         expect(r2).toContain('Compute budget exceeded');
       } finally {
-        fs.rmSync(stateDir2, { recursive: true, force: true });
+        SafeFsExecutor.safeRmSync(stateDir2, { recursive: true, force: true, operation: 'tests/e2e/threadline/OpenClawBridgeE2E.test.ts:325' });
       }
     });
   });
@@ -519,7 +520,7 @@ describe('OpenClawBridge E2E', () => {
         expect(typeof result).toBe('string');
         expect(result).toContain('[bridge-error]');
       } finally {
-        fs.rmSync(stateDir2, { recursive: true, force: true });
+        SafeFsExecutor.safeRmSync(stateDir2, { recursive: true, force: true, operation: 'tests/e2e/threadline/OpenClawBridgeE2E.test.ts:525' });
       }
     });
   });

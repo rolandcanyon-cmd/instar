@@ -9,8 +9,8 @@ describe('Prerequisites', () => {
   it('returns structured results for all checks', () => {
     const result = checkPrerequisites();
 
-    expect(result.results).toHaveLength(3);
-    expect(result.results.map(r => r.name)).toEqual(['Node.js', 'tmux', 'Claude CLI']);
+    expect(result.results).toHaveLength(4);
+    expect(result.results.map(r => r.name)).toEqual(['Node.js', 'tmux', 'Claude CLI', 'GitHub CLI']);
 
     // Each result has the expected shape
     for (const r of result.results) {
@@ -55,5 +55,30 @@ describe('Prerequisites', () => {
     for (const m of result.missing) {
       expect(m.installHint.length).toBeGreaterThan(0);
     }
+  });
+
+  it('tmux result includes canAutoInstall on macOS regardless of Homebrew', () => {
+    const result = checkPrerequisites();
+    const tmux = result.results.find(r => r.name === 'tmux')!;
+
+    if (process.platform === 'darwin') {
+      // On macOS, tmux should always be auto-installable
+      // (with Homebrew auto-install if needed)
+      if (!tmux.found) {
+        expect(tmux.canAutoInstall).toBe(true);
+        expect(tmux.installCommand).toBeDefined();
+      }
+    }
+  });
+
+  it('needsHomebrew is only set when Homebrew is missing on macOS', () => {
+    const result = checkPrerequisites();
+    const tmux = result.results.find(r => r.name === 'tmux')!;
+
+    if (process.platform !== 'darwin') {
+      // Non-macOS should never need Homebrew
+      expect(tmux.needsHomebrew).toBeFalsy();
+    }
+    // On macOS: needsHomebrew is true only if brew is not found
   });
 });

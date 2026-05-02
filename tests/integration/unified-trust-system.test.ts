@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // Mock the moltbridge SDK (imported transitively by MoltBridgeClient)
 vi.mock('moltbridge', () => ({
@@ -74,7 +75,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  fs.rmSync(testDir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(testDir, { recursive: true, force: true, operation: 'tests/integration/unified-trust-system.test.ts:78' });
 });
 
 function freshDir(name: string): string {

@@ -21,6 +21,7 @@ import { createSessionProbes } from '../../src/monitoring/probes/SessionProbe.js
 import { createSchedulerProbes } from '../../src/monitoring/probes/SchedulerProbe.js';
 import { createMessagingProbes } from '../../src/monitoring/probes/MessagingProbe.js';
 import { createLifelineProbes } from '../../src/monitoring/probes/LifelineProbe.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -88,7 +89,7 @@ describe('SystemReviewer Integration: Full Orchestration', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:92' });
   });
 
   it('runs a full review with all 14 Tier 1 probes registered', async () => {
@@ -198,7 +199,7 @@ describe('SystemReviewer Integration: History Persistence', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:203' });
   });
 
   it('history survives instance destruction and recreation', async () => {
@@ -286,7 +287,7 @@ describe('SystemReviewer Integration: Alert Pipeline', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:292' });
   });
 
   it('alert contains probe name, error info, and suggested fix', async () => {
@@ -356,7 +357,7 @@ describe('SystemReviewer Integration: Feedback Pipeline', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:363' });
   });
 
   it('feedback includes structured probe failure data', async () => {
@@ -445,7 +446,7 @@ describe('SystemReviewer Integration: Wiring Integrity', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:453' });
   });
 
   it('SystemReviewer constructor does not throw with minimal deps', () => {
@@ -582,7 +583,7 @@ describe('SystemReviewer Integration: Concurrency', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:591' });
   });
 
   it('two rapid reviews complete without corruption', async () => {
@@ -632,7 +633,7 @@ describe('SystemReviewer Integration: Dead Letter Fallback', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:642' });
   });
 
   it('dead letter entries are valid JSONL', async () => {
@@ -691,7 +692,7 @@ describe('SystemReviewer Integration: Startup Sweep', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:702' });
   });
 
   it('cleanup callbacks are called and counted', async () => {
@@ -740,7 +741,7 @@ describe('SystemReviewer Integration: Trend Accuracy', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(stateDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(stateDir, { recursive: true, force: true, operation: 'tests/integration/system-reviewer-integration.test.ts:752' });
   });
 
   it('stable trend when all reviews pass', async () => {

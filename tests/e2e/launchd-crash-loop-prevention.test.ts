@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, execSync } from 'node:child_process';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 const isMacOS = os.platform() === 'darwin';
 
@@ -44,7 +45,7 @@ describe('E2E: Launchd crash loop prevention', () => {
   });
 
   afterAll(() => {
-    fs.rmSync(projectDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(projectDir, { recursive: true, force: true, operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:48' });
   });
 
   describe('Boot wrapper generation', () => {
@@ -151,7 +152,7 @@ rm -f "$CRASH_FILE" 2>/dev/null
       const crashFile = path.join(stateDir, 'state', 'boot-crashes.txt');
 
       // Remove any existing crash file
-      try { fs.unlinkSync(crashFile); } catch { /* ok */ }
+      try { SafeFsExecutor.safeUnlinkSync(crashFile, { operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:156' }); } catch { /* ok */ }
 
       // Make CLI exit with error
       fs.writeFileSync(shadowCli, '#!/usr/bin/env node\nprocess.exit(1);');
@@ -223,7 +224,7 @@ rm -f "$CRASH_FILE" 2>/dev/null
       const after = execSync(`xattr "${testFile}"`, { encoding: 'utf-8' });
       expect(after).not.toContain('com.apple.quarantine');
 
-      fs.unlinkSync(testFile);
+      SafeFsExecutor.safeUnlinkSync(testFile, { operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:229' });
     });
 
     it('com.apple.provenance survives removal attempt on macOS 15+', () => {
@@ -235,7 +236,7 @@ rm -f "$CRASH_FILE" 2>/dev/null
         execFileSync('xattr', ['-w', 'com.apple.provenance', '', testFile]);
       } catch {
         // May not be settable — skip
-        fs.unlinkSync(testFile);
+        SafeFsExecutor.safeUnlinkSync(testFile, { operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:242' });
         return;
       }
 
@@ -247,7 +248,7 @@ rm -f "$CRASH_FILE" 2>/dev/null
       // On macOS 15+, provenance persists despite removal attempt.
       // On older versions, it may actually be removed. Both are valid.
       // The important thing is that the removal attempt doesn't crash.
-      fs.unlinkSync(testFile);
+      SafeFsExecutor.safeUnlinkSync(testFile, { operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:255' });
     });
 
     it('boot wrapper xattr stripping does not fail on clean files', () => {
@@ -296,7 +297,7 @@ rm -f "$CRASH_FILE" 2>/dev/null
         expect(err.status).not.toBe(0);
       } finally {
         fs.chmodSync(restrictedFile, 0o644);
-        fs.unlinkSync(restrictedFile);
+        SafeFsExecutor.safeUnlinkSync(restrictedFile, { operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:305' });
       }
     });
   });
@@ -400,7 +401,7 @@ child.on('error', (err) => {
 
     it('JS boot wrapper records crash timestamp on failure', () => {
       const crashFile = path.join(stateDir, 'state', 'boot-crashes.txt');
-      try { fs.unlinkSync(crashFile); } catch { /* ok */ }
+      try { SafeFsExecutor.safeUnlinkSync(crashFile, { operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:410' }); } catch { /* ok */ }
 
       fs.writeFileSync(shadowCli, '#!/usr/bin/env node\nprocess.exit(1);');
 
@@ -482,7 +483,7 @@ child.on('error', (err) => {
       const crashFile = path.join(stateDir, 'state', 'boot-crashes.txt');
 
       // Clean start
-      try { fs.unlinkSync(crashFile); } catch { /* ok */ }
+      try { SafeFsExecutor.safeUnlinkSync(crashFile, { operation: 'tests/e2e/launchd-crash-loop-prevention.test.ts:493' }); } catch { /* ok */ }
 
       // Make CLI fail
       fs.writeFileSync(shadowCli, '#!/usr/bin/env node\nprocess.exit(42);');

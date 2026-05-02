@@ -8,6 +8,7 @@ import type { QuotaState, JobSchedulerConfig } from '../../src/core/types.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 const thresholds: JobSchedulerConfig['quotaThresholds'] = {
   normal: 50,
@@ -26,7 +27,7 @@ describe('QuotaTracker', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/quota-tracker.test.ts:30' });
   });
 
   function writeQuota(usagePercent: number): void {
@@ -161,7 +162,7 @@ describe('QuotaTracker', () => {
     });
 
     const state = tracker.getState();
-    expect(state).not.toBeNull();
-    expect(state!.recommendation).toBeUndefined();
+    // Stale data now returns null (fail-open behavior)
+    expect(state).toBeNull();
   });
 });

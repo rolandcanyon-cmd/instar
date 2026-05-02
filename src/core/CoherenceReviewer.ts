@@ -8,6 +8,7 @@
 
 import crypto from 'node:crypto';
 import { resolveModelId } from './models.js';
+import type { IntelligenceProvider, IntelligenceOptions } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,6 +44,8 @@ export interface ReviewContext {
   trustLevel?: string;
   /** Relationship context (communicationStyle, formality - no free-text fields) */
   relationshipContext?: { communicationStyle?: string; formality?: string; themes?: string[] };
+  /** Canonical state context — known projects, URLs, facts from CanonicalState registry */
+  canonicalStateContext?: string;
 }
 
 export interface ReviewerOptions {
@@ -52,6 +55,12 @@ export interface ReviewerOptions {
   timeoutMs?: number;
   /** Mode: block, warn, or observe */
   mode?: 'block' | 'warn' | 'observe';
+  /**
+   * Optional IntelligenceProvider. When provided, reviewers route their LLM calls
+   * through this abstraction (supports Claude CLI subscription, Anthropic API, etc.).
+   * When omitted, reviewers fall back to direct Anthropic API using `apiKey`.
+   */
+  intelligence?: IntelligenceProvider;
 }
 
 export interface ReviewerHealthMetrics {
@@ -77,6 +86,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 export abstract class CoherenceReviewer {
   readonly name: string;
   protected readonly apiKey: string;
+  protected readonly intelligence: IntelligenceProvider | null;
   protected readonly options: ReviewerOptions;
   readonly metrics: ReviewerHealthMetrics = {
     passCount: 0,
@@ -90,6 +100,7 @@ export abstract class CoherenceReviewer {
     this.name = name;
     this.apiKey = apiKey;
     this.options = options ?? {};
+    this.intelligence = options?.intelligence ?? null;
   }
 
   /**
@@ -218,17 +229,34 @@ export abstract class CoherenceReviewer {
   }
 
   /**
-   * Call the Anthropic Messages API directly (same pattern as AnthropicIntelligenceProvider).
+   * Run the reviewer's LLM call. Routes through IntelligenceProvider when available
+   * (supports Claude CLI subscription + Anthropic API), else falls back to the
+   * direct Anthropic API path using the constructor apiKey.
    *
-   * Uses AbortController to enforce the reviewer's timeoutMs so the underlying
-   * fetch is cancelled when a Promise.race timeout fires in callers like GateReviewer.
-   * Without cancellation, timed-out fetches keep running, pile up, and eventually
-   * cause the HTTP request timeout middleware to return 408 after 30s.
+   * Uses AbortController to enforce timeoutMs on the direct-API path so the underlying
+   * fetch is cancelled when a Promise.race timeout fires. Without cancellation,
+   * timed-out fetches keep running, pile up, and eventually cause the HTTP request
+   * timeout middleware to return 408 after 30s.
    */
   protected async callApi(prompt: string): Promise<string> {
-    const model = resolveModelId(this.options.model ?? 'haiku');
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+    if (this.intelligence) {
+      const intelOptions: IntelligenceOptions = {
+        model: this.mapModelToTier(this.options.model ?? 'haiku'),
+        maxTokens: 200,
+        temperature: 0,
+      };
+      // IntelligenceProvider implementations set their own timeouts; wrap here too.
+      return await Promise.race([
+        this.intelligence.evaluate(prompt, intelOptions),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`Reviewer timeout after ${timeoutMs}ms`)), timeoutMs),
+        ),
+      ]);
+    }
+
+    const model = resolveModelId(this.options.model ?? 'haiku');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -268,5 +296,17 @@ export abstract class CoherenceReviewer {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Map a reviewer model string (e.g., 'haiku', 'sonnet', full ID) to an
+   * IntelligenceProvider tier. Reviewers default to 'haiku' → 'fast'.
+   */
+  private mapModelToTier(model: string): 'fast' | 'balanced' | 'capable' {
+    const lower = model.toLowerCase();
+    if (lower.includes('haiku')) return 'fast';
+    if (lower.includes('opus')) return 'capable';
+    if (lower.includes('sonnet')) return 'balanced';
+    return 'fast';
   }
 }

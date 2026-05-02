@@ -24,6 +24,7 @@ import { TopicSummarizer } from '../../src/memory/TopicSummarizer.js';
 import { createMockSessionManager } from '../helpers/setup.js';
 import { StateManager } from '../../src/core/StateManager.js';
 import type { InstarConfig, IntelligenceProvider } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('TopicMemory E2E lifecycle', () => {
   let tmpDir: string;
@@ -71,7 +72,7 @@ describe('TopicMemory E2E lifecycle', () => {
     // Step 2: Initialize TopicMemory and import from JSONL
     topicMemory = new TopicMemory(stateDir);
     await topicMemory.open();
-    const importCount = topicMemory.importFromJsonl(jsonlPath);
+    const importCount = await topicMemory.importFromJsonl(jsonlPath);
     expect(importCount).toBe(48);
 
     // Step 3: Start server
@@ -113,7 +114,7 @@ describe('TopicMemory E2E lifecycle', () => {
   afterAll(async () => {
     await server.stop();
     topicMemory.close();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/e2e/topic-memory-lifecycle.test.ts:117' });
   });
 
   // ── Phase 1: Verify import worked ──────────────────────────

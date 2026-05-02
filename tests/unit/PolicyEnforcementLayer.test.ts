@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { PolicyEnforcementLayer } from '../../src/core/PolicyEnforcementLayer.js';
 import type { PELContext, PELResult } from '../../src/core/PolicyEnforcementLayer.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 /**
  * Policy Enforcement Layer tests — verify that deterministic hard
@@ -40,7 +41,7 @@ describe('PolicyEnforcementLayer', () => {
 
   afterEach(() => {
     pel.destroy();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/PolicyEnforcementLayer.test.ts:44' });
   });
 
   // ── Clean Messages ─────────────────────────────────────────────
@@ -227,7 +228,7 @@ describe('PolicyEnforcementLayer', () => {
         expect(result.violations.filter(v => v.rule === 'auth-token-leak')).toHaveLength(0);
       } finally {
         pelNoConfig.destroy();
-        fs.rmSync(emptyDir, { recursive: true, force: true });
+        SafeFsExecutor.safeRmSync(emptyDir, { recursive: true, force: true, operation: 'tests/unit/PolicyEnforcementLayer.test.ts:232' });
       }
     });
 
@@ -245,7 +246,7 @@ describe('PolicyEnforcementLayer', () => {
         expect(result.violations.filter(v => v.rule === 'auth-token-leak')).toHaveLength(0);
       } finally {
         pelShort.destroy();
-        fs.rmSync(shortDir, { recursive: true, force: true });
+        SafeFsExecutor.safeRmSync(shortDir, { recursive: true, force: true, operation: 'tests/unit/PolicyEnforcementLayer.test.ts:251' });
       }
     });
   });

@@ -9,8 +9,12 @@
  */
 
 import { Cron } from 'croner';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'node:fs';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
+
+const execFileAsync = promisify(execFile);
 import path from 'node:path';
 import { ExecutionJournal } from '../core/ExecutionJournal.js';
 import { IntegrationGate } from './IntegrationGate.js';
@@ -22,7 +26,7 @@ import { classifySessionDeath } from '../monitoring/QuotaExhaustionDetector.js';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { StateManager } from '../core/StateManager.js';
 import type { QuotaTracker } from '../monitoring/QuotaTracker.js';
-import type { IntelligenceProvider, MessagingAdapter, SkipReason } from '../core/types.js';
+import type { CanRunJobResult, IntelligenceProvider, MessagingAdapter, SkipReason } from '../core/types.js';
 import { TOPIC_STYLE } from '../messaging/TelegramAdapter.js';
 import type { JobDefinition, JobSchedulerConfig, JobState, JobPriority } from '../core/types.js';
 import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
@@ -67,12 +71,29 @@ export class JobScheduler {
   /** Map session names to run IDs for completion tracking */
   private activeRunIds: Map<string, string> = new Map();
 
+  /** Retry state for skipped jobs: slug → { retries, lastAttempt, timer } */
+  private retryState: Map<string, { retries: number; timer: ReturnType<typeof setTimeout> }> = new Map();
+
+  /** Retry delays in ms: 1min, 5min, 15min, 30min, 1h, 2h */
+  private static readonly RETRY_DELAYS_MS = [
+    60_000,       // 1 min
+    300_000,      // 5 min
+    900_000,      // 15 min
+    1_800_000,    // 30 min
+    3_600_000,    // 1 hour
+    7_200_000,    // 2 hours
+  ];
+
   /** Local machine identity — used for machine-scoped job filtering */
   private machineId: string | null = null;
   private machineName: string | null = null;
 
-  /** Callback to check if quota allows running a job at the given priority */
-  canRunJob: (priority: JobPriority) => boolean = () => true;
+  /**
+   * Callback to check if a job at the given priority may run.
+   * May return a plain boolean (legacy) or a CanRunJobResult so the
+   * scheduler can record the actual gating reason (memory vs quota vs gate).
+   */
+  canRunJob: (priority: JobPriority) => boolean | CanRunJobResult = () => true;
 
   /** Optional messenger for sending job notifications */
   private messenger: MessagingAdapter | null = null;
@@ -208,8 +229,10 @@ export class JobScheduler {
 
     for (const job of scopedJobs) {
       try {
-        const task = new Cron(job.schedule, () => {
-          this.triggerJob(job.slug, 'scheduled');
+        const task = new Cron(job.schedule, async () => {
+          // New cron window — reset retry state so we get fresh attempts
+          this.clearRetryState(job.slug);
+          await this.triggerJob(job.slug, 'scheduled');
         });
         this.cronTasks.set(job.slug, task);
       } catch (err) {
@@ -217,8 +240,17 @@ export class JobScheduler {
       }
     }
 
-    // Check for missed jobs — any enabled job overdue by >1.5x its interval
-    this.checkMissedJobs(scopedJobs);
+    // Check for missed jobs — any enabled job overdue by >1.5x its interval.
+    // Delay the first evaluation by startupGraceMs (default 5s) so the HTTP
+    // server is ready before health-check gates run.  Without this, gate
+    // checks fail on startup and jobs wait for the next cron window.
+    const graceMs = this.config.startupGraceMs ?? 5000;
+    if (graceMs > 0) {
+      console.log(`[scheduler] Startup grace period: ${graceMs}ms before missed-job evaluation`);
+      setTimeout(() => this.checkMissedJobs(scopedJobs), graceMs);
+    } else {
+      this.checkMissedJobs(scopedJobs);
+    }
 
     // Ensure every job has a Telegram topic (job-topic coupling)
     if (this.telegram) {
@@ -245,6 +277,11 @@ export class JobScheduler {
     }
     this.cronTasks.clear();
     this.queue = [];
+    // Clear all retry timers
+    for (const [, state] of this.retryState) {
+      if (state.timer) clearTimeout(state.timer);
+    }
+    this.retryState.clear();
     this.running = false;
 
     this.state.appendEvent({
@@ -257,7 +294,7 @@ export class JobScheduler {
   /**
    * Trigger a job by slug. Checks claims, quota, session limits, queues if at capacity.
    */
-  triggerJob(slug: string, reason: string): 'triggered' | 'queued' | 'skipped' {
+  async triggerJob(slug: string, reason: string): Promise<'triggered' | 'queued' | 'skipped'> {
     const job = this.jobs.find(j => j.slug === slug);
     if (!job) {
       throw new Error(`Unknown job: ${slug}`);
@@ -294,20 +331,27 @@ export class JobScheduler {
     }
 
     // Script jobs bypass quota gating — they don't consume LLM tokens
-    if (job.execute.type !== 'script' && !this.canRunJob(job.priority)) {
-      this.skipLedger.recordSkip(slug, 'quota');
-      this.state.appendEvent({
-        type: 'job_skipped',
-        summary: `Job "${slug}" skipped — quota check failed`,
-        timestamp: new Date().toISOString(),
-        metadata: { slug, reason, priority: job.priority },
-      });
-      return 'skipped';
+    if (job.execute.type !== 'script') {
+      const gateResult = this.normalizeCanRunResult(this.canRunJob(job.priority));
+      if (!gateResult.allowed) {
+        const skipReason: SkipReason = gateResult.reason ?? 'quota';
+        const detail = gateResult.detail ? ` (${gateResult.detail})` : '';
+        this.skipLedger.recordSkip(slug, skipReason);
+        this.state.appendEvent({
+          type: 'job_skipped',
+          summary: `Job "${slug}" skipped — ${skipReason}${detail}`,
+          timestamp: new Date().toISOString(),
+          metadata: { slug, reason, priority: job.priority, gateReason: skipReason, gateDetail: gateResult.detail },
+        });
+        this.scheduleRetry(slug, skipReason);
+        return 'skipped';
+      }
     }
 
-    // Run gate command if configured — zero-token pre-screening
+    // Run gate command if configured — zero-token pre-screening (async, non-blocking)
     if (job.gate) {
-      if (!this.runGate(job)) {
+      if (!await this.runGateAsync(job)) {
+        this.scheduleRetry(slug, 'gate');
         return 'skipped';
       }
     }
@@ -327,6 +371,9 @@ export class JobScheduler {
         console.error(`[scheduler] Failed to broadcast claim for "${slug}": ${err}`);
       });
     }
+
+    // Clear retry state on successful trigger
+    this.clearRetryState(slug);
 
     this.spawnJobSession(job, reason);
     return 'triggered';
@@ -366,7 +413,8 @@ export class JobScheduler {
     const job = this.jobs.find(j => j.slug === next.slug);
     if (!job) return;
 
-    if (!this.canRunJob(job.priority)) {
+    const queueGate = this.normalizeCanRunResult(this.canRunJob(job.priority));
+    if (!queueGate.allowed) {
       // Re-add to front of queue — don't silently drop
       this.queue.unshift(next);
       return;
@@ -641,6 +689,15 @@ export class JobScheduler {
       }
     }
 
+    // Inject view metadata instruction so job-created reports are linked
+    const viewMetaBlock = [
+      '[VIEW METADATA]',
+      `When creating private views (POST /view), include metadata to link the report to this job:`,
+      `  "metadata": { "source": { "type": "job", "id": "${job.slug}" } }`,
+      '[/VIEW METADATA]',
+    ].join('\n');
+    base = `${viewMetaBlock}\n\n${base}`;
+
     // Inject handoff notes from the last execution (continuity between runs)
     const handoff = this.runHistory.getLastHandoff(job.slug);
     if (handoff) {
@@ -799,7 +856,7 @@ export class JobScheduler {
         });
         // Clean up sentinel file
         const sentinelPath = path.join(this.stateDir, 'state', 'execution-journal', `_ls-enabled-${job.slug}`);
-        try { fs.unlinkSync(sentinelPath); } catch { /* already gone */ }
+        try { SafeFsExecutor.safeUnlinkSync(sentinelPath, { operation: 'src/scheduler/JobScheduler.ts:859' }); } catch { /* already gone */ }
       } catch (err) {
         console.error(`[scheduler] ExecutionJournal finalization failed for "${job.slug}": ${err}`);
       }
@@ -964,24 +1021,34 @@ export class JobScheduler {
     // Load existing topic mappings
     const mappings = this.state.get<Record<string, number>>('job-topic-mappings') ?? {};
 
+    // Collect all explicitly-configured topicIds so we never close a topic
+    // that another job is actively using.
+    const explicitTopicIds = new Set<number>();
+    for (const j of enabledJobs) {
+      if (j.topicId) explicitTopicIds.add(j.topicId);
+    }
+
     for (const job of enabledJobs) {
       // Skip eager topic creation for silent or on-alert jobs.
       // On-alert jobs get topics created lazily when they first have something to report.
       const mode = this.getNotifyMode(job);
       if (mode === 'never' || mode === 'on-alert') {
-        // Clean up stale topic mappings from before on-alert was the default.
-        // Older versions created topics eagerly for ALL jobs. Close and remove them.
-        const staleTopicId = job.topicId || mappings[job.slug];
-        if (staleTopicId) {
-          console.log(`[scheduler] Cleaning up stale topic for on-alert job "${job.slug}" (topic ${staleTopicId})`);
-          try {
-            await this.telegram.closeForumTopic(staleTopicId);
-          } catch {
-            // @silent-fallback-ok — topic may already be closed or deleted, cleanup is best-effort
+        // Clean up dynamically-created topic mappings (not explicitly configured).
+        // Only remove mappings — don't close topics that may be shared or explicitly set.
+        const dynamicTopicId = mappings[job.slug];
+        if (dynamicTopicId && !job.topicId) {
+          // Only close if no other job explicitly uses this topic
+          if (!explicitTopicIds.has(dynamicTopicId)) {
+            console.log(`[scheduler] Cleaning up stale dynamic topic for on-alert job "${job.slug}" (topic ${dynamicTopicId})`);
+            try {
+              await this.telegram.closeForumTopic(dynamicTopicId);
+            } catch {
+              // @silent-fallback-ok — topic may already be closed or deleted
+            }
           }
           delete mappings[job.slug];
-          job.topicId = undefined;
         }
+        // Never clear an explicitly-configured topicId — the job definition owns it
         continue;
       }
 
@@ -1027,26 +1094,125 @@ export class JobScheduler {
   }
 
   /**
-   * Run a job's gate command. Returns true if the job should proceed, false to skip.
+   * Run a job's gate command asynchronously. Returns true if the job should proceed, false to skip.
    * Gates are zero-token pre-screening — a bash command that exits 0 (proceed) or non-zero (skip).
+   * Retries up to 3 times with 5s delay to handle transient failures (e.g., server restart windows).
+   *
+   * Uses non-blocking async execution to avoid stalling the Node.js event loop while gates run.
+   * Synchronous gate execution was causing health-check timeouts under startup load (many gates
+   * firing concurrently after a restart would block the event loop for 30-300+ seconds).
    */
-  private runGate(job: JobDefinition): boolean {
-    try {
-      execFileSync('/bin/sh', ['-c', job.gate!], {
-        encoding: 'utf-8',
-        timeout: 10000,
-        stdio: ['pipe', 'pipe', 'pipe'],
+  private async runGateAsync(job: JobDefinition): Promise<boolean> {
+    const maxAttempts = this.config.gateRetries ?? 3;
+    const retryDelayMs = this.config.gateRetryDelayMs ?? 5000;
+    let lastErr: unknown;
+
+    // Expose auth token to gate shells so they can call authenticated localhost
+    // endpoints (e.g. /evolution/actions/overdue). Without this, gates that curl
+    // the local API silently return 401 and the downstream pipe crashes, making
+    // the job skip every run cycle with no obvious signal.
+    const gateEnv = this.config.authToken
+      ? { ...process.env, INSTAR_AUTH_TOKEN: this.config.authToken }
+      : process.env;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await execFileAsync('/bin/sh', ['-c', job.gate!], {
+          encoding: 'utf-8',
+          timeout: 10000,
+          env: gateEnv,
+        });
+        if (attempt > 1) {
+          console.log(`[scheduler] Gate for "${job.slug}" passed on attempt ${attempt}/${maxAttempts}`);
+        }
+        return true;
+      } catch (err: unknown) {
+        lastErr = err;
+        if (attempt < maxAttempts) {
+          console.log(`[scheduler] Gate for "${job.slug}" failed (attempt ${attempt}/${maxAttempts}), retrying in ${retryDelayMs / 1000}s...`);
+          await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+        }
+      }
+    }
+
+    // All attempts failed
+    const stderr = (lastErr as { stderr?: string })?.stderr?.trim() || '';
+    // execFileAsync (promisified execFile) rejects with an error whose exit code
+    // lives on `.code`, not `.status`. `.status` is the shape for synchronous
+    // spawnSync/execSync. Reading `.status` always resolved to undefined → null,
+    // making legitimate non-zero skips look like process crashes in the activity
+    // feed. Prefer signal (kill reason), then code, then legacy status.
+    const errShape = lastErr as { code?: number; signal?: string | null; status?: number };
+    const exitCode = errShape?.signal ?? errShape?.code ?? errShape?.status ?? null;
+    const gateCmd = job.gate!.length > 200 ? job.gate!.slice(0, 200) + '…' : job.gate!;
+
+    this.skipLedger.recordSkip(job.slug, 'gate');
+    this.state.appendEvent({
+      type: 'job_gate_skip',
+      summary: `Job "${job.slug}" skipped — gate returned exit ${exitCode} after ${maxAttempts} attempts${stderr ? `: ${stderr.slice(0, 200)}` : ''}`,
+      timestamp: new Date().toISOString(),
+      metadata: { slug: job.slug, exitCode, stderr: stderr.slice(0, 500), gate: gateCmd, attempts: maxAttempts },
+    });
+    return false;
+  }
+
+  /**
+   * Normalize the canRunJob callback's result. Older wrappers return a bare
+   * boolean; newer ones return { allowed, reason, detail } so the scheduler
+   * can record WHY a job was gated (memory pressure vs quota etc.).
+   */
+  private normalizeCanRunResult(result: boolean | CanRunJobResult): CanRunJobResult {
+    if (typeof result === 'boolean') return { allowed: result };
+    return result;
+  }
+
+  /**
+   * Schedule a retry for a transiently-skipped job.
+   * Uses escalating delays: 1min, 5min, 15min, 30min, 1h, 2h.
+   * Gives up after exhausting all retry slots within a single scheduled window.
+   */
+  private scheduleRetry(slug: string, skipReason: string): void {
+    const state = this.retryState.get(slug);
+    const retries = state ? state.retries : 0;
+    const maxRetries = JobScheduler.RETRY_DELAYS_MS.length;
+
+    if (retries >= maxRetries) {
+      console.log(`[scheduler] Job "${slug}" exhausted ${maxRetries} retries (last skip: ${skipReason}) — waiting for next cron window`);
+      return;
+    }
+
+    // Clear any existing retry timer
+    if (state?.timer) clearTimeout(state.timer);
+
+    const delayMs = JobScheduler.RETRY_DELAYS_MS[retries];
+    const nextRetry = retries + 1;
+    const delayLabel = delayMs >= 3_600_000 ? `${delayMs / 3_600_000}h`
+      : delayMs >= 60_000 ? `${delayMs / 60_000}m`
+      : `${delayMs / 1000}s`;
+
+    console.log(`[scheduler] Job "${slug}" skipped (${skipReason}) — retry ${nextRetry}/${maxRetries} in ${delayLabel}`);
+
+    const timer = setTimeout(() => {
+      if (!this.running || this.paused) return;
+      const job = this.jobs.find(j => j.slug === slug);
+      if (!job || !job.enabled) return;
+      console.log(`[scheduler] Retrying job "${slug}" (attempt ${nextRetry})`);
+      this.triggerJob(slug, `retry:${skipReason}`).catch(err => {
+        console.error(`[scheduler] Retry trigger failed for "${slug}": ${err}`);
       });
-      return true;
-    } catch {
-      // @silent-fallback-ok — gate command non-zero exit means skip
-      this.state.appendEvent({
-        type: 'job_gate_skip',
-        summary: `Job "${job.slug}" skipped — gate check returned nothing to do`,
-        timestamp: new Date().toISOString(),
-        metadata: { slug: job.slug },
-      });
-      return false;
+    }, delayMs);
+
+    this.retryState.set(slug, { retries: nextRetry, timer });
+  }
+
+  /**
+   * Clear retry state for a job (on success or new cron window).
+   */
+  private clearRetryState(slug: string): void {
+    const state = this.retryState.get(slug);
+    if (state) {
+      if (state.timer) clearTimeout(state.timer);
+      this.retryState.delete(slug);
     }
   }
 
@@ -1136,7 +1302,7 @@ export class JobScheduler {
     return lines.join('\n');
   }
 
-  private checkMissedJobs(enabledJobs: JobDefinition[]): void {
+  private async checkMissedJobs(enabledJobs: JobDefinition[]): Promise<void> {
     const now = Date.now();
 
     // Collect all missed jobs first, then sort by priority before triggering.
@@ -1183,7 +1349,7 @@ export class JobScheduler {
     });
 
     for (const { job } of missedJobs) {
-      this.triggerJob(job.slug, 'missed');
+      await this.triggerJob(job.slug, 'missed');
     }
   }
 

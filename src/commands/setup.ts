@@ -33,6 +33,8 @@ import {
   type SetupDiscoveryContext,
   type SetupScenarioContext,
 } from './discovery.js';
+import { SafeGitExecutor } from '../core/SafeGitExecutor.js';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 /**
  * Try allocatePort from the registry, fall back to scanning for a free port.
@@ -83,7 +85,7 @@ export async function runSetup(): Promise<void> {
   }
 
   // Check that the setup-wizard skill exists
-  const skillPath = path.join(findInstarRoot(), '.claude', 'skills', 'setup-wizard', 'skill.md');
+  const skillPath = path.join(findInstarRoot(), '.claude', 'skills', 'setup-wizard', 'SKILL.md');
   if (!fs.existsSync(skillPath)) {
     console.log();
     console.log(pc.red('  Setup wizard skill not found.'));
@@ -111,11 +113,9 @@ export async function runSetup(): Promise<void> {
   let gitRepoName = '';
   let gitRepoRoot = '';
   try {
-    gitRepoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], {
-      cwd: projectDir,
+    gitRepoRoot = SafeGitExecutor.readSync(['rev-parse', '--show-toplevel'], { cwd: projectDir,
       encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+      stdio: ['pipe', 'pipe', 'pipe'], operation: 'src/commands/setup.ts:115' }).trim();
     gitRepoName = path.basename(gitRepoRoot);
     isInsideGitRepo = true;
   } catch { /* not in a git repo */ }
@@ -585,7 +585,7 @@ export function uninstallAutoStart(projectName: string): boolean {
 
     // Remove file
     try {
-      fs.unlinkSync(plistPath);
+      SafeFsExecutor.safeUnlinkSync(plistPath, { operation: 'src/commands/setup.ts:590' });
       return true;
     } catch {
       return false;
@@ -600,7 +600,7 @@ export function uninstallAutoStart(projectName: string): boolean {
     } catch { /* not loaded */ }
 
     try {
-      fs.unlinkSync(servicePath);
+      SafeFsExecutor.safeUnlinkSync(servicePath, { operation: 'src/commands/setup.ts:606' });
       execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore' });
       return true;
     } catch {
@@ -667,6 +667,38 @@ function resolveNodeCandidates(): string[] {
 }
 
 /**
+ * Pick the most durable node path from candidates.
+ *
+ * Prefers stable, non-versioned paths (e.g. /opt/homebrew/bin/node) over
+ * version-specific paths (e.g. /opt/homebrew/opt/node@20/bin/node) because
+ * version-specific paths disappear when that version is uninstalled — causing
+ * the symlink to break and the agent to become unrecoverable.
+ */
+function pickDurableNodePath(candidates: string[]): string | undefined {
+  // Stable paths that survive version switches (ordered by preference)
+  const stablePrefixes = [
+    '/opt/homebrew/bin/',        // Apple Silicon homebrew — updated by `brew upgrade`
+    '/usr/local/bin/',           // Intel homebrew / manual installs
+  ];
+
+  // Version-specific patterns that should be avoided
+  const versionSpecificPattern = /node@\d|\/Cellar\/node\/|\/\.asdf\/installs\/|\/\.nvm\/versions\//;
+
+  // First pass: find a stable, non-versioned path
+  for (const prefix of stablePrefixes) {
+    const match = candidates.find(c => c.startsWith(prefix) && !versionSpecificPattern.test(c));
+    if (match && fs.existsSync(match)) return match;
+  }
+
+  // Second pass: any candidate that isn't version-specific
+  const nonVersioned = candidates.find(c => !versionSpecificPattern.test(c) && fs.existsSync(c));
+  if (nonVersioned) return nonVersioned;
+
+  // Last resort: any valid candidate
+  return candidates.find(c => fs.existsSync(c));
+}
+
+/**
  * Create or update a stable node symlink at .instar/bin/node.
  *
  * The plist references this symlink instead of a hardcoded node path.
@@ -678,30 +710,32 @@ function resolveNodeCandidates(): string[] {
 export function ensureStableNodeSymlink(projectDir: string): string {
   const binDir = path.join(projectDir, '.instar', 'bin');
   const symlinkPath = path.join(binDir, 'node');
-  const nodePath = findNodePath();
 
   fs.mkdirSync(binDir, { recursive: true });
 
-  // Check if symlink exists and is valid
+  // Resolve all available node paths and pick the most durable one
+  const candidates = resolveNodeCandidates();
+  const durablePath = pickDurableNodePath(candidates) ?? findNodePath();
+
+  // Check if symlink exists and already points to a valid, durable target
   try {
     const target = fs.readlinkSync(symlinkPath);
     if (fs.existsSync(target)) {
-      // Symlink exists and points to a valid node — update only if we found a newer/better one
-      if (target === nodePath) return symlinkPath;
+      // Symlink works — only update if we found a more durable path
+      if (target === durablePath) return symlinkPath;
     }
   } catch { /* symlink doesn't exist or is broken */ }
 
   // Create/update the symlink
   try {
-    fs.unlinkSync(symlinkPath);
+    SafeFsExecutor.safeUnlinkSync(symlinkPath, { operation: 'src/commands/setup.ts:735' });
   } catch { /* didn't exist */ }
-  fs.symlinkSync(nodePath, symlinkPath);
+  fs.symlinkSync(durablePath, symlinkPath);
 
   // Also write the candidate list for the JS boot wrapper's fallback logic
-  const candidates = resolveNodeCandidates();
   fs.writeFileSync(
     path.join(binDir, 'node-candidates.json'),
-    JSON.stringify({ primary: nodePath, candidates, updatedAt: new Date().toISOString() }, null, 2),
+    JSON.stringify({ primary: durablePath, candidates, updatedAt: new Date().toISOString() }, null, 2),
   );
 
   return symlinkPath;
@@ -780,7 +814,7 @@ function escapeXml(str: string): string {
  * Using node directly as the plist entry point bypasses this because
  * user-installed binaries (homebrew, nvm) are not subject to TCC restrictions.
  */
-function installBootWrapper(projectDir: string): { sh: string; js: string } {
+export function installBootWrapper(projectDir: string): { sh: string; js: string } {
   const stateDir = path.join(projectDir, '.instar');
   const shPath = path.join(stateDir, 'instar-boot.sh');
 
@@ -795,7 +829,7 @@ function installBootWrapper(projectDir: string): { sh: string; js: string } {
   const jsPath = path.join(stateDir, `instar-boot${jsExt}`);
   // Clean up the other extension if it exists (prevents stale wrapper confusion)
   const altPath = path.join(stateDir, `instar-boot${usesCjs ? '.js' : '.cjs'}`);
-  try { fs.unlinkSync(altPath); } catch { /* didn't exist */ }
+  try { SafeFsExecutor.safeUnlinkSync(altPath, { operation: 'src/commands/setup.ts:837' }); } catch { /* didn't exist */ }
 
   const shadowCli = path.join(stateDir, 'shadow-install', 'node_modules', 'instar', 'dist', 'cli.js');
 
@@ -886,39 +920,82 @@ const NODE_SYMLINK = ${JSON.stringify(path.join(nodeSymlinkDir, 'node'))};
 const NODE_CANDIDATES_FILE = ${JSON.stringify(nodeCandidatesFile)};
 
 // ── Self-heal node symlink ──
-// Update the stable node symlink to point at the node binary that's
-// currently running us. This ensures the NEXT launchd restart will work
-// even if node moved (NVM switch, homebrew upgrade) since the last boot.
+// Update the stable node symlink to point at a working node binary.
+// CRITICAL: Only change the symlink if it's broken (missing or won't run).
+// "More durable" path selection must NOT cross major versions because the
+// shadow-install's native modules (better-sqlite3) are compiled for a specific
+// NODE_MODULE_VERSION. Switching from v22 -> v25 (or any major bump) breaks
+// native modules and causes server crash-loops / event loop deadlocks.
 function selfHealNodeSymlink() {
   try {
     const currentNode = process.execPath;
     const symlinkDir = path.dirname(NODE_SYMLINK);
     fs.mkdirSync(symlinkDir, { recursive: true });
 
-    // Check if symlink already points to current node
+    // If symlink exists and works, don't touch it — changing node major version
+    // breaks native modules compiled for the previous version.
     try {
       const target = fs.readlinkSync(NODE_SYMLINK);
-      if (target === currentNode) return; // already correct
-    } catch { /* broken or missing — will recreate */ }
+      if (fs.existsSync(target)) {
+        const { execFileSync } = require('child_process');
+        const result = execFileSync(target, ['--version'], { encoding: 'utf-8', timeout: 5000 });
+        if (result.trim()) return; // symlink works, leave it alone
+      }
+    } catch { /* broken — proceed to fix */ }
 
-    // Update symlink
-    try { fs.unlinkSync(NODE_SYMLINK); } catch { /* didn't exist */ }
-    fs.symlinkSync(currentNode, NODE_SYMLINK);
+    process.stderr.write('[instar-boot] Node symlink broken — attempting repair\\n');
 
-    // Update candidates file for diagnostics
+    // Build candidate list
     const candidates = [currentNode];
     const wellKnown = ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node'];
     for (const p of wellKnown) {
       if (p !== currentNode && fs.existsSync(p)) candidates.push(p);
     }
+
+    // Check if native modules exist — if so, prefer a node with the same major version
+    const sqliteNode = path.join(${JSON.stringify(stateDir)}, 'shadow-install', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
+    let best = currentNode;
+
+    if (fs.existsSync(sqliteNode)) {
+      // Try to find which candidate can actually load the native module
+      const { execFileSync } = require('child_process');
+      for (const candidate of candidates) {
+        try {
+          execFileSync(candidate, ['-e', "require('" + sqliteNode.replace(/'/g, "\\\\'") + "')"], {
+            encoding: 'utf-8', timeout: 10000
+          });
+          best = candidate;
+          process.stderr.write('[instar-boot] Found compatible node for native modules: ' + candidate + '\\n');
+          break;
+        } catch { /* this candidate can't load native modules */ }
+      }
+    } else {
+      // No native modules to worry about — pick most durable path
+      const versionPattern = /node@\\d|\\/Cellar\\/node\\/|\\.asdf\\/installs\\/|\\.nvm\\/versions\\//;
+      const stablePrefixes = ['/opt/homebrew/bin/', '/usr/local/bin/'];
+      for (const prefix of stablePrefixes) {
+        const match = candidates.find(c => c.startsWith(prefix) && !versionPattern.test(c) && fs.existsSync(c));
+        if (match) { best = match; break; }
+      }
+      if (versionPattern.test(best)) {
+        const nonVersioned = candidates.find(c => !versionPattern.test(c) && fs.existsSync(c));
+        if (nonVersioned) best = nonVersioned;
+      }
+    }
+
+    // Update symlink
+    try { fs.unlinkSync(NODE_SYMLINK); } catch { /* didn't exist */ }
+    fs.symlinkSync(best, NODE_SYMLINK);
+
+    // Update candidates file for diagnostics
     fs.writeFileSync(NODE_CANDIDATES_FILE, JSON.stringify({
-      primary: currentNode,
+      primary: best,
       candidates: candidates,
       updatedAt: new Date().toISOString(),
       updatedBy: 'instar-boot.js',
     }, null, 2));
 
-    process.stderr.write('[instar-boot] Node symlink self-healed: ' + NODE_SYMLINK + ' -> ' + currentNode + '\\n');
+    process.stderr.write('[instar-boot] Node symlink self-healed: ' + NODE_SYMLINK + ' -> ' + best + '\\n');
   } catch (err) {
     // Non-fatal — symlink update is best-effort
     process.stderr.write('[instar-boot] Node symlink self-heal failed (non-critical): ' + err.message + '\\n');
@@ -1002,6 +1079,38 @@ child.on('error', (err) => {
   return { sh: shPath, js: jsPath };
 }
 
+/**
+ * Ensure the boot wrapper exists on disk, regenerating it if missing.
+ *
+ * The boot wrapper is what launchd exec's — if it's gone, launchd can't
+ * bring the agent back after any restart. The wrapper itself can't
+ * regenerate itself (chicken-and-egg), but any running process that
+ * descends from it can, which closes the loop for future restarts.
+ *
+ * Returns `true` if a wrapper was written (was missing), `false` if
+ * it was already present and nothing was done.
+ */
+export function ensureBootWrapper(projectDir: string): boolean {
+  const stateDir = path.join(projectDir, '.instar');
+  let usesCjs = false;
+  try {
+    const pkgJson = JSON.parse(fs.readFileSync(path.join(projectDir, 'package.json'), 'utf-8'));
+    usesCjs = pkgJson.type === 'module';
+  } catch { /* no package.json — use .js */ }
+  const jsExt = usesCjs ? '.cjs' : '.js';
+  const jsPath = path.join(stateDir, `instar-boot${jsExt}`);
+  const shPath = path.join(stateDir, 'instar-boot.sh');
+
+  if (fs.existsSync(jsPath) && fs.existsSync(shPath)) return false;
+
+  console.warn(
+    `[setup] Boot wrapper(s) missing under ${stateDir} — regenerating. ` +
+    `If the agent had been restarted by launchd in this state, it would have been permanently dead.`
+  );
+  installBootWrapper(projectDir);
+  return true;
+}
+
 function installMacOSLaunchAgent(projectName: string, projectDir: string, hasTelegram: boolean): boolean {
   const label = `ai.instar.${projectName}`;
   const launchAgentsDir = path.join(os.homedir(), 'Library', 'LaunchAgents');
@@ -1056,6 +1165,8 @@ ${argsXml}
     <dict>
         <key>PATH</key>
         <string>${escapeXml(process.env.PATH || '/usr/local/bin:/usr/bin:/bin')}</string>
+        <key>INSTAR_SUPERVISED</key>
+        <string>1</string>
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
@@ -1066,6 +1177,20 @@ ${argsXml}
     fs.mkdirSync(launchAgentsDir, { recursive: true });
     fs.mkdirSync(logDir, { recursive: true });
     fs.writeFileSync(plistPath, plist);
+
+    // Validate the plist is well-formed XML before loading.
+    // A corrupted plist means launchd can't restart the agent after crashes,
+    // which turns transient failures into permanently dead agents.
+    try {
+      execFileSync('plutil', ['-lint', plistPath], { stdio: 'pipe' });
+    } catch (err) {
+      const stderr = err instanceof Error && 'stderr' in err ? String((err as any).stderr) : '';
+      console.error(`[setup] CRITICAL: Generated plist failed validation: ${stderr}`);
+      console.error(`[setup] Plist path: ${plistPath}`);
+      // Remove the invalid plist so we don't leave a landmine
+      try { SafeFsExecutor.safeUnlinkSync(plistPath, { operation: 'src/commands/setup.ts:1195' }); } catch { /* best effort */ }
+      return false;
+    }
 
     // Load the agent
     try {

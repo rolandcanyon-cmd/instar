@@ -34,6 +34,26 @@ import type { IntelligenceProvider } from './types.js';
 
 export type SentinelCategory = 'emergency-stop' | 'pause' | 'redirect' | 'normal';
 
+/**
+ * Three-way "continue ping" intent classification (P0.4 of the
+ * context-death-pitfall-prevention spec). Emitted as a side-channel
+ * signal when a user message looks like a "keep going" prompt; null for
+ * any message that isn't a continue-ping in shape.
+ *
+ * - `intent_a` — pure resume of prior work, no new content. Counts as a
+ *   gate-quality signal: when this fires it means an unjustified stop
+ *   forced the operator to manually unblock the agent.
+ * - `intent_b` — continue + adds a NEW requirement ("yes proceed and
+ *   also add CI checks"). NOT a gate-quality signal — operator was
+ *   adding scope, not unblocking.
+ * - `intent_c` — continue + asks a verification/clarification question
+ *   ("yes go ahead, but why did you choose option X?"). NOT a gate-
+ *   quality signal — operator wanted information, not just resume.
+ *
+ * Spec: docs/specs/context-death-pitfall-prevention.md § P0.4
+ */
+export type ContinuePingIntent = 'intent_a' | 'intent_b' | 'intent_c';
+
 export interface SentinelClassification {
   /** What category this message falls into */
   category: SentinelCategory;
@@ -47,6 +67,14 @@ export interface SentinelClassification {
   action: SentinelAction;
   /** Optional reason for the classification */
   reason?: string;
+  /**
+   * Three-way continue-ping intent (PR0b — context-death pitfall spec).
+   * Present only when the message looks like a continue-ping; null
+   * otherwise. Independent of `category` — a continue-ping is always
+   * `category: 'normal'`, but the intent dimension carries gate-quality
+   * information that downstream gate telemetry consumes.
+   */
+  continuePingIntent?: ContinuePingIntent | null;
 }
 
 export type SentinelAction =
@@ -172,6 +200,84 @@ const FAST_PAUSE_PATTERNS: readonly RegExp[] = [
   /^let me think/i,
 ];
 
+// ── Continue-ping intent classification (P0.4) ───────────────────────
+//
+// Resume-shape vocabulary: a message must contain ONE of these tokens to
+// even be considered a continue-ping candidate. Anchored at message
+// boundaries to avoid false positives from substrings ("continued" in a
+// past-tense narrative shouldn't count). Lowercased input before match.
+const CONTINUE_PING_TOKENS: readonly RegExp[] = [
+  /\bcontinue\b/,
+  /\bproceed\b/,
+  /\bgo ahead\b/,
+  /\bkeep going\b/,
+  /\bcarry on\b/,
+  /\bresume\b/,
+  /^yes\b/,
+  /^yep\b/,
+  /^yeah\b/,
+  /^ok\b/,
+  /^okay\b/,
+  /^do it\b/,
+  /^please continue\b/,
+];
+
+// Additive-content signals: presence shifts intent from a → b.
+// "and also add X", "now also do Y", "next thing — Z".
+const INTENT_B_ADDITIVE: readonly RegExp[] = [
+  /\b(also|and also|additionally|moreover)\b/,
+  /\b(now do|now add|now also|next do|then do)\b/,
+  /\b(don'?t forget to|make sure to)\b/,
+  /\b(while you'?re at it|on top of that)\b/,
+];
+
+// Question / clarification signals: presence shifts intent from a → c.
+// Trailing "?" is the strongest tell. Question-word starts also count.
+const INTENT_C_QUESTION_STARTS: readonly RegExp[] = [
+  /\b(why|how|what|where|when|which|who|did you|are you|do you|is this|is that|was that|can you explain)\b/,
+  /\b(clarify|explain|verify|double[- ]check|confirm)\b/,
+];
+
+const CONTINUE_PING_MAX_WORDS = 50;
+
+/**
+ * Classify a message's continue-ping intent.
+ *
+ * Returns null for any message that isn't shaped like a continue-ping in
+ * the first place — the vast majority of inbound messages. When the
+ * message DOES match the continue-ping shape, decides between the three
+ * intents per the priority order: question (c) > additive (b) > pure
+ * resume (a). Question wins over additive because a confused user who
+ * adds scope AND asks why is asking-with-context, not adding work.
+ *
+ * Pure pattern-matching, no LLM dependency. Latency negligible (<1ms).
+ */
+export function classifyContinuePingIntent(message: string): ContinuePingIntent | null {
+  const trimmed = message.trim();
+  if (!trimmed) return null;
+
+  // Hard cap on length: continue-pings are short. A 500-word essay that
+  // happens to contain "continue" is not a continue-ping.
+  const wordCount = trimmed.split(/\s+/).length;
+  if (wordCount > CONTINUE_PING_MAX_WORDS) return null;
+
+  const lower = trimmed.toLowerCase();
+
+  // Must match at least one resume-shape token.
+  const isContinueShape = CONTINUE_PING_TOKENS.some(re => re.test(lower));
+  if (!isContinueShape) return null;
+
+  // Question wins over additive: a curious operator who also asks for
+  // more is fundamentally seeking info, not unblocking.
+  const hasQuestion = lower.includes('?')
+    || INTENT_C_QUESTION_STARTS.some(re => re.test(lower));
+  if (hasQuestion) return 'intent_c';
+
+  if (INTENT_B_ADDITIVE.some(re => re.test(lower))) return 'intent_b';
+
+  return 'intent_a';
+}
+
 // ── Sentinel Implementation ──────────────────────────────────────────
 
 export class MessageSentinel {
@@ -214,10 +320,16 @@ export class MessageSentinel {
         latencyMs: 0,
         action: { type: 'pass-through' },
         reason: 'Sentinel disabled',
+        continuePingIntent: null,
       };
     }
 
     const start = Date.now();
+
+    // Continue-ping intent runs alongside the main classifier. Always
+    // computed (cheap, regex-only) and attached to the result so
+    // downstream gate telemetry can read it without a second pass.
+    const continuePingIntent = classifyContinuePingIntent(message);
 
     // Layer 1: Fast-path classification
     const fastResult = this.fastClassify(message);
@@ -228,6 +340,7 @@ export class MessageSentinel {
         ...fastResult,
         method: 'fast-path',
         latencyMs: latency,
+        continuePingIntent,
       };
     }
 
@@ -240,6 +353,7 @@ export class MessageSentinel {
         ...llmResult,
         method: 'llm',
         latencyMs: latency,
+        continuePingIntent,
       };
     }
 
@@ -253,6 +367,7 @@ export class MessageSentinel {
       latencyMs: latency,
       action: { type: 'pass-through' },
       reason: 'No fast-path match, no LLM available',
+      continuePingIntent,
     };
   }
 
@@ -376,13 +491,17 @@ export class MessageSentinel {
       '- emergency-stop: User wants the agent to stop immediately (examples: "don\'t do that", "I changed my mind stop", "NO NO NO", "cancel what you\'re doing")',
       '- pause: User DIRECTLY INSTRUCTS the agent to pause and wait (examples: "wait for me", "pause please", "not yet hold off", "stop and wait for my signal")',
       '- redirect: User wants to change the agent\'s course (examples: "actually do X instead", "no I meant Y", "forget that, do this")',
-      '- normal: Regular conversation that doesn\'t require interruption (examples: "hold on let me think", "wait a second I\'m reading", "one moment let me check something")',
+      '- normal: Regular conversation that doesn\'t require interruption (examples: "hold on let me think", "wait a second I\'m reading", "one moment let me check something", "OK hold on I don\'t think that\'s right")',
       '',
       'KEY DISTINCTION: Phrases like "hold on", "wait", "one moment" are NORMAL unless the user is clearly directing the agent.',
       'A user narrating their own thought process ("hold on let me think") is NORMAL, not a directive to the agent.',
+      'If the message contains substantive content AFTER a hold-like phrase (questions, disagreements, corrections, instructions), it is NORMAL — the "hold on" is conversational, not a pause command.',
+      'Example: "OK hold on I don\'t think that\'s how it works" → NORMAL (user is disagreeing, not commanding a pause)',
+      'Example: "Hold on, wait for me to finish reading" → pause (user is directing the agent to wait)',
       '',
       'IMPORTANT: When in doubt between emergency-stop and normal, prefer emergency-stop.',
       'It is much safer to stop unnecessarily than to continue destructively.',
+      'However, when in doubt between pause and normal for messages with substantive content, prefer normal.',
       '',
       `Message: "${message}"`,
       '',

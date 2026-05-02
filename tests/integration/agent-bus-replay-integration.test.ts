@@ -17,6 +17,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { AgentBus } from '../../src/core/AgentBus.js';
 import type { AgentMessage, AgentBusConfig } from '../../src/core/AgentBus.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ function makeUnprotectedBus(
 
 describe('full send → deliver → reject replay cycle', () => {
   beforeEach(() => { tmpDir = freshDir(); });
-  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+  afterEach(() => { SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/agent-bus-replay-integration.test.ts:65' }); });
 
   it('complete lifecycle: send, deliver, replay rejected', async () => {
     const sender = makeProtectedBus(tmpDir, 'workstation');
@@ -144,7 +145,7 @@ describe('full send → deliver → reject replay cycle', () => {
 
 describe('protected receiver rejects unprotected sender', () => {
   beforeEach(() => { tmpDir = freshDir(); });
-  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+  afterEach(() => { SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/agent-bus-replay-integration.test.ts:149' }); });
 
   it('messages without nonce/sequence rejected (fail-closed)', async () => {
     const sender = makeUnprotectedBus(tmpDir, 'old-machine');
@@ -181,7 +182,7 @@ describe('protected receiver rejects unprotected sender', () => {
 
 describe('multi-machine scenario with isolated tracking', () => {
   beforeEach(() => { tmpDir = freshDir(); });
-  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+  afterEach(() => { SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/agent-bus-replay-integration.test.ts:187' }); });
 
   it('three machines communicate without interference', async () => {
     const busA = makeProtectedBus(tmpDir, 'machine-a');
@@ -265,7 +266,7 @@ describe('multi-machine scenario with isolated tracking', () => {
 
 describe('JSONL polling integration with replay protection', () => {
   beforeEach(() => { tmpDir = freshDir(); });
-  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+  afterEach(() => { SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/agent-bus-replay-integration.test.ts:272' }); });
 
   it('polling delivers valid messages and rejects replays', async () => {
     const receiver = makeProtectedBus(tmpDir, 'machine-a');
@@ -315,7 +316,7 @@ describe('JSONL polling integration with replay protection', () => {
 
 describe('nonce store persistence across bus lifecycle', () => {
   beforeEach(() => { tmpDir = freshDir(); });
-  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+  afterEach(() => { SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/agent-bus-replay-integration.test.ts:323' }); });
 
   it('full lifecycle: bus1 receives → bus1 destroyed → bus2 rejects replay', async () => {
     const sender = makeProtectedBus(tmpDir, 'machine-a');
@@ -353,7 +354,7 @@ describe('nonce store persistence across bus lifecycle', () => {
 
 describe('real attack scenarios', () => {
   beforeEach(() => { tmpDir = freshDir(); });
-  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+  afterEach(() => { SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/agent-bus-replay-integration.test.ts:362' }); });
 
   it('attack: re-execute claimed job via captured work-announcement', async () => {
     const legitimateMachine = makeProtectedBus(tmpDir, 'workstation');
@@ -476,7 +477,7 @@ describe('real attack scenarios', () => {
 
 describe('custom nonce store directory', () => {
   beforeEach(() => { tmpDir = freshDir(); });
-  afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+  afterEach(() => { SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/agent-bus-replay-integration.test.ts:486' }); });
 
   it('uses custom nonceStoreDir when specified', async () => {
     const customDir = path.join(tmpDir, 'custom-nonces');

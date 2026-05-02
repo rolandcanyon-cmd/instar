@@ -27,6 +27,7 @@ import {
   formatExportSummary,
   formatErasureSummary,
 } from '../../src/users/GdprCommands.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Fixtures ────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ beforeEach(async () => {
 afterEach(() => {
   topicMemory.close();
   semanticMemory.close();
-  fs.rmSync(testDir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(testDir, { recursive: true, force: true, operation: 'tests/unit/gdpr-commands.test.ts:69' });
 });
 
 // ── Seed data helper ──────────────────────────────────────────────

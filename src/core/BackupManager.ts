@@ -15,9 +15,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import type { BackupSnapshot, BackupConfig } from './types.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 const SNAPSHOT_ID_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{6}Z(-\d+)?$/;
 const BLOCKED_FILES = new Set(['config.json', 'secrets', 'machine']);
+
+// Prefix-based blocklist with path.normalize().startsWith() semantics.
+// BLOCKED_FILES has equality semantics only — a user-added `includeFiles` entry
+// like `.instar/secrets/pr-gate/tokens.json` would pass its basename (tokens.json)
+// and full-entry (.instar/secrets/...) checks, then ship secrets into a backup
+// snapshot that git-sync replicates to paired machines. This prefix set is the
+// defense against that failure mode. Any entry under one of these prefixes is
+// skipped during snapshot creation regardless of config source.
+const BLOCKED_PATH_PREFIXES = new Set([
+  '.instar/secrets/',
+]);
 
 const DEFAULT_CONFIG: BackupConfig = {
   enabled: true,
@@ -29,25 +41,90 @@ const DEFAULT_CONFIG: BackupConfig = {
     'jobs.json',
     'users.json',
     'relationships/',
+    // Integrated-Being v1 (gated by config.integratedBeing.enabled at snapshot
+    // time — see resolveIncludedFiles()). Glob matches the active ledger and
+    // any rotated .jsonl.<epoch> archives.
+    'shared-state.jsonl*',
   ],
 };
+
+/**
+ * Expand a single glob-style entry (only trailing `*` is supported) against
+ * a directory. Returns literal filenames to copy. Safe against path traversal —
+ * each returned name is a plain basename in stateDir.
+ */
+function expandGlob(stateDir: string, entry: string): string[] {
+  if (!entry.includes('*')) return [entry];
+  // Only support trailing * for now — e.g., 'shared-state.jsonl*'
+  const starIdx = entry.indexOf('*');
+  const prefix = entry.slice(0, starIdx);
+  const suffix = entry.slice(starIdx + 1);
+  if (prefix.includes('/') || suffix.includes('/') || suffix.includes('*')) {
+    // Unsupported glob shape — return the literal entry; caller will skip if missing.
+    return [entry];
+  }
+  try {
+    const names = fs.readdirSync(stateDir);
+    return names.filter((n) => n.startsWith(prefix) && n.endsWith(suffix));
+  } catch {
+    return [];
+  }
+}
 
 export class BackupManager {
   private readonly stateDir: string;
   private readonly backupsDir: string;
   private readonly config: BackupConfig;
   private readonly isSessionActive?: () => boolean;
+  /** Optional resolver — called at snapshot time to check if Integrated-Being
+   *  is enabled. When false, shared-state.jsonl* is excluded. See spec §Config knob. */
+  private readonly isIntegratedBeingEnabled?: () => boolean;
   private lastAutoSnapshot: number = 0;
 
   constructor(
     stateDir: string,
     config?: Partial<BackupConfig>,
     isSessionActive?: () => boolean,
+    isIntegratedBeingEnabled?: () => boolean,
   ) {
     this.stateDir = path.resolve(stateDir);
     this.backupsDir = path.resolve(stateDir, 'backups');
-    this.config = { ...DEFAULT_CONFIG, ...config };
+    // `includeFiles` is UNIONED with defaults, not replaced. Users and
+    // migrators extend the default identity/memory set with extra paths
+    // (e.g. pr-pipeline state); they can't accidentally strip the defaults
+    // by passing a shorter list.
+    const userIncludes = config?.includeFiles ?? [];
+    const mergedIncludes = Array.from(
+      new Set<string>([...DEFAULT_CONFIG.includeFiles, ...userIncludes]),
+    );
+    this.config = {
+      ...DEFAULT_CONFIG,
+      ...config,
+      includeFiles: mergedIncludes,
+    };
     this.isSessionActive = isSessionActive;
+    this.isIntegratedBeingEnabled = isIntegratedBeingEnabled;
+  }
+
+  /**
+   * Resolve the effective list of files to include at snapshot time, with
+   * glob expansion and the integrated-being gate applied.
+   */
+  private resolveIncludedFiles(): string[] {
+    const expanded: string[] = [];
+    const sharedStateGateOff = this.isIntegratedBeingEnabled
+      ? !this.isIntegratedBeingEnabled()
+      : false;
+    for (const entry of this.config.includeFiles) {
+      // Gate: exclude the shared-state pattern when feature is disabled.
+      if (sharedStateGateOff && entry.startsWith('shared-state.jsonl')) continue;
+      if (entry.includes('*')) {
+        for (const real of expandGlob(this.stateDir, entry)) expanded.push(real);
+      } else {
+        expanded.push(entry);
+      }
+    }
+    return expanded;
   }
 
   /**
@@ -111,11 +188,24 @@ export class BackupManager {
     const files: string[] = [];
     let totalBytes = 0;
 
-    for (const entry of this.config.includeFiles) {
+    for (const entry of this.resolveIncludedFiles()) {
       // Security: block config.json and secrets regardless of user config
       const baseName = path.basename(entry).replace(/\/$/, '');
       if (BLOCKED_FILES.has(baseName) || BLOCKED_FILES.has(entry)) {
         console.warn(`[BackupManager] Skipping blocked file: ${entry}`);
+        continue;
+      }
+      // Prefix-based secrets guard (see BLOCKED_PATH_PREFIXES comment above).
+      const normalized = path.normalize(entry);
+      let prefixBlocked = false;
+      for (const prefix of BLOCKED_PATH_PREFIXES) {
+        if (normalized.startsWith(prefix)) {
+          prefixBlocked = true;
+          break;
+        }
+      }
+      if (prefixBlocked) {
+        console.warn(`[BackupManager] Skipping blocked-prefix path: ${entry}`);
         continue;
       }
 
@@ -295,7 +385,7 @@ export class BackupManager {
       const dir = path.resolve(this.backupsDir, snapshot.id);
       if (dir.startsWith(this.backupsDir + path.sep)) {
         try {
-          fs.rmSync(dir, { recursive: true, force: true });
+          SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'src/core/BackupManager.ts:388' });
           removed++;
         } catch {
           // Skip on error

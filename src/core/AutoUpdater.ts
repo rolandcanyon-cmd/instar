@@ -27,6 +27,7 @@ import type { LiveConfig } from '../config/LiveConfig.js';
 import { UpdateGate } from './UpdateGate.js';
 import { cleanupGlobalInstalls } from './GlobalInstallCleanup.js';
 import type { SessionManagerLike, SessionMonitorLike } from './UpdateGate.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 export interface AutoUpdaterConfig {
   /** How often to check for updates, in minutes. Default: 30 */
@@ -715,12 +716,15 @@ export class AutoUpdater {
 
   /**
    * Get the topic ID for update notifications.
-   * Prefers the dedicated Agent Updates topic (informational), falls back to Agent Attention.
+   *
+   * Update announcements are routed exclusively to the dedicated Agent Updates
+   * topic. If it is not configured, notify() drops to console — we never fall
+   * back to Attention or any other topic. This matches the /telegram/post-update
+   * endpoint contract and closes the leak where update spam landed in whichever
+   * topic happened to be provisioned.
    */
   private getNotificationTopicId(): number {
-    return this.state.get<number>('agent-updates-topic')
-      || this.state.get<number>('agent-attention-topic')
-      || 0;
+    return this.state.get<number>('agent-updates-topic') || 0;
   }
 
   // ── State persistence ──────────────────────────────────────────────
@@ -779,7 +783,7 @@ export class AutoUpdater {
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
       fs.renameSync(tmpPath, this.stateFile);
     } catch {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/core/AutoUpdater.ts:786' }); } catch { /* ignore */ }
     }
   }
 }

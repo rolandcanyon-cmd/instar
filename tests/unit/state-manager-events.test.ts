@@ -11,6 +11,7 @@ import type { ActivityEvent } from '../../src/core/types.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('StateManager — event querying', () => {
   let tmpDir: string;
@@ -23,7 +24,7 @@ describe('StateManager — event querying', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/state-manager-events.test.ts:27' });
   });
 
   it('appends events to daily log files', () => {

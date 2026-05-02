@@ -12,6 +12,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 export interface CleanupResult {
   found: string[];
@@ -79,7 +80,7 @@ function findGlobalInstalls(): string[] {
  */
 function removeGlobalInstall(installPath: string): void {
   // Remove the package directory
-  fs.rmSync(installPath, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(installPath, { recursive: true, force: true, operation: 'src/core/GlobalInstallCleanup.ts:83' });
 
   // Find and remove the corresponding bin symlink.
   // For asdf/nvm: ../../bin/instar relative to lib/node_modules/instar/
@@ -96,7 +97,7 @@ function removeGlobalInstall(installPath: string): void {
       if (fs.existsSync(binPath)) {
         const stat = fs.lstatSync(binPath);
         if (stat.isSymbolicLink()) {
-          fs.unlinkSync(binPath);
+          SafeFsExecutor.safeUnlinkSync(binPath, { operation: 'src/core/GlobalInstallCleanup.ts:101' });
         }
       }
     } catch { /* best-effort bin cleanup */ }

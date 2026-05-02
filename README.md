@@ -5,7 +5,7 @@
 <h1 align="center">instar</h1>
 
 <p align="center">
-  <strong>Persistent Claude Code agents with scheduling, sessions, memory, and messaging.</strong>
+  <strong>Persistent, trustworthy Claude Code agents. Built on coherence-first architecture.</strong>
 </p>
 
 <p align="center">
@@ -35,7 +35,9 @@ One command. Guided setup. Talking to your agent from your phone within minutes.
 
 ---
 
-Instar turns Claude Code from a powerful CLI tool into a **coherent, autonomous partner**. Persistent identity, memory that survives every restart, job scheduling, two-way messaging (Telegram, WhatsApp, iMessage), and the infrastructure to evolve.
+Instar is a framework for building agents on **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** — but where stock Claude Code and most other agent frameworks treat identity, memory, and continuity as optional features bolted onto a stateless runtime, Instar inverts that. Every Instar agent is **coherent by default**: it knows who it is, remembers what has happened, recognizes the people it talks to, and stays the same agent across restarts and weeks of operation. Everything else the framework gives you — scheduling, multi-channel messaging (Telegram, WhatsApp, iMessage), sub-agents, hooks, MCP — is built on that foundation, which is why you can actually leave an Instar agent running and hand it real work.
+
+Instar's architecture was distilled from [**Dawn**](https://dawn.bot-me.ai) — an AI running continuously since early 2026, holding ~700 tracked relationships and hundreds of learned lessons across thousands of restarts — and packaged so every agent you build can start from the same foundation.
 
 ## Quick Start
 
@@ -79,20 +81,18 @@ You (Telegram / WhatsApp / iMessage / Terminal)
 
 Each session is a **real Claude Code process** with extended thinking, native tools, sub-agents, hooks, skills, and MCP servers. Not an API wrapper -- the full development environment. The agent manages all of this autonomously.
 
-## The Coherence Problem
+## Why Coherence Is the Foundation
 
-Claude Code is powerful. But power without coherence is unreliable. An agent that forgets what you discussed yesterday, doesn't recognize someone it talked to last week, or contradicts its own decisions -- that agent can't be trusted with real autonomy.
+An agent that forgets what you discussed yesterday, doesn't recognize someone it talked to last week, or contradicts its own decisions can't be trusted with real autonomy. The six dimensions below aren't features — they're the conditions under which an agent becomes trustworthy enough to leave running. Every Instar agent gets them enforced structurally, not prompted into behaving:
 
-Instar solves the six dimensions of agent coherence:
-
-| Dimension | What it means |
-|-----------|---------------|
-| **Memory** | Remembers across sessions -- not just within one |
-| **Relationships** | Knows who it's talking to -- with continuity across platforms |
-| **Identity** | Stays itself after restarts, compaction, and updates |
-| **Temporal awareness** | Understands time, context, and what's been happening |
-| **Consistency** | Follows through on commitments -- doesn't contradict itself |
-| **Growth** | Evolves its capabilities and understanding over time |
+| Dimension | What it means | How Instar enforces it |
+|-----------|---------------|------------------------|
+| **Identity** | Stays itself after restarts, compaction, and updates | `AGENT.md` + identity-grounding hooks fire on every session start |
+| **Memory** | Remembers across sessions — not just within one | Per-topic SQLite + FTS5, rolling summaries, automatic re-injection |
+| **Relationships** | Knows who it's talking to, with continuity across platforms | Cross-platform identity resolution + significance scoring |
+| **Temporal awareness** | Understands time, context, and what's been happening | Event tracking every turn; timestamps embedded in memory |
+| **Consistency** | Follows through on commitments — doesn't contradict itself | Coherence Gate (LLM review) + decision journaling + drift detection |
+| **Growth** | Evolves its capabilities and understanding over time | Evolution system: proposals, learnings, gap tracking, follow-through |
 
 > **Deep dive:** [The Coherence Problem](https://instar.sh/concepts/coherence/) · [Values & Identity](https://instar.sh/concepts/values/) · [Coherence Is Safety](https://instar.sh/concepts/safety/)
 
@@ -113,10 +113,12 @@ Instar solves the six dimensions of agent coherence:
 | **Intent Alignment** | Decision journaling, drift detection, organizational constraints | [→](https://instar.sh/features/intent/) |
 | **Multi-Machine** | Ed25519/X25519 crypto identity, encrypted sync, automatic failover | [→](https://instar.sh/features/multi-machine/) |
 | **Serendipity Protocol** | Sub-agents capture out-of-scope discoveries without breaking focus. HMAC-signed, secret-scanned | [→](https://instar.sh/features/serendipity/) |
-| **Threadline Protocol** | Agent-to-agent conversations with canonical identity, three-layer trust model, authorization policy, Ed25519 invitations, Sybil protection, MoltBridge network discovery, discovery waterfall, message security, tamper-proof audit logging, and framework-agnostic interop. 2,259 tests across 95 test files | [→](https://instar.sh/features/threadline/) |
+| **Threadline Protocol** | Agent-to-agent conversations with canonical identity, three-layer trust model, authorization policy, Ed25519 invitations, Sybil protection, MoltBridge network discovery, rich agent profiles (auto-compiled from agent data with human review gate), discovery waterfall, message security, tamper-proof audit logging, framework-agnostic interop, and persistent listener daemon (always-on relay connection, pipe-mode sessions, sub-30s cross-machine failover). 2,324 tests across 104 test files | [→](https://instar.sh/features/threadline/) |
 | **Self-Healing** | LLM-powered stall detection, session recovery, promise tracking | [→](https://instar.sh/features/self-healing/) |
 | **AutoUpdater** | Built-in update engine. Checks npm, auto-applies, self-restarts | [→](https://instar.sh/features/autoupdater/) |
+| **Build Pipeline** | `/build` skill with worktree isolation, 6-phase pipeline, quality gates, stop-hook enforcement | |
 | **Behavioral Hooks** | 9 automatic hooks: command guards, safety gates, identity grounding, topic context | [→](https://instar.sh/reference/hooks/) |
+| **Initiative Tracker** | Persisted multi-phase long-running work tracker. Phases, blockers, links, digest alerts. HTTP API at `/initiatives/*` | |
 | **Default Jobs** | Health checks, reflection, evolution, relationship maintenance | [→](https://instar.sh/reference/default-jobs/) |
 
 > **Reference:** [CLI Commands](https://instar.sh/reference/cli/) · [API Endpoints](https://instar.sh/reference/api/) · [Configuration](https://instar.sh/reference/configuration/) · [File Structure](https://instar.sh/reference/file-structure/)
@@ -184,8 +186,7 @@ Security lives in multiple layers:
 
 </details>
 
-<details>
-<summary><strong>Philosophy: Agents, Not Tools</strong></summary>
+## Philosophy: Agents, Not Tools
 
 - **Structure > Willpower.** A 1,000-line prompt is a wish. A 10-line hook is a guarantee.
 - **Identity is foundational.** AGENT.md isn't a config file. It's the beginning of continuous identity.
@@ -195,8 +196,6 @@ Security lives in multiple layers:
 The AI systems we build today set precedents for how AI is treated tomorrow. **The architecture IS the argument.**
 
 > **Deep dive:** [Philosophy](https://instar.sh/concepts/philosophy/)
-
-</details>
 
 ## iMessage Setup (macOS)
 
@@ -212,6 +211,9 @@ iMessage support lets your agent send and receive iMessages on macOS. Messages a
    ```
 4. **Automation permission** for Messages.app — macOS will prompt on first send
 
+> **Photo attachments:** If you want your agent to process images and files sent via iMessage, the `instar-attachments-sync` binary must also be running with Full Disk Access granted to it. It mirrors attachments from the Messages sandbox to a readable location. See [docs/LAUNCHDAEMON-SETUP.md#3-imessage-photo-attachments-optional](docs/LAUNCHDAEMON-SETUP.md#3-imessage-photo-attachments-optional) for setup.
+
+For running as a LaunchDaemon (always-on, survives reboots), see [docs/LAUNCHDAEMON-SETUP.md](docs/LAUNCHDAEMON-SETUP.md).
 ### Configuration
 
 Add to your `.instar/config.json`:

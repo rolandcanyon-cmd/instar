@@ -21,6 +21,7 @@ import os from 'node:os';
 import lockfile from 'proper-lockfile';
 import type { AgentRegistry, AgentRegistryEntry, AgentType, AgentStatus } from './types.js';
 import { getInstarVersion } from './Config.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 // Paths are computed lazily from os.homedir() so they pick up mocks in tests
 function registryDir(): string { return path.join(os.homedir(), '.instar'); }
@@ -115,7 +116,7 @@ export function saveRegistry(registry: AgentRegistry): void {
     fs.writeFileSync(tmpPath, JSON.stringify(registry, null, 2));
     fs.renameSync(tmpPath, registryPath());
   } catch (err) {
-    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/core/AgentRegistry.ts:119' }); } catch { /* ignore */ }
     throw err;
   }
 }
@@ -201,11 +202,27 @@ function withLockSync<T>(fn: (registry: AgentRegistry) => T): T {
     }
   }
 
+  // Last resort: if lock is stuck after all retries, try force-removing it and retry once.
+  // This handles crash-induced stale locks where proper-lockfile's stale detection
+  // didn't trigger (e.g., clock skew, NFS, or the locking process died mid-write).
   if (lastErr instanceof Error && lastErr.message.includes('ELOCKED')) {
-    throw new Error(
-      'Registry is locked by another process after retries. If no other instar process is running, ' +
-      'delete ~/.instar/registry.json.lock and retry.'
-    );
+    console.warn('[AgentRegistry] Lock stuck after retries — attempting force recovery');
+    forceRemoveRegistryLock();
+    try {
+      release = lockfile.lockSync(registryPath(), LOCK_OPTIONS_SYNC);
+      const registry = loadRegistry();
+      const result = fn(registry);
+      saveRegistry(registry);
+      return result;
+    } catch (recoveryErr) {
+      if (release) { try { release(); } catch { /* ignore */ } }
+      throw new Error(
+        'Registry is locked by another process after retries and recovery. If no other instar process is running, ' +
+        'delete ~/.instar/registry.json.lock and retry.'
+      );
+    } finally {
+      if (release) { try { release(); } catch { /* ignore */ } }
+    }
   }
   throw lastErr;
 }
@@ -405,7 +422,7 @@ export function forceRemoveRegistryLock(): boolean {
   const lockPath = registryPath() + '.lock';
   try {
     if (fs.existsSync(lockPath)) {
-      fs.rmSync(lockPath, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(lockPath, { recursive: true, force: true, operation: 'src/core/AgentRegistry.ts:426' });
       console.log(`[AgentRegistry] Force-removed stale lock: ${lockPath}`);
       return true;
     }

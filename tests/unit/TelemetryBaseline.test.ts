@@ -6,6 +6,7 @@ import os from 'node:os';
 import { TelemetryAuth } from '../../src/monitoring/TelemetryAuth.js';
 import { TelemetryHeartbeat } from '../../src/monitoring/TelemetryHeartbeat.js';
 import type { TelemetryConfig, BaselineSubmission } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 /**
  * Tests for the Baseline telemetry submission flow (TelemetryHeartbeat + TelemetryAuth integration)
@@ -20,7 +21,7 @@ describe('Baseline Submission Flow', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/TelemetryBaseline.test.ts:24' });
   });
 
   function createHeartbeat(overrides: Partial<TelemetryConfig> = {}): TelemetryHeartbeat {
@@ -545,7 +546,7 @@ describe('HMAC Signature Format (Worker Compatibility)', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/TelemetryBaseline.test.ts:550' });
   });
 
   it('should match the worker expected format: hmac-sha256=<64hex>', () => {

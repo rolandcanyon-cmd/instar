@@ -11,6 +11,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { SafeFsExecutor } from '../../core/SafeFsExecutor.js';
 
 export interface ConsentRecord {
   /** E.164 phone number */
@@ -157,7 +158,7 @@ export class PrivacyConsent {
       fs.writeFileSync(tmpPath, JSON.stringify([...this.records.values()], null, 2));
       fs.renameSync(tmpPath, this.consentPath);
     } catch (err) {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/messaging/shared/PrivacyConsent.ts:161' }); } catch { /* ignore */ }
       throw err;
     }
   }

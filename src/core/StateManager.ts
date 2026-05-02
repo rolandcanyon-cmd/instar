@@ -10,6 +10,44 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Session, JobState, ActivityEvent } from './types.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
+
+/**
+ * Discriminate filesystem read errors into operator-actionable categories.
+ *
+ * Previously all read failures (EPERM, EACCES, ENOENT, JSON.parse errors)
+ * were labeled "Corrupted ...". On macOS this misled operators: launchd-spawned
+ * processes hitting ~/Documents without Full Disk Access produce EPERM, which
+ * is a permissions issue, not file corruption. Surfacing the distinction lets
+ * agents (and the feedback pipeline) route the report correctly instead of
+ * chasing nonexistent corruption.
+ */
+function describeReadError(err: unknown, filePath: string): {
+  reason: string;
+  kind: 'permission' | 'parse' | 'io';
+} {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (code === 'EPERM' || code === 'EACCES') {
+    return {
+      kind: 'permission',
+      reason:
+        `Permission denied reading ${filePath} (${code}). ` +
+        `On macOS, launchd-spawned processes need Full Disk Access to read under ~/Documents. ` +
+        `Underlying error: ${msg}`,
+    };
+  }
+  if (err instanceof SyntaxError) {
+    return {
+      kind: 'parse',
+      reason: `Corrupted state file ${filePath} (JSON parse failed): ${msg}`,
+    };
+  }
+  return {
+    kind: 'io',
+    reason: `Failed to read ${filePath}${code ? ` (${code})` : ''}: ${msg}`,
+  };
+}
 
 export class StateManager {
   private stateDir: string;
@@ -70,12 +108,13 @@ export class StateManager {
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     } catch (err) {
-      console.warn(`[StateManager] Corrupted session file: ${filePath}`);
+      const { reason, kind } = describeReadError(err, filePath);
+      console.warn(`[StateManager] getSession ${kind}: ${filePath}`);
       DegradationReporter.getInstance().report({
         feature: 'StateManager.getSession',
         primary: 'Load valid session state from JSON',
         fallback: 'Return null — session unavailable',
-        reason: `Corrupted session file: ${err instanceof Error ? err.message : String(err)}`,
+        reason,
         impact: 'Session data lost, may affect job scheduling',
       });
       return null;
@@ -99,12 +138,14 @@ export class StateManager {
       try {
         sessions.push(JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8')));
       } catch (err) {
-        console.warn(`[StateManager] Corrupted session file: ${f}`);
+        const filePath = path.join(dir, f);
+        const { reason, kind } = describeReadError(err, filePath);
+        console.warn(`[StateManager] listSessions ${kind}: ${f}`);
         DegradationReporter.getInstance().report({
           feature: 'StateManager.listSessions',
           primary: 'List all sessions from state files',
-          fallback: 'Skip corrupted session file',
-          reason: `Corrupted session file ${f}: ${err instanceof Error ? err.message : String(err)}`,
+          fallback: kind === 'permission' ? 'Skip unreadable session file' : 'Skip corrupted session file',
+          reason,
           impact: 'Some sessions invisible to scheduler',
         });
       }
@@ -122,7 +163,7 @@ export class StateManager {
     const filePath = path.join(this.stateDir, 'state', 'sessions', `${sessionId}.json`);
     if (!fs.existsSync(filePath)) return false;
     try {
-      fs.unlinkSync(filePath);
+      SafeFsExecutor.safeUnlinkSync(filePath, { operation: 'src/core/StateManager.ts:166' });
       return true;
     } catch {
       return false;
@@ -138,12 +179,13 @@ export class StateManager {
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     } catch (err) {
-      console.warn(`[StateManager] Corrupted job state file: ${filePath}`);
+      const { reason, kind } = describeReadError(err, filePath);
+      console.warn(`[StateManager] getJobState ${kind}: ${filePath}`);
       DegradationReporter.getInstance().report({
         feature: 'StateManager.getJobState',
         primary: 'Load job state from JSON',
         fallback: 'Return null — job state unavailable',
-        reason: `Corrupted job state file: ${err instanceof Error ? err.message : String(err)}`,
+        reason,
         impact: 'Job scheduling may use stale data',
       });
       return null;
@@ -231,12 +273,13 @@ export class StateManager {
     try {
       return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     } catch (err) {
-      console.warn(`[StateManager] Corrupted state file: ${filePath}`);
+      const { reason, kind } = describeReadError(err, filePath);
+      console.warn(`[StateManager] get ${kind}: ${filePath}`);
       DegradationReporter.getInstance().report({
         feature: 'StateManager.get',
         primary: 'Load generic state file',
         fallback: 'Return null — state unavailable',
-        reason: `Corrupted state file: ${err instanceof Error ? err.message : String(err)}`,
+        reason,
         impact: 'Feature depending on this state may malfunction',
       });
       return null;
@@ -258,7 +301,7 @@ export class StateManager {
     const filePath = path.join(this.stateDir, 'state', `${key}.json`);
     if (!fs.existsSync(filePath)) return false;
     try {
-      fs.unlinkSync(filePath);
+      SafeFsExecutor.safeUnlinkSync(filePath, { operation: 'src/core/StateManager.ts:305' });
       return true;
     } catch {
       return false;
@@ -278,7 +321,7 @@ export class StateManager {
       fs.renameSync(tmpPath, filePath);
     } catch (err) {
       // Clean up temp file on failure
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/core/StateManager.ts:326' }); } catch { /* ignore */ }
       throw err;
     }
   }

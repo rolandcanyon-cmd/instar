@@ -20,6 +20,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 export interface RestartRequest {
   requestedAt: string;
@@ -98,7 +99,7 @@ export class ForegroundRestartWatcher extends EventEmitter {
       console.log(`[ForegroundRestartWatcher] Restart requested by ${data.requestedBy} for v${data.targetVersion} (from v${data.previousVersion})`);
 
       // Clear the flag to prevent re-triggering on next startup
-      try { fs.unlinkSync(this.flagPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(this.flagPath, { operation: 'src/core/ForegroundRestartWatcher.ts:102' }); } catch { /* ignore */ }
 
       // Write a planned-exit marker so the supervisor (if running) knows this
       // was a planned restart, not a crash. Solves the race condition where we
@@ -139,7 +140,7 @@ export class ForegroundRestartWatcher extends EventEmitter {
       }
     } catch {
       // Malformed flag — clean up
-      try { fs.unlinkSync(this.flagPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(this.flagPath, { operation: 'src/core/ForegroundRestartWatcher.ts:144' }); } catch { /* ignore */ }
     }
   }
 }

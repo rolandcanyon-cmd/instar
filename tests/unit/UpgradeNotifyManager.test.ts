@@ -11,6 +11,7 @@ import type {
   ActivityLogger,
 } from '../../src/core/UpgradeNotifyManager.js';
 import type { Session } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -80,7 +81,7 @@ describe('UpgradeNotifyManager', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/UpgradeNotifyManager.test.ts:84' });
     vi.restoreAllMocks();
   });
 
@@ -95,7 +96,7 @@ describe('UpgradeNotifyManager', () => {
       // Simulate upgrade-ack removing the pending guide
       // We need to remove it after spawnSession is called but before isAcknowledged is checked
       spawnSession.mockImplementation(async () => {
-        fs.unlinkSync(guidePath);
+        SafeFsExecutor.safeUnlinkSync(guidePath, { operation: 'tests/unit/UpgradeNotifyManager.test.ts:100' });
         return session;
       });
 
@@ -111,7 +112,7 @@ describe('UpgradeNotifyManager', () => {
 
     it('logs success activity event', async () => {
       spawnSession.mockImplementation(async () => {
-        fs.unlinkSync(guidePath);
+        SafeFsExecutor.safeUnlinkSync(guidePath, { operation: 'tests/unit/UpgradeNotifyManager.test.ts:117' });
         return makeSession('sess-001');
       });
       isSessionComplete.mockReturnValue(true);
@@ -137,7 +138,7 @@ describe('UpgradeNotifyManager', () => {
         callCount++;
         if (callCount === 2) {
           // Sonnet succeeds — remove the guide
-          fs.unlinkSync(guidePath);
+          SafeFsExecutor.safeUnlinkSync(guidePath, { operation: 'tests/unit/UpgradeNotifyManager.test.ts:144' });
           return sonnetSession;
         }
         return haikuSession; // Haiku doesn't remove it
@@ -204,7 +205,7 @@ describe('UpgradeNotifyManager', () => {
       spawnSession.mockImplementation(async () => {
         callCount++;
         if (callCount === 1) throw new Error('tmux session already exists');
-        fs.unlinkSync(guidePath);
+        SafeFsExecutor.safeUnlinkSync(guidePath, { operation: 'tests/unit/UpgradeNotifyManager.test.ts:212' });
         return makeSession('sess-recovery');
       });
       isSessionComplete.mockReturnValue(true);
@@ -220,7 +221,7 @@ describe('UpgradeNotifyManager', () => {
   describe('notify() — no pending guide', () => {
     it('returns immediately when no pending guide exists', async () => {
       // Remove the guide
-      fs.unlinkSync(guidePath);
+      SafeFsExecutor.safeUnlinkSync(guidePath, { operation: 'tests/unit/UpgradeNotifyManager.test.ts:229' });
 
       const manager = new UpgradeNotifyManager(config, spawnSession, isSessionComplete, logActivity, TEST_TIMING);
       const result = await manager.notify();
@@ -297,7 +298,7 @@ describe('UpgradeNotifyManager', () => {
     });
 
     it('returns true when pending guide has been removed', () => {
-      fs.unlinkSync(guidePath);
+      SafeFsExecutor.safeUnlinkSync(guidePath, { operation: 'tests/unit/UpgradeNotifyManager.test.ts:307' });
       const manager = new UpgradeNotifyManager(config, spawnSession, isSessionComplete, logActivity, TEST_TIMING);
       expect(manager.isAcknowledged()).toBe(true);
     });

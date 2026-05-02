@@ -37,6 +37,14 @@ export interface NativeBackendOptions {
   offsetPath?: string;
   /** Authorized contacts (normalized E.164) — scopes SQL queries for defense-in-depth */
   authorizedContacts?: string[];
+  /**
+   * Directory to hardlink incoming attachments into. iMessage stores files
+   * in ~/Library/Messages/Attachments/ which is TCC-protected; hardlinking
+   * to a non-protected location makes photos/documents readable by the
+   * daemon without Full Disk Access on node. If unset, attachment paths
+   * stay pointed at the original TCC-protected location.
+   */
+  attachmentsDir?: string;
 }
 
 export class NativeBackend extends EventEmitter {
@@ -49,6 +57,7 @@ export class NativeBackend extends EventEmitter {
   private readonly includeAttachments: boolean;
   private readonly offsetPath: string | null;
   private readonly authorizedContacts: string[];
+  private readonly attachmentsDir: string | null;
 
   // Prepared statements (cached for performance)
   private stmtNewMessages: import('better-sqlite3').Statement | null = null;
@@ -56,6 +65,7 @@ export class NativeBackend extends EventEmitter {
   private stmtHistory: import('better-sqlite3').Statement | null = null;
   private stmtMaxRowId: import('better-sqlite3').Statement | null = null;
   private stmtContextHistory: import('better-sqlite3').Statement | null = null;
+  private stmtAttachments: import('better-sqlite3').Statement | null = null;
 
   constructor(options: NativeBackendOptions = {}) {
     super();
@@ -64,6 +74,7 @@ export class NativeBackend extends EventEmitter {
     this.includeAttachments = options.includeAttachments ?? true;
     this.offsetPath = options.offsetPath ?? null;
     this.authorizedContacts = options.authorizedContacts ?? [];
+    this.attachmentsDir = options.attachmentsDir ?? null;
   }
 
   get state(): ConnectionState {
@@ -174,6 +185,15 @@ export class NativeBackend extends EventEmitter {
       `);
 
       this.stmtMaxRowId = this.db.prepare('SELECT MAX(ROWID) AS max_id FROM message');
+
+      // Attachments for a given message ROWID
+      this.stmtAttachments = this.db.prepare(`
+        SELECT a.filename, a.mime_type, a.transfer_name, a.total_bytes
+        FROM attachment a
+        JOIN message_attachment_join maj ON a.ROWID = maj.attachment_id
+        WHERE maj.message_id = ?
+        ORDER BY a.ROWID ASC
+      `);
 
       // Restore persisted poll offset if available; otherwise use a 50-message
       // lookback so messages received while the server was down are processed.
@@ -371,6 +391,35 @@ export class NativeBackend extends EventEmitter {
           service: row.service,
         };
 
+        // Attachments: fetch from DB, hardlink each file into attachmentsDir so
+        // the daemon can read them without FDA on ~/Library/Messages/Attachments.
+        if (this.includeAttachments && this.stmtAttachments) {
+          try {
+            const attRows = this.stmtAttachments.all(row.ROWID) as Array<{
+              filename: string | null;
+              mime_type: string | null;
+              transfer_name: string | null;
+              total_bytes: number | null;
+            }>;
+            if (attRows.length > 0) {
+              msg.attachments = attRows
+                .filter(a => a.filename) // skip attachments without a file (stickers etc.)
+                .map(a => {
+                  const srcPath = this._expandPath(a.filename!);
+                  const hardlinked = this._hardlinkAttachment(srcPath, row.guid, a.transfer_name);
+                  return {
+                    filename: a.transfer_name || path.basename(srcPath),
+                    mimeType: a.mime_type || 'application/octet-stream',
+                    path: hardlinked || srcPath, // fall back to original if hardlink fails
+                    size: a.total_bytes || undefined,
+                  };
+                });
+            }
+          } catch (err) {
+            console.warn(`[imessage-native] Attachment lookup failed for ROWID ${row.ROWID}: ${(err as Error).message}`);
+          }
+        }
+
         this.emit('message', msg);
       }
       // Persist offset if it advanced
@@ -421,5 +470,105 @@ export class NativeBackend extends EventEmitter {
   /** Convert Apple Cocoa nanosecond timestamp to ISO string. */
   private _cocoaToIso(cocoaNanos: number): string {
     return new Date(this._cocoaToUnix(cocoaNanos) * 1000).toISOString();
+  }
+
+  /** Expand a chat.db attachment path (may start with ~) to an absolute path. */
+  private _expandPath(p: string): string {
+    if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+    if (p === '~') return os.homedir();
+    return p;
+  }
+
+  /**
+   * Hardlink an attachment file into the hardlink-safe attachments dir.
+   * Returns the new path, or null if the hardlink couldn't be created.
+   * Idempotent — if the target already exists pointing at the same inode,
+   * it's reused.
+   *
+   * ~/Library/Messages/Attachments/ is TCC-protected on macOS. Daemon-spawned
+   * processes without FDA can't read files there directly. A hardlink in a
+   * non-protected directory shares the same inode — reads work without FDA.
+   * The hardlink itself requires FDA to create, which happens on first-run
+   * from a user session (or any time a new message arrives while a user-context
+   * process is running the poll loop).
+   */
+  private _hardlinkAttachment(
+    srcPath: string,
+    messageGuid: string,
+    transferName: string | null,
+  ): string | null {
+    if (!this.attachmentsDir) return null;
+    if (!srcPath) return null;
+
+    // First try: if an external watcher (like the fswatch-based LaunchAgent)
+    // has already hardlinked the source file into attachmentsDir, find and
+    // return THAT path.
+    //
+    // The watcher naming convention: ${parentDirUuid[0:8]}__${basename}
+    // derived from the srcPath layout:
+    //     ~/Library/Messages/Attachments/<xx>/<yy>/<UUID>/<filename>
+    // We construct the expected name from the srcPath alone — no stat call
+    // on the TCC-protected source needed. This works even when the daemon
+    // has zero FDA: we only read attachmentsDir (non-protected) and compose
+    // a filename string.
+    try {
+      if (fs.existsSync(this.attachmentsDir)) {
+        const parts = srcPath.split(path.sep);
+        const fileName = parts[parts.length - 1] || '';
+        const parentUuid = parts[parts.length - 2] || '';
+        const uuidFrag = parentUuid.slice(0, 8);
+
+        // Expected name per the external watcher convention
+        const expected = `${uuidFrag}__${fileName}`;
+        const expectedPath = path.join(this.attachmentsDir, expected);
+        if (fs.existsSync(expectedPath)) {
+          return expectedPath;
+        }
+
+        // Fallback: scan for any file ending in `__${fileName}` (watcher may
+        // have used a different prefix scheme in future versions)
+        try {
+          const entries = fs.readdirSync(this.attachmentsDir);
+          const match = entries.find((n) => n === fileName || n.endsWith(`__${fileName}`));
+          if (match) {
+            return path.join(this.attachmentsDir, match);
+          }
+        } catch { /* ignore */ }
+      }
+    } catch { /* continue to own-create attempt */ }
+
+    // Fallback: try to create our own hardlink. Requires FDA on node.
+    if (!fs.existsSync(srcPath)) return null;
+    try {
+      fs.mkdirSync(this.attachmentsDir, { recursive: true });
+      const base = transferName
+        ? path.basename(transferName)
+        : path.basename(srcPath);
+      const safeBase = base.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const target = path.join(
+        this.attachmentsDir,
+        `${messageGuid}__${safeBase}`,
+      );
+
+      if (fs.existsSync(target)) {
+        try {
+          const srcIno = fs.statSync(srcPath).ino;
+          const tgtIno = fs.statSync(target).ino;
+          if (srcIno === tgtIno) return target;
+        } catch { /* fall through to recreate */ }
+        try { fs.unlinkSync(target); } catch { /* best effort */ }
+      }
+
+      fs.linkSync(srcPath, target);
+      return target;
+    } catch (err) {
+      const msg = (err as Error).message || '';
+      // Silently swallow "operation not permitted" — daemon lacks FDA.
+      // External watcher (LaunchAgent) should fill the gap.
+      if (!msg.includes('EACCES') && !msg.includes('EPERM') && !msg.includes('not permitted')) {
+        console.warn(`[imessage-native] Attachment hardlink failed: ${msg}`);
+      }
+      return null;
+    }
   }
 }

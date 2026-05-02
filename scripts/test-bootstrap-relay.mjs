@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { SafeFsExecutor } from '../src/core/SafeFsExecutor.js';
 
 // Create a temporary state directory
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bootstrap-relay-test-'));
@@ -85,6 +86,6 @@ try {
 } finally {
   // Cleanup
   try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'scripts/test-bootstrap-relay.mjs:89' });
   } catch {}
 }

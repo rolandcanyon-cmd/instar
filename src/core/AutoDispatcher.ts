@@ -39,6 +39,7 @@ import type { RelevanceFilter } from './RelevanceFilter.js';
 import type { DispatchVerifier } from './DispatchVerifier.js';
 import type { DeferredDispatchTracker } from './DeferredDispatchTracker.js';
 import type { AdaptationValidator } from './AdaptationValidator.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 export interface AutoDispatcherConfig {
   /** How often to poll for dispatches, in minutes. Default: 30 */
@@ -59,6 +60,49 @@ export interface AutoDispatcherStatus {
   pendingDispatches: number;
   executedDispatches: number;
   lastError: string | null;
+}
+
+/**
+ * Build a human-readable notification for dispatches that are waiting on the
+ * user's approval. The old message was cryptic — just the count and IDs — so
+ * users had no idea what they were approving. This version names each one in
+ * plain language, shows a content preview, and tells the user how to respond.
+ *
+ * Exported for unit testing.
+ */
+export function formatApprovalNotification(dispatches: Dispatch[]): string {
+  if (dispatches.length === 0) return '';
+
+  const TYPE_LABEL: Record<string, string> = {
+    behavioral: 'behavior guideline',
+    security: 'security update',
+    strategy: 'strategy note',
+    lesson: 'lesson',
+    action: 'action',
+    configuration: 'configuration change',
+  };
+
+  const PREVIEW_LIMIT = 220;
+
+  const describe = (d: Dispatch): string => {
+    const label = TYPE_LABEL[d.type] || d.type;
+    const raw = (d.content || '').trim().replace(/\s+/g, ' ');
+    const preview = raw.length > PREVIEW_LIMIT
+      ? `${raw.slice(0, PREVIEW_LIMIT).trimEnd()}…`
+      : raw;
+    const priorityNote = d.priority && d.priority !== 'normal' ? `, ${d.priority} priority` : '';
+    return `• "${d.title}" — ${label}${priorityNote}\n  ${preview || '(no content)'}\n  ID: ${d.dispatchId}`;
+  };
+
+  const header = dispatches.length === 1
+    ? `I have a new guideline waiting for your approval before I apply it:`
+    : `I have ${dispatches.length} new guidelines waiting for your approval before I apply them:`;
+
+  const items = dispatches.map(describe).join('\n\n');
+
+  const footer = `Just tell me which ones to approve or reject and I'll handle it.`;
+
+  return `${header}\n\n${items}\n\n${footer}`;
 }
 
 export class AutoDispatcher {
@@ -576,12 +620,7 @@ export class AutoDispatcher {
         });
       }
 
-      const typeLabels = [...new Set(needsApproval.map(d => d.type))].join('/');
-      const ids = needsApproval.map(d => d.dispatchId).join(', ');
-      await this.notify(
-        `I received ${needsApproval.length} ${typeLabels} dispatch(es) that need your approval ` +
-        `before I can apply them. IDs: ${ids}`
-      );
+      await this.notify(formatApprovalNotification(needsApproval));
     }
   }
 
@@ -721,12 +760,13 @@ export class AutoDispatcher {
 
   /**
    * Get the topic ID for dispatch notifications.
-   * Prefers the dedicated Agent Updates topic (informational), falls back to Agent Attention.
+   *
+   * Dispatch announcements are routed exclusively to the dedicated Agent Updates
+   * topic. If it is not configured, notify() drops to console — we never fall
+   * back to Attention or any other topic. Matches /telegram/post-update contract.
    */
   private getNotificationTopicId(): number {
-    return this.state.get<number>('agent-updates-topic')
-      || this.state.get<number>('agent-attention-topic')
-      || 0;
+    return this.state.get<number>('agent-updates-topic') || 0;
   }
 
   // ── Decision journal helpers ────────────────────────────────────────
@@ -806,7 +846,7 @@ export class AutoDispatcher {
       fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2));
       fs.renameSync(tmpPath, this.stateFile);
     } catch {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/core/AutoDispatcher.ts:849' }); } catch { /* ignore */ }
     }
   }
 }

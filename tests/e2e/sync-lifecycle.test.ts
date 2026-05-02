@@ -18,12 +18,13 @@ import { FileClassifier } from '../../src/core/FileClassifier.js';
 import { LLMConflictResolver } from '../../src/core/LLMConflictResolver.js';
 import type { ConflictFile } from '../../src/core/LLMConflictResolver.js';
 import type { IntelligenceProvider, IntelligenceOptions } from '../../src/core/types.js';
+import { SafeGitExecutor } from '../../src/core/SafeGitExecutor.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function git(args: string[], cwd: string): string {
-  return execFileSync('git', args, {
-    cwd,
+  return SafeGitExecutor.run(args, { cwd,
     encoding: 'utf-8',
     stdio: 'pipe',
     env: {
@@ -32,8 +33,7 @@ function git(args: string[], cwd: string): string {
       GIT_AUTHOR_EMAIL: 'test@test.com',
       GIT_COMMITTER_NAME: 'Test',
       GIT_COMMITTER_EMAIL: 'test@test.com',
-    },
-  }).trim();
+    }, operation: 'tests/e2e/sync-lifecycle.test.ts:26' }).trim();
 }
 
 function createGitRepo(): string {
@@ -107,7 +107,7 @@ describe('Sync pipeline E2E lifecycle', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(repoDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(repoDir, { recursive: true, force: true, operation: 'tests/e2e/sync-lifecycle.test.ts:112' });
   });
 
   // ── Full pipeline: classify → route → resolve ────────────────────

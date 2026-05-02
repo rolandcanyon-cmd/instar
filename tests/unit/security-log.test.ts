@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { SecurityLog } from '../../src/core/SecurityLog.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -23,7 +24,7 @@ function createTempDir(): string {
 }
 
 function cleanup(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/security-log.test.ts:27' });
 }
 
 // ── Tests ────────────────────────────────────────────────────────────

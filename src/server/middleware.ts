@@ -21,10 +21,54 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction):
 }
 
 /**
+ * In-memory dedup cache for deprecation log lines.
+ *
+ * Per spec § Layer 1c "Backward upgrade path": when a client sends a
+ * Bearer token without `X-Instar-AgentId`, we accept the request during
+ * the deprecation window, but log it at most once per hour per source.
+ * The "source" key is the token's SHA-256 prefix (we never log the token
+ * itself) plus the request remote — a bare-token caller behind a fixed
+ * IP rotates faster than caller behind shifting IPs, but neither floods.
+ */
+const deprecationLogCache = new Map<string, number>();
+const DEPRECATION_LOG_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const DEPRECATION_LOG_CACHE_MAX = 1024; // bound memory
+
+function shouldLogDeprecation(sourceKey: string, now: number = Date.now()): boolean {
+  const last = deprecationLogCache.get(sourceKey);
+  if (last !== undefined && now - last < DEPRECATION_LOG_INTERVAL_MS) {
+    return false;
+  }
+  // Bound memory: when at cap, drop the oldest entry before insert.
+  if (deprecationLogCache.size >= DEPRECATION_LOG_CACHE_MAX) {
+    const oldestKey = deprecationLogCache.keys().next().value;
+    if (oldestKey !== undefined) deprecationLogCache.delete(oldestKey);
+  }
+  deprecationLogCache.set(sourceKey, now);
+  return true;
+}
+
+/** Test hook — clear the deprecation log cache. */
+export function _resetDeprecationLogCache(): void {
+  deprecationLogCache.clear();
+}
+
+/**
  * Auth middleware — enforces Bearer token on API endpoints.
  * Health endpoint is exempt (used for external monitoring).
+ *
+ * @param authToken  The configured server bearer token. If omitted, all
+ *   requests pass through (used in tests and unauthenticated dev runs).
+ * @param agentId    The configured server agent identity (e.g. projectName).
+ *   When set, the middleware additionally validates the
+ *   `X-Instar-AgentId` request header BEFORE comparing the bearer
+ *   token. A mismatch returns a structured 403 — the goal is to make
+ *   tokens sent to the wrong agent's server structurally inert before
+ *   token bytes are even compared. Missing header is accepted during
+ *   the backward-compatibility deprecation window with a deduped log
+ *   line. See spec docs/specs/telegram-delivery-robustness.md § Layer 1b.
  */
-export function authMiddleware(authToken?: string) {
+export function authMiddleware(authToken?: string, agentId?: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
     // Skip auth if no token configured
     if (!authToken) {
@@ -71,15 +115,32 @@ export function authMiddleware(authToken?: string) {
       return;
     }
 
-    // Internal endpoints: enforce localhost at the network layer (P0-4 defense-in-depth)
+    // Internal endpoints: enforce localhost AND bearer token.
+    //
+    // Per context-death-pitfall-prevention spec § P0.5 (PR3 fix):
+    // /internal/* routes are bearer-token authenticated using the
+    // same .instar/config.json#authToken. The prior localhost-only
+    // check left a gap: any process on the local machine could flip
+    // the stop-gate kill-switch or drive /internal/stop-gate/evaluate
+    // without credentials. Drift-correction threat model accepts that
+    // a truly adversarial session with token access can still bypass;
+    // this closes the casual-process gap.
+    //
+    // Additionally: reject /internal/* when X-Forwarded-For is set
+    // (spec P0.5: advisory defense-in-depth against tunnel
+    // misconfiguration; a Cloudflare tunnel accidentally routing
+    // internal paths to the LAN should not succeed).
     if (req.path.startsWith('/internal/')) {
       const remote = req.socket.remoteAddress;
       if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
         res.status(403).json({ error: 'Internal routes are localhost-only' });
         return;
       }
-      next();
-      return;
+      if (req.headers['x-forwarded-for']) {
+        res.status(403).json({ error: 'Internal routes reject X-Forwarded-For requests' });
+        return;
+      }
+      // Fall through to the standard bearer check below.
     }
 
     // Secret drop routes — the token in the URL IS the auth.
@@ -102,6 +163,46 @@ export function authMiddleware(authToken?: string) {
     if (!header || !header.startsWith('Bearer ')) {
       res.status(401).json({ error: 'Missing or invalid Authorization header' });
       return;
+    }
+
+    // Agent-id binding (spec § Layer 1b). The header is checked BEFORE the
+    // token comparison so a token sent to the wrong agent's server is
+    // structurally inert — we never even get to the timing-safe-equals
+    // step. The value is a stable, low-cardinality identifier
+    // (projectName); we compare as strings rather than constant-time
+    // because the agent-id space is operator-public (it appears in tmux
+    // session names, log lines, file paths) — there is no secret here to
+    // protect from a timing oracle.
+    const providedAgentIdHeader = req.headers['x-instar-agentid'];
+    const providedAgentId = Array.isArray(providedAgentIdHeader)
+      ? providedAgentIdHeader[0]
+      : providedAgentIdHeader;
+    if (agentId) {
+      if (providedAgentId === undefined) {
+        // Backward-compat: old clients without the header are accepted
+        // during the deprecation window. Log at most once per hour per
+        // source (token-hash + remote) so rolling upgrades don't flood.
+        const tokenForKey = header.slice(7);
+        const tokenKey = createHash('sha256').update(tokenForKey).digest('hex').slice(0, 16);
+        const remote = req.socket.remoteAddress ?? 'unknown';
+        const sourceKey = `${tokenKey}:${remote}`;
+        if (shouldLogDeprecation(sourceKey)) {
+          console.warn(
+            `[auth] deprecation: bearer-only request to ${req.path} ` +
+            `from ${remote} — clients must send X-Instar-AgentId header. ` +
+            `(deduped 1/hour per source)`
+          );
+        }
+        // Fall through to token validation below.
+      } else if (providedAgentId !== agentId) {
+        // Cross-tenant misroute or forged header. Return a structured
+        // sub-code so the client (sentinel) can categorize precisely.
+        // Do NOT echo any token bytes — the response only carries the
+        // expected agent-id, which is operator-public information.
+        res.status(403).json({ error: 'agent_id_mismatch', expected: agentId });
+        return;
+      }
+      // Match → fall through to token validation.
     }
 
     const token = header.slice(7);
@@ -166,9 +267,38 @@ export function rateLimiter(windowMs: number = 60_000, maxRequests: number = 10)
 /**
  * Request timeout middleware — prevents slow requests from hanging.
  * Returns 408 if the request takes longer than the timeout.
+ *
+ * `perPathOverrides` lets specific path prefixes use a longer (or shorter)
+ * budget. This exists because some routes are intentionally LLM-backed and
+ * need headroom the default 30s doesn't provide — the outbound messaging
+ * routes (tone gate review + Telegram Bot API roundtrip) commonly take
+ * 30–60s under normal load, and a 408 while the actual send is in flight
+ * triggers duplicate-send cascades on the client side.
+ *
+ * Override matching is by longest-prefix, so a more specific prefix beats a
+ * shorter parent if both are registered.
  */
-export function requestTimeout(timeoutMs: number = 30_000) {
+export function requestTimeout(
+  defaultMs: number = 30_000,
+  perPathOverrides: Record<string, number> = {},
+) {
+  // Precompute overrides sorted by descending prefix length so longest-match
+  // wins without scanning every entry on every request.
+  const sortedOverrides = Object.entries(perPathOverrides)
+    .sort((a, b) => b[0].length - a[0].length);
+
   return (req: Request, res: Response, next: NextFunction): void => {
+    let timeoutMs = defaultMs;
+    for (const [prefix, ms] of sortedOverrides) {
+      // Match either exact prefix or prefix followed by '/' so that '/foo'
+      // does NOT spuriously match '/foo-bar'. req.path in Express never
+      // contains the query string, so no '?' branch is needed.
+      if (req.path === prefix || req.path.startsWith(prefix + '/')) {
+        timeoutMs = ms;
+        break;
+      }
+    }
+
     let done = false;
     const timer = setTimeout(() => {
       if (!done && !res.headersSent) {

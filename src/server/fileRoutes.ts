@@ -18,8 +18,8 @@ import type { InstarConfig, FileViewerConfig } from '../core/types.js';
 
 const DEFAULT_FILE_VIEWER_CONFIG: FileViewerConfig = {
   enabled: true,
-  allowedPaths: ['.claude/', 'docs/'],
-  editablePaths: [],
+  allowedPaths: ['./'],
+  editablePaths: ['./'],
   maxFileSize: 1_048_576, // 1MB
   maxEditableFileSize: 204_800, // 200KB
   blockedFilenames: [
@@ -112,6 +112,8 @@ async function validatePath(
   const normalizedClean = stripTrailing(normalized);
   const allowed = config.allowedPaths.some(ap => {
     const normalizedAllowed = stripTrailing(path.normalize(ap));
+    // '.' means project root — allow everything within the project
+    if (normalizedAllowed === '.') return true;
     return normalizedClean === normalizedAllowed ||
            normalizedClean.startsWith(normalizedAllowed + '/');
   });
@@ -135,6 +137,8 @@ async function validatePath(
     const relativAfterResolve = path.relative(realProjectDir, realPath);
     const allowedAfterResolve = config.allowedPaths.some(ap => {
       const normalizedAllowed = path.normalize(ap);
+      // '.' means project root — allow everything within the project
+      if (normalizedAllowed === '.' || normalizedAllowed === './') return true;
       return relativAfterResolve === normalizedAllowed.replace(/\/$/, '') ||
              relativAfterResolve.startsWith(normalizedAllowed.endsWith('/') ? normalizedAllowed : normalizedAllowed + '/') ||
              // Handle exact match with the allowed path itself (e.g. listing .claude/)
@@ -167,6 +171,8 @@ function isEditable(relativePath: string, config: FileViewerConfig): boolean {
   const normalized = path.normalize(relativePath);
   return config.editablePaths.some(ep => {
     const normalizedEditable = path.normalize(ep);
+    // '.' means project root — everything is editable
+    if (normalizedEditable === '.' || normalizedEditable === './') return true;
     return normalized === normalizedEditable ||
            normalized.startsWith(normalizedEditable.endsWith('/') ? normalizedEditable : normalizedEditable + '/');
   });
@@ -232,6 +238,42 @@ export function createFileRoutes(options: { config: InstarConfig; liveConfig?: {
 
     // If no path specified, return the root allowed directories
     if (!requestedPath) {
+      // If allowedPaths includes './' (project root), list the project directory directly
+      const hasProjectRoot = config.allowedPaths.some(ap => {
+        const normalized = path.normalize(ap).replace(/\/$/, '');
+        return normalized === '.';
+      });
+
+      if (hasProjectRoot) {
+        // List the project root directory contents directly
+        try {
+          const dirEntries = await fs.promises.readdir(projectDir, { withFileTypes: true });
+          const sorted = dirEntries.sort((a, b) => {
+            const aDir = a.isDirectory() ? 0 : 1;
+            const bDir = b.isDirectory() ? 0 : 1;
+            if (aDir !== bDir) return aDir - bDir;
+            return a.name.localeCompare(b.name);
+          });
+          const entries: Array<{ name: string; type: string; size?: number; modified?: string }> = [];
+          for (const entry of sorted.slice(0, 500)) {
+            if (isBlockedFilename(entry.name, config.blockedFilenames)) continue;
+            if (entry.isDirectory()) {
+              entries.push({ name: entry.name, type: 'directory' });
+            } else if (entry.isFile() || entry.isSymbolicLink()) {
+              try {
+                const entryAbsPath = path.join(projectDir, entry.name);
+                const entryStat = await fs.promises.stat(entryAbsPath);
+                entries.push({ name: entry.name, type: 'file', size: entryStat.size, modified: entryStat.mtime.toISOString() });
+              } catch { /* skip */ }
+            }
+          }
+          res.json({ path: '', entries });
+        } catch {
+          res.status(500).json({ error: 'Failed to list project root' });
+        }
+        return;
+      }
+
       const roots: Array<{ name: string; type: string }> = [];
       for (const ap of config.allowedPaths) {
         const normalizedAp = path.normalize(ap).replace(/\/$/, '');
@@ -641,6 +683,58 @@ export function createFileRoutes(options: { config: InstarConfig; liveConfig?: {
       editablePaths: config.editablePaths,
       updated: true,
     });
+  });
+
+  // ── GET /api/files/download ──────────────────────────────────────
+
+  router.get('/api/files/download', async (req: Request, res: Response) => {
+    const requestedPath = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!requestedPath) {
+      res.status(400).json({ error: 'Missing path parameter' });
+      return;
+    }
+
+    const validation = await validatePath(requestedPath, projectDir, config);
+    if (!validation.valid) {
+      res.status(validation.status || 403).json({ error: validation.error });
+      return;
+    }
+
+    const blocked = checkBlockedFilename(requestedPath, config);
+    if (blocked) {
+      res.status(403).json({ error: blocked });
+      return;
+    }
+
+    const absPath = validation.resolvedPath!;
+
+    try {
+      const stat = await fs.promises.stat(absPath);
+      if (stat.isDirectory()) {
+        res.status(400).json({ error: 'Cannot download a directory' });
+        return;
+      }
+
+      if (stat.size > config.maxFileSize) {
+        res.status(413).json({ error: 'File too large', size: stat.size, maxSize: config.maxFileSize });
+        return;
+      }
+
+      const filename = path.basename(absPath);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '\\"')}"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Length', stat.size);
+
+      const stream = fs.createReadStream(absPath);
+      stream.pipe(res);
+      stream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed to stream file' });
+        }
+      });
+    } catch {
+      res.status(500).json({ error: 'Failed to download file' });
+    }
   });
 
   // ── GET /api/files/link ─────────────────────────────────────────

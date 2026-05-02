@@ -6,6 +6,7 @@ import type {
   TriageEvidence,
   TriageDecision,
 } from '../../src/monitoring/TriageOrchestrator.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ─── Test Helpers ─────────────────────────────────────────
 
@@ -936,7 +937,7 @@ describe('TriageOrchestrator', () => {
       expect(content).toContain('<user_message>');
 
       // Cleanup
-      try { require('fs').unlinkSync(filepath); } catch {}
+      try { SafeFsExecutor.safeUnlinkSync(filepath, { operation: 'tests/unit/TriageOrchestrator.test.ts:940' }); } catch {}
     });
 
     it('escapes delimiter-breaking content', () => {
@@ -961,7 +962,7 @@ describe('TriageOrchestrator', () => {
       // The closing delimiter should be escaped
       expect(content).toContain('&lt;/terminal_output&gt;');
 
-      try { require('fs').unlinkSync(filepath); } catch {}
+      try { SafeFsExecutor.safeUnlinkSync(filepath, { operation: 'tests/unit/TriageOrchestrator.test.ts:966' }); } catch {}
     });
   });
 

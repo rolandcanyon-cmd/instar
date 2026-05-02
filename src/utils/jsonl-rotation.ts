@@ -14,6 +14,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -71,7 +72,7 @@ export function maybeRotateJsonl(filePath: string, options?: RotationOptions): b
     try {
       const tmpPath = filePath + '.rotation-tmp';
       if (fs.existsSync(tmpPath)) {
-        fs.unlinkSync(tmpPath);
+        SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/utils/jsonl-rotation.ts:75' });
       }
     } catch {
       // Best effort cleanup

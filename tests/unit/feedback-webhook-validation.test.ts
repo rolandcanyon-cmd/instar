@@ -14,6 +14,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { FeedbackManager } from '../../src/core/FeedbackManager.js';
 import type { FeedbackConfig } from '../../src/core/types.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('FeedbackManager webhook URL validation', () => {
   it('rejects HTTP (non-HTTPS) webhook URLs', () => {
@@ -122,7 +123,7 @@ describe('FeedbackManager MAX_FEEDBACK_ITEMS cap', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/feedback-webhook-validation.test.ts:126' });
   });
 
   it('caps stored feedback at 1000 items, keeping newest', async () => {
@@ -195,7 +196,7 @@ describe('FeedbackManager webhook HTTP error handling', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/feedback-webhook-validation.test.ts:200' });
   });
 
   it('stores locally with forwarded=false when webhook returns 500', async () => {
@@ -311,7 +312,7 @@ describe('FeedbackManager partial retry', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/feedback-webhook-validation.test.ts:317' });
   });
 
   it('handles partial retry success (some succeed, some fail)', async () => {

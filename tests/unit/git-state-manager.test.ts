@@ -28,13 +28,15 @@ import path from 'node:path';
 import os from 'node:os';
 import { execSync } from 'node:child_process';
 import { GitStateManager } from '../../src/core/GitStateManager.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
+import { SafeGitExecutor } from '../../src/core/SafeGitExecutor.js';
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'instar-git-test-'));
 }
 
 function cleanup(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/git-state-manager.test.ts:38' });
 }
 
 describe('GitStateManager', () => {
@@ -47,13 +49,12 @@ describe('GitStateManager', () => {
     fs.writeFileSync(path.join(stateDir, 'MEMORY.md'), '# Memory\nSome memories.');
     fs.writeFileSync(path.join(stateDir, 'jobs.json'), '{}');
 
-    // Configure git user for commits in test env
-    try {
-      execSync('git config --global user.email "test@test.com" 2>/dev/null || true', { stdio: 'pipe' });
-      execSync('git config --global user.name "Test" 2>/dev/null || true', { stdio: 'pipe' });
-    } catch {
-      // May already be configured
-    }
+    // Configure git identity via env vars — SafeGitExecutor neutralizes the
+    // global gitconfig (anti-alias defense) but reads identity from env.
+    process.env.GIT_AUTHOR_NAME = process.env.GIT_AUTHOR_NAME || 'Test';
+    process.env.GIT_AUTHOR_EMAIL = process.env.GIT_AUTHOR_EMAIL || 'test@test.com';
+    process.env.GIT_COMMITTER_NAME = process.env.GIT_COMMITTER_NAME || 'Test';
+    process.env.GIT_COMMITTER_EMAIL = process.env.GIT_COMMITTER_EMAIL || 'test@test.com';
   });
 
   afterEach(() => {
@@ -310,7 +311,7 @@ describe('GitStateManager', () => {
       manager.setRemote('https://github.com/user/repo.git');
 
       // Verify the git remote was set
-      const remoteUrl = execSync('git remote get-url origin', { cwd: stateDir, encoding: 'utf-8' }).trim();
+      const remoteUrl = SafeGitExecutor.readSync(['remote', 'get-url', 'origin'], { cwd: stateDir, encoding: 'utf-8', operation: 'tests/unit/git-state-manager.test.ts:317' }).trim();
       expect(remoteUrl).toBe('https://github.com/user/repo.git');
     });
   });

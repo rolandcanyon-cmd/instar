@@ -34,6 +34,7 @@ import type { CapabilityRegistry, CommonBlocker } from './types.js';
 import { ResearchRateLimiter } from './ResearchRateLimiter.js';
 import { RecipientResolver, type RecipientContext } from './RecipientResolver.js';
 import { CustomReviewerLoader } from './CustomReviewerLoader.js';
+import { CanonicalState } from './CanonicalState.js';
 import type { ResponseReviewConfig, ChannelReviewConfig } from './types.js';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -99,7 +100,14 @@ export interface ResearchTriggerContext {
 export interface CoherenceGateOptions {
   config: ResponseReviewConfig;
   stateDir: string;
+  /** Anthropic API key. Empty string is allowed when `intelligence` is provided. */
   apiKey: string;
+  /**
+   * Optional IntelligenceProvider. When provided, all reviewers route LLM calls
+   * through this abstraction (subscription-compatible). When omitted, reviewers
+   * fall back to direct Anthropic API calls using `apiKey`.
+   */
+  intelligence?: import('./types.js').IntelligenceProvider;
   relationships?: { getContextForPerson(id: string): string | null } | null;
   adaptiveTrust?: { getProfile(): any } | null;
   /** Callback fired when a research agent should be spawned (fire-and-forget). */
@@ -136,6 +144,18 @@ const VALUE_DOC_CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes
 
 // ── Main Class ───────────────────────────────────────────────────────
 
+/**
+ * Ledger event for Integrated-Being v1 — fires on block decisions.
+ * Signal-only; never blocks on ledger write failure. Passes rule id ONLY
+ * (no rule context), per spec to avoid leaking bypass hints to later sessions.
+ */
+export interface CoherenceGateLedgerEvent {
+  ruleId: string;
+  sessionId: string;
+  channel: string;
+  timestamp: string;
+}
+
 export class CoherenceGate {
   private config: ResponseReviewConfig;
   private stateDir: string;
@@ -149,7 +169,9 @@ export class CoherenceGate {
   private reviewHistory: AuditLogEntry[] = [];
   private proposals: ReviewProposal[] = [];
   private researchRateLimiter: ResearchRateLimiter;
+  private canonicalState: CanonicalState;
   private onResearchTriggered?: (context: ResearchTriggerContext) => void;
+  private onLedgerEventSink: ((evt: CoherenceGateLedgerEvent) => void) | null = null;
   private static RETENTION_DAYS = 30;
 
   constructor(options: CoherenceGateOptions) {
@@ -157,6 +179,7 @@ export class CoherenceGate {
     this.stateDir = options.stateDir;
     this.onResearchTriggered = options.onResearchTriggered;
     this.researchRateLimiter = new ResearchRateLimiter({ stateDir: options.stateDir });
+    this.canonicalState = new CanonicalState({ stateDir: path.join(options.stateDir, 'state') });
 
     // Initialize PEL
     this.pel = new PolicyEnforcementLayer(options.stateDir);
@@ -165,10 +188,11 @@ export class CoherenceGate {
     this.gateReviewer = new GateReviewer(options.apiKey, {
       model: options.config.gateModel ?? 'haiku',
       timeoutMs: 5_000,
+      intelligence: options.intelligence,
     });
 
     // Initialize built-in specialist reviewers
-    this.initializeReviewers(options.apiKey, options.config);
+    this.initializeReviewers(options.apiKey, options.config, options.intelligence);
 
     // Initialize recipient resolver
     this.recipientResolver = new RecipientResolver({
@@ -178,7 +202,29 @@ export class CoherenceGate {
     });
 
     // Load custom reviewers
-    this.loadCustomReviewers(options.apiKey);
+    this.loadCustomReviewers(options.apiKey, options.intelligence);
+  }
+
+  /**
+   * Register a ledger-event sink (Integrated-Being v1). Signal-only; thrown
+   * exceptions from the sink are swallowed. Called once during server wiring
+   * by registerLedgerEmitters().
+   */
+  setLedgerEventSink(sink: (evt: CoherenceGateLedgerEvent) => void): void {
+    this.onLedgerEventSink = sink;
+  }
+
+  /** Internal helper that safely fires the ledger event sink. */
+  private emitLedgerBlock(ruleId: string, sessionId: string, channel: string): void {
+    if (!this.onLedgerEventSink) return;
+    try {
+      this.onLedgerEventSink({
+        ruleId,
+        sessionId,
+        channel,
+        timestamp: new Date().toISOString(),
+      });
+    } catch { /* signal-only */ }
   }
 
   /**
@@ -248,6 +294,8 @@ export class CoherenceGate {
     if (pelResult.outcome === 'hard_block') {
       const feedback = this.composePELFeedback(pelResult);
       this.logAudit(sessionId, context, 'pel-block', [], 'PEL hard block');
+      // Integrated-Being: rule id only, no rule context. Spec §Write path §4.
+      this.emitLedgerBlock('PEL_HARD_BLOCK', sessionId, context.channel);
       return {
         pass: false,
         feedback,
@@ -278,6 +326,9 @@ export class CoherenceGate {
     // ── Step 5: Load value documents (cached) ────────────────────
     const valueDocs = this.loadValueDocs();
 
+    // ── Step 5b: Load canonical state for fact-checking ───────────
+    const canonicalStateContext = this.loadCanonicalStateContext();
+
     // ── Step 6: Build review context ─────────────────────────────
     const reviewCtx: EscalationReviewContext = {
       message,
@@ -295,6 +346,7 @@ export class CoherenceGate {
         formality: recipientContext.formality,
         themes: recipientContext.themes,
       } : undefined,
+      canonicalStateContext: canonicalStateContext || undefined,
       capabilityRegistry: context.capabilityRegistry,
       autonomyLevel: context.autonomyLevel,
       jobBlockers: context.jobBlockers,
@@ -457,8 +509,6 @@ export class CoherenceGate {
         // Row 10, 12, 14: QUEUE for external
         if (channelConfig.queueOnFailure) {
           this.logAudit(sessionId, context, 'queued', auditViolations, `${llmVerdict}: queued`);
-          // For now, queue-and-hold is implemented by returning pass:false
-          // In production, this would integrate with a message queue
           return {
             pass: false,
             feedback: '[unreviewed] Review system temporarily unavailable. Message held for review.',
@@ -467,8 +517,20 @@ export class CoherenceGate {
             _outcome: 'queue',
           };
         }
+        // Fail-closed for external channels even without queueOnFailure,
+        // unless explicitly configured as failOpen
+        if (channelConfig.failOpen === false || channelConfig.failOpen === undefined) {
+          this.logAudit(sessionId, context, 'block-failclosed', auditViolations, `${llmVerdict}: fail-closed (external)`);
+          return {
+            pass: false,
+            feedback: '[unreviewed] Review system unavailable. External message blocked for safety.',
+            issueCategories: ['INFRASTRUCTURE'],
+            _auditViolations: auditViolations,
+            _outcome: 'block-failclosed',
+          };
+        }
       }
-      // Row 11, 13, 15: fail-open for internal
+      // Row 11, 13, 15: fail-open for internal (or explicitly failOpen external)
       this.logAudit(sessionId, context, 'pass-failopen', auditViolations, `${llmVerdict}: fail-open`);
       return {
         pass: true,
@@ -483,6 +545,10 @@ export class CoherenceGate {
       const feedback = this.composeFeedback(blockResults, warnResults, retryState.retryCount, maxRetries);
       retryState.lastViolations = auditViolations;
       this.logAudit(sessionId, context, 'block', auditViolations, `Block: retry ${retryState.retryCount}/${maxRetries}`);
+      // Integrated-Being: emit rule id ONLY (no context). Use the first block
+      // reviewer's name as the rule id, consistent with existing audit logs.
+      const ruleId = blockResults[0]?.reviewer ?? 'COHERENCE_BLOCK';
+      this.emitLedgerBlock(ruleId, sessionId, context.channel);
       return {
         pass: false,
         feedback,
@@ -530,7 +596,11 @@ export class CoherenceGate {
 
   // ── Reviewer Management ────────────────────────────────────────────
 
-  private initializeReviewers(apiKey: string, config: ResponseReviewConfig): void {
+  private initializeReviewers(
+    apiKey: string,
+    config: ResponseReviewConfig,
+    intelligence?: import('./types.js').IntelligenceProvider,
+  ): void {
     const defaultModel = config.reviewerModel ?? 'haiku';
     const overrides = config.reviewerModelOverrides ?? {};
 
@@ -554,11 +624,14 @@ export class CoherenceGate {
       const mode = reviewerConfig?.mode ?? 'block';
       const timeoutMs = config.timeoutMs ?? 8_000;
 
-      this.reviewers.set(name, new cls(apiKey, { model, mode, timeoutMs }));
+      this.reviewers.set(name, new cls(apiKey, { model, mode, timeoutMs, intelligence }));
     }
   }
 
-  private loadCustomReviewers(apiKey: string): void {
+  private loadCustomReviewers(
+    apiKey: string,
+    intelligence?: import('./types.js').IntelligenceProvider,
+  ): void {
     const loader = new CustomReviewerLoader(this.stateDir);
     // Custom reviewer loading is best-effort — don't break startup
     try {
@@ -572,7 +645,7 @@ export class CoherenceGate {
 
         // Dynamic reviewer using the spec's prompt
         const reviewer = new DynamicReviewer(spec.name, apiKey, spec.prompt, spec.contextRequirements, {
-          model, mode, timeoutMs: this.config.timeoutMs ?? 8_000,
+          model, mode, timeoutMs: this.config.timeoutMs ?? 8_000, intelligence,
         });
         this.reviewers.set(spec.name, reviewer);
       }
@@ -766,6 +839,45 @@ export class CoherenceGate {
 
     this.valueDocCache = { agentValues, userValues, orgValues, loadedAt: Date.now() };
     return this.valueDocCache;
+  }
+
+  /**
+   * Load canonical state context for fact-checking reviewers.
+   * Returns a compact summary of known projects, URLs, and facts
+   * that reviewers can cross-reference against agent claims.
+   */
+  private loadCanonicalStateContext(): string | null {
+    try {
+      const projects = this.canonicalState.getProjects();
+      const facts = this.canonicalState.getQuickFacts();
+
+      if (projects.length === 0 && facts.length === 0) return null;
+
+      const lines: string[] = [];
+
+      if (projects.length > 0) {
+        lines.push('Known projects (from canonical registry):');
+        for (const p of projects) {
+          const parts = [`  - ${p.name}`];
+          if (p.dir) parts.push(`dir: ${p.dir}`);
+          if (p.deploymentTargets?.length) parts.push(`deploys: ${p.deploymentTargets.join(', ')}`);
+          if (p.gitRemote) parts.push(`git: ${p.gitRemote}`);
+          lines.push(parts.join(' | '));
+        }
+      }
+
+      if (facts.length > 0) {
+        lines.push('');
+        lines.push('Known facts (from canonical registry):');
+        for (const f of facts.slice(0, 10)) {
+          lines.push(`  - Q: ${f.question} → A: ${f.answer}`);
+        }
+      }
+
+      return lines.join('\n');
+    } catch {
+      return null;
+    }
   }
 
   /**

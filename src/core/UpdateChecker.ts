@@ -19,6 +19,7 @@ import type { UpdateInfo, UpdateResult } from './types.js';
 import { PostUpdateMigrator } from './PostUpdateMigrator.js';
 import type { MigratorConfig } from './PostUpdateMigrator.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/JKHeadley/instar/releases';
 
@@ -278,8 +279,12 @@ export class UpdateChecker {
         let baseArgs: string[] = [];
         const shadowCliJs = path.join(shadowDir, 'node_modules', 'instar', 'dist', 'cli.js');
         if (fs.existsSync(shadowCliJs)) {
-          // Run the exact installed cli.js with the current Node.js runtime
-          cmd = process.execPath;
+          // Run the exact installed cli.js with the current Node.js runtime.
+          // Guard: process.execPath can point at a deleted binary when Node was
+          // upgraded while this process was still running (common on Homebrew —
+          // Cellar/node@22/22.22.2/bin/node vanishes after `brew upgrade node`).
+          // Fall back to 'node' on PATH when the resolved execPath is gone.
+          cmd = fs.existsSync(process.execPath) ? process.execPath : 'node';
           baseArgs = [shadowCliJs];
         }
 
@@ -617,7 +622,7 @@ export class UpdateChecker {
       fs.writeFileSync(tmpPath, JSON.stringify(info, null, 2));
       fs.renameSync(tmpPath, this.stateFile);
     } catch (err) {
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/core/UpdateChecker.ts:625' }); } catch { /* ignore */ }
       throw err;
     }
   }
@@ -634,7 +639,7 @@ export class UpdateChecker {
 
   private clearRollbackInfo(): void {
     if (fs.existsSync(this.rollbackFile)) {
-      fs.unlinkSync(this.rollbackFile);
+      SafeFsExecutor.safeUnlinkSync(this.rollbackFile, { operation: 'src/core/UpdateChecker.ts:643' });
     }
   }
 }

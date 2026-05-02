@@ -21,11 +21,25 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
+import { SafeGitExecutor } from './SafeGitExecutor.js';
 import { fileURLToPath } from 'node:url';
 import { TreeGenerator } from '../knowledge/TreeGenerator.js';
 import { HTTP_HOOK_TEMPLATES, buildHttpHookSettings } from '../data/http-hook-templates.js';
 import { getMigrationDefaults, applyDefaults } from '../config/ConfigDefaults.js';
 import { installBuiltinSkills } from '../commands/init.js';
+import {
+  ELIGIBILITY_SCHEMA_SQL,
+  ELIGIBILITY_SCHEMA_SQL_SHA256,
+  PUSH_GATE_SH,
+  PUSH_GATE_SH_SHA256,
+  INSTAR_PR_GATE_WORKFLOW_YML,
+  INSTAR_PR_GATE_WORKFLOW_YML_SHA256,
+  PR_GATE_SETUP_MD,
+  PR_GATE_SETUP_MD_SHA256,
+} from '../data/pr-gate-artifacts.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,13 +83,171 @@ export class PostUpdateMigrator {
     this.migrateScripts(result);
     this.migrateSettings(result);
     this.migrateConfig(result);
+    this.migratePrPipelineArtifacts(result);
+    this.migrateBackupManifest(result);
     this.migrateGitignore(result);
     this.migrateBuiltinSkills(result);
+    this.migrateSkillPortHardcoding(result);
     this.migrateSelfKnowledgeTree(result);
     this.migrateSoulMd(result);
     this.migrateAgentMdSections(result);
+    this.migrateContextDeathAntiPattern(result);
 
     return result;
+  }
+
+  // ── Context-death anti-pattern (PR1 — context-death-pitfall-
+  //    prevention spec § (a)) ────────────────────────────────────────
+  //
+  // Injects the "Context-Death Self-Stop" anti-pattern marker block
+  // into CLAUDE.md (under "Critical Anti-Patterns") and AGENT.md
+  // (under "My Principles") when absent. Idempotent: if the marker
+  // is already present, nothing happens. Honors .instar/identity-
+  // pins.json — if an entry exists for the marker id, the block is
+  // skipped (user has customized).
+  //
+  // The marker is a literal HTML comment pair:
+  //   <!-- INSTAR:ANTI-PATTERN-CONTEXT-DEATH -->
+  //   ...content...
+  //   <!-- /INSTAR:ANTI-PATTERN-CONTEXT-DEATH -->
+  //
+  // Pin file format (local, agent-side only):
+  //   { "INSTAR:ANTI-PATTERN-CONTEXT-DEATH": { "contentHash": "sha256...",
+  //                                             "pinnedAt": "<ISO>" } }
+  private migrateContextDeathAntiPattern(result: MigrationResult): void {
+    const markerId = 'INSTAR:ANTI-PATTERN-CONTEXT-DEATH';
+    const pins = this.readIdentityPins();
+
+    if (pins[markerId]) {
+      result.skipped.push(`${markerId}: pinned in .instar/identity-pins.json — skip`);
+      return;
+    }
+
+    const claudeBlock = [
+      `<!-- ${markerId} -->`,
+      '**"Context-Death Self-Stop"** — Do not self-terminate mid-plan citing context preservation, context-window concerns, or "let\'s continue in a fresh session" when durable artifacts for the plan exist on disk (committed code, plan files, ledger rows). Compaction-recovery re-injects identity, memory, and recent context automatically; worst case is a ~30s re-read of the plan file. Legitimate stops: real design questions, missing information only the user can provide, genuine errors, completion. Context-preservation is NOT a legitimate stop reason on its own. If you catch yourself reaching for it, check the durable artifact instead and keep going.',
+      `<!-- /${markerId} -->`,
+    ].join('\n');
+
+    const agentBlock = [
+      `<!-- ${markerId} -->`,
+      '**No context-death self-stops.** I do not self-terminate mid-plan citing context preservation, context-window concerns, or "let\'s continue in a fresh session" when durable artifacts (committed code, plan files, ledger rows) exist on disk. Compaction-recovery re-injects my identity, memory, and recent context automatically — worst case is a ~30s re-read of the plan file. Legitimate stops are real design questions, missing information only the user can provide, genuine errors, or completion. Context preservation is not a legitimate stop reason on its own. If I catch myself reaching for that rationalization, I verify the durable artifact exists and keep going.',
+      `<!-- /${markerId} -->`,
+    ].join('\n');
+
+    // ── CLAUDE.md — insert inside "Critical Anti-Patterns" section ──
+    const claudeMdPath = path.join(this.config.projectDir, 'CLAUDE.md');
+    if (fs.existsSync(claudeMdPath)) {
+      try {
+        let content = fs.readFileSync(claudeMdPath, 'utf-8');
+        if (!content.includes(markerId)) {
+          // Anchor: end of "Critical Anti-Patterns" (just before next
+          // `## ` heading) — falls back to append if section absent.
+          const antiPatternsIdx = content.indexOf('## Critical Anti-Patterns');
+          if (antiPatternsIdx >= 0) {
+            // Find the next top-level heading after Critical Anti-Patterns.
+            const afterHeader = antiPatternsIdx + '## Critical Anti-Patterns'.length;
+            const nextHeadingIdx = content.indexOf('\n## ', afterHeader);
+            const insertAt = nextHeadingIdx >= 0 ? nextHeadingIdx : content.length;
+            content = content.slice(0, insertAt) + '\n' + claudeBlock + '\n' + content.slice(insertAt);
+          } else {
+            content += '\n\n## Critical Anti-Patterns\n\n' + claudeBlock + '\n';
+          }
+          fs.writeFileSync(claudeMdPath, content);
+          result.upgraded.push(`CLAUDE.md: added ${markerId} marker block`);
+        } else {
+          result.skipped.push(`CLAUDE.md: ${markerId} marker already present`);
+        }
+      } catch (err) {
+        result.errors.push(`CLAUDE.md ${markerId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // ── AGENT.md — append the block inside "My Principles" section ──
+    const agentMdPath = path.join(this.config.stateDir, 'AGENT.md');
+    if (fs.existsSync(agentMdPath)) {
+      try {
+        let content = fs.readFileSync(agentMdPath, 'utf-8');
+        if (!content.includes(markerId)) {
+          const principlesIdx = content.indexOf('## My Principles');
+          if (principlesIdx >= 0) {
+            const afterHeader = principlesIdx + '## My Principles'.length;
+            const nextHeadingIdx = content.indexOf('\n## ', afterHeader);
+            const insertAt = nextHeadingIdx >= 0 ? nextHeadingIdx : content.length;
+            content = content.slice(0, insertAt) + '\n' + agentBlock + '\n' + content.slice(insertAt);
+          } else {
+            content += '\n\n## My Principles\n\n' + agentBlock + '\n';
+          }
+          fs.writeFileSync(agentMdPath, content);
+          result.upgraded.push(`AGENT.md: added ${markerId} marker block`);
+        } else {
+          result.skipped.push(`AGENT.md: ${markerId} marker already present`);
+        }
+      } catch (err) {
+        result.errors.push(`AGENT.md ${markerId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  /**
+   * Read `.instar/identity-pins.json` if present. Returns an object
+   * keyed by marker id; missing file or malformed JSON yields `{}`
+   * (soft-fail — a broken pin file shouldn't block every migration).
+   */
+  private readIdentityPins(): Record<string, { contentHash?: string; pinnedAt?: string }> {
+    const pinsPath = path.join(this.config.stateDir, 'identity-pins.json');
+    if (!fs.existsSync(pinsPath)) return {};
+    try {
+      const raw = fs.readFileSync(pinsPath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+      return {};
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Upgrade built-in skills that hardcoded a localhost port at install time
+   * to use a runtime-expandable ${INSTAR_PORT:-PORT} pattern.
+   *
+   * Background: installBuiltinSkills used to template the port at install.
+   * Users who later changed their server port ended up with stale URLs in
+   * their skills. This migration rewrites `http://localhost:NNNN/` to
+   * `http://localhost:${INSTAR_PORT:-NNNN}/` in the known-default skill set.
+   *
+   * Idempotent: skips files that already use the dynamic pattern.
+   * Scoped: only touches skills from the installBuiltinSkills set — custom
+   * skills are never modified.
+   */
+  private migrateSkillPortHardcoding(result: MigrationResult): void {
+    const defaultSkills = [
+      'evolve', 'learn', 'gaps', 'commit-action', 'feedback',
+      'triage-findings', 'reflect', 'coherence-audit', 'degradation-digest',
+      'state-integrity-check', 'memory-hygiene', 'guardian-pulse',
+      'session-continuity-check', 'git-sync',
+    ];
+    const skillsDir = path.join(this.config.projectDir, '.claude', 'skills');
+    const hardcodedRe = /http:\/\/localhost:(\d+)\//g;
+    const dynamicMarker = '${INSTAR_PORT:-';
+
+    for (const name of defaultSkills) {
+      const skillFile = path.join(skillsDir, name, 'SKILL.md');
+      if (!fs.existsSync(skillFile)) continue;
+      try {
+        const original = fs.readFileSync(skillFile, 'utf8');
+        if (original.includes(dynamicMarker)) continue;
+        if (!hardcodedRe.test(original)) continue;
+        hardcodedRe.lastIndex = 0;
+        const updated = original.replace(hardcodedRe, (_m, p) => `http://localhost:\${INSTAR_PORT:-${p}}/`);
+        if (updated !== original) {
+          fs.writeFileSync(skillFile, updated);
+          result.upgraded.push(`skills/${name}/SKILL.md (hardcoded port -> \${INSTAR_PORT:-NNNN})`);
+        }
+      } catch (err) {
+        result.errors.push(`skills/${name}/SKILL.md port migration: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   /**
@@ -220,6 +392,97 @@ export class PostUpdateMigrator {
     } catch (err) {
       result.errors.push(`auto-approve-permissions.js: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    try {
+      fs.writeFileSync(path.join(instarHooksDir, 'skill-usage-telemetry.sh'), this.getSkillUsageTelemetryHook(), { mode: 0o755 });
+      result.upgraded.push('hooks/instar/skill-usage-telemetry.sh (skill invocation tracking)');
+    } catch (err) {
+      result.errors.push(`skill-usage-telemetry.sh: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Build stop hook — structural enforcement for /build pipeline.
+    // Previously only installed once by init.ts, so existing agents that initialized
+    // before it was added never received the file, yet settings.json references it
+    // (registered by the /build skill). Result: silent "No such file or directory"
+    // errors on every Stop event. Overwrite on every upgrade to match the pattern
+    // used for every other instar-owned hook.
+    try {
+      fs.writeFileSync(path.join(instarHooksDir, 'build-stop-hook.sh'), this.getBuildStopHook(), { mode: 0o755 });
+      result.upgraded.push('hooks/instar/build-stop-hook.sh (/build pipeline structural enforcement)');
+    } catch (err) {
+      result.errors.push(`build-stop-hook.sh: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Hook event reporter — always overwrite (built-in infrastructure).
+    // Previously only installed-if-missing by migrateHttpHooksToCommandHooks, which left
+    // agents stuck on a broken template (the old template used CommonJS `require('http')`,
+    // which throws in ESM hosts where package.json has "type": "module").
+    try {
+      fs.writeFileSync(path.join(instarHooksDir, 'hook-event-reporter.js'), this.getHookEventReporterScript(), { mode: 0o755 });
+      result.upgraded.push('hooks/instar/hook-event-reporter.js (ESM-compatible http import)');
+    } catch (err) {
+      result.errors.push(`hook-event-reporter.js: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Validate settings.json hook references exist on disk. Structural invariant:
+    // every `command:` in settings.json hooks that resolves to a file under
+    // .instar/hooks/ must exist, otherwise every firing of that hook emits
+    // "No such file or directory" with no user-facing signal.
+    this.validateHookReferences(hooksDir, result);
+  }
+
+  /**
+   * Scan .claude/settings.json for hook `command:` entries that reference files
+   * under the instar hooks tree, and report any that don't exist on disk.
+   *
+   * Structural invariant check — runs at upgrade time, emits into result.errors
+   * so the upgrade log surfaces the drift. Not fatal: unknown hooks may be
+   * agent-custom (lives under .instar/hooks/custom/) and we don't want to wedge
+   * an upgrade on a reference we don't own.
+   */
+  validateHookReferences(hooksDir: string, result: MigrationResult): void {
+    const settingsPath = path.join(this.config.projectDir, '.claude', 'settings.json');
+    if (!fs.existsSync(settingsPath)) return;
+
+    let settings: unknown;
+    try {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    } catch (err) {
+      result.errors.push(`settings.json parse (hook-reference validation): ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const hooksSection = (settings as { hooks?: Record<string, unknown> }).hooks;
+    if (!hooksSection || typeof hooksSection !== 'object') return;
+
+    const missing: string[] = [];
+    for (const [event, entries] of Object.entries(hooksSection)) {
+      if (!Array.isArray(entries)) continue;
+      for (const entry of entries as Array<{ hooks?: Array<{ command?: string }> }>) {
+        const hookList = Array.isArray(entry?.hooks) ? entry.hooks : [];
+        for (const hook of hookList) {
+          const cmd = typeof hook?.command === 'string' ? hook.command : '';
+          if (!cmd) continue;
+          // Extract a path that looks like `.instar/hooks/...` from the command.
+          // Matches bash .instar/hooks/instar/foo.sh, node .instar/hooks/instar/foo.js,
+          // or any direct reference to a file path under the hooks tree. Custom hooks
+          // live under .instar/hooks/custom/ and are skipped — the agent owns them.
+          const match = cmd.match(/(?:^|\s)(\.instar\/hooks\/instar\/[^\s"]+)/);
+          if (!match) continue;
+          const relPath = match[1];
+          const abs = path.join(this.config.projectDir, relPath);
+          if (!fs.existsSync(abs)) {
+            missing.push(`${event}: ${relPath} (referenced in settings.json, not found on disk)`);
+          }
+        }
+      }
+    }
+
+    if (missing.length > 0) {
+      for (const m of missing) {
+        result.errors.push(`hook-reference-missing — ${m}`);
+      }
+    }
   }
 
   /**
@@ -259,7 +522,7 @@ export class PostUpdateMigrator {
       try {
         // Move built-in hooks to instar/ — they'll be overwritten by the current
         // migrateHooks() call anyway, but cleaning up the old location is important
-        fs.unlinkSync(oldPath);
+        SafeFsExecutor.safeUnlinkSync(oldPath, { operation: 'src/core/PostUpdateMigrator.ts:524' });
       } catch {
         // If we can't remove, it's not critical — the new hooks will be written
         // to instar/ regardless
@@ -505,7 +768,7 @@ export class PostUpdateMigrator {
       matcher: '',
       hooks: [{
         type: 'command',
-        command: 'node .instar/hooks/instar/auto-approve-permissions.js',
+        command: 'node ${CLAUDE_PROJECT_DIR}/.instar/hooks/instar/auto-approve-permissions.js',
         timeout: 5000,
       }],
     });
@@ -525,21 +788,21 @@ export class PostUpdateMigrator {
   ): boolean {
     let patched = false;
 
-    // 1. Deploy full autonomous skill directory (skill.md, hooks/, scripts/) if missing
+    // 1. Deploy full autonomous skill directory (SKILL.md, hooks/, scripts/) if missing
     const skillDir = path.join(this.config.projectDir, '.claude', 'skills', 'autonomous');
     const skillHooksDir = path.join(skillDir, 'hooks');
     const hookScript = path.join(skillHooksDir, 'autonomous-stop-hook.sh');
     const hooksJson = path.join(skillHooksDir, 'hooks.json');
-    const skillMd = path.join(skillDir, 'skill.md');
+    const skillMd = path.join(skillDir, 'SKILL.md');
 
     const bundledSkillDir = path.join(path.dirname(path.dirname(__dirname)), '.claude', 'skills', 'autonomous');
     if (fs.existsSync(bundledSkillDir)) {
-      // Deploy skill.md if missing
-      const bundledSkillMd = path.join(bundledSkillDir, 'skill.md');
+      // Deploy SKILL.md if missing
+      const bundledSkillMd = path.join(bundledSkillDir, 'SKILL.md');
       if (!fs.existsSync(skillMd) && fs.existsSync(bundledSkillMd)) {
         fs.mkdirSync(skillDir, { recursive: true });
         fs.copyFileSync(bundledSkillMd, skillMd);
-        result.upgraded.push('.claude/skills/autonomous/skill.md: deployed skill prompt');
+        result.upgraded.push('.claude/skills/autonomous/SKILL.md: deployed skill prompt');
         patched = true;
       }
 
@@ -580,7 +843,7 @@ export class PostUpdateMigrator {
       const filesToUpdate = [
         { src: 'hooks/autonomous-stop-hook.sh', dst: hookScript, executable: true },
         { src: 'scripts/setup-autonomous.sh', dst: path.join(skillDir, 'scripts', 'setup-autonomous.sh'), executable: true },
-        { src: 'skill.md', dst: skillMd, executable: false },
+        { src: 'SKILL.md', dst: skillMd, executable: false },
       ];
       for (const { src, dst, executable } of filesToUpdate) {
         if (fs.existsSync(dst)) {
@@ -612,7 +875,7 @@ export class PostUpdateMigrator {
         matcher: '',
         hooks: [{
           type: 'command',
-          command: 'bash .claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
+          command: 'bash ${CLAUDE_PROJECT_DIR}/.claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
           timeout: 10000,
         }],
       });
@@ -627,7 +890,8 @@ export class PostUpdateMigrator {
    * Replace HTTP hooks with command hooks that use hook-event-reporter.js.
    * Claude Code HTTP hooks (type: "http") silently fail to fire as of v2.1.78.
    * This migration converts them to command hooks which reliably fire.
-   * Also installs the hook-event-reporter.js script if missing.
+   * The hook-event-reporter.js script itself is installed by migrateHooks()
+   * (always-overwrite pattern for built-in hooks).
    */
   private migrateHttpHooksToCommandHooks(
     hooks: Record<string, unknown[]>,
@@ -636,7 +900,7 @@ export class PostUpdateMigrator {
     let patched = false;
     const commandHook = {
       type: 'command',
-      command: 'node .instar/hooks/instar/hook-event-reporter.js',
+      command: 'node ${CLAUDE_PROJECT_DIR}/.instar/hooks/instar/hook-event-reporter.js',
       timeout: 3000,
     };
 
@@ -675,22 +939,8 @@ export class PostUpdateMigrator {
       }
     }
 
-    // Install the hook-event-reporter.js script if it doesn't exist
-    const hooksDir = path.join(this.config.stateDir, 'hooks', 'instar');
-    const reporterPath = path.join(hooksDir, 'hook-event-reporter.js');
-    if (!fs.existsSync(reporterPath)) {
-      try {
-        fs.mkdirSync(hooksDir, { recursive: true });
-        // Import the script content inline to avoid circular dependency
-        const script = this.getHookEventReporterScript();
-        fs.writeFileSync(reporterPath, script, { mode: 0o755 });
-        if (!patched) {
-          result.upgraded.push('.instar/hooks/instar/hook-event-reporter.js installed');
-        }
-      } catch (err) {
-        result.errors.push(`hook-event-reporter.js install: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+    // The hook-event-reporter.js script is installed unconditionally by migrateHooks()
+    // (always-overwrite pattern for built-in hooks). No install needed here.
 
     if (patched) {
       result.upgraded.push('.claude/settings.json: replaced HTTP hooks with command hooks (HTTP hooks silently fail in Claude Code <=2.1.78)');
@@ -706,8 +956,11 @@ export class PostUpdateMigrator {
 // Claude Code HTTP hooks (type: "http") silently fail to fire as of v2.1.78.
 // This command hook achieves the same result: POST hook event data to the
 // Instar server, which populates claudeSessionId for session resumption.
-
-const http = require('http');
+//
+// NOTE: Uses \`await import('node:http')\` instead of \`require('http')\` so this
+// script works regardless of the host package.json's module type. A plain
+// \`require\` throws in ESM scope (when the host has "type": "module"); a plain
+// \`import\` is a syntax error in CJS scope. Dynamic import works in both.
 
 const serverUrl = process.env.INSTAR_SERVER_URL || 'http://localhost:4042';
 const authToken = process.env.INSTAR_AUTH_TOKEN || '';
@@ -719,8 +972,9 @@ if (!authToken || !instarSid) {
 
 let data = '';
 process.stdin.on('data', chunk => data += chunk);
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   try {
+    const { request } = await import('node:http');
     const input = JSON.parse(data);
     const payload = JSON.stringify({
       event: input.hook_event || (input.tool_name ? 'PostToolUse' : 'Unknown'),
@@ -729,7 +983,7 @@ process.stdin.on('end', () => {
     });
 
     const url = new URL(serverUrl + '/hooks/events?instar_sid=' + instarSid);
-    const req = http.request({
+    const req = request({
       hostname: url.hostname,
       port: url.port,
       path: url.pathname + url.search,
@@ -1091,7 +1345,8 @@ The user has been talking to you (possibly for days). A generic greeting like "H
 - **Config API**: View: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/api/files/config\`
 - **Update paths conversationally**: \`curl -X PATCH -H "Authorization: Bearer $AUTH" -H "X-Instar-Request: 1" -H "Content-Type: application/json" http://localhost:${port}/api/files/config -d '{"allowedPaths":[".claude/","docs/","src/"]}'\`
 - **Generate a file link**: \`curl -H "Authorization: Bearer $AUTH" "http://localhost:${port}/api/files/link?path=.claude/CLAUDE.md"\`
-- **Default config**: Browsing enabled for \`.claude/\` and \`docs/\`. Editing disabled by default — prompt the user to enable it for safe paths.
+- **Download a file**: \`curl -H "Authorization: Bearer $AUTH" "http://localhost:${port}/api/files/download?path=.claude/CLAUDE.md" -O\`
+- **Default config**: Browsing and editing enabled for the entire project directory (\`./\`) by default.
 - **Never editable**: \`.claude/hooks/\`, \`.claude/scripts/\`, \`node_modules/\` are always read-only regardless of config.
 `;
       // Insert after Dashboard section
@@ -1136,20 +1391,65 @@ The user has been talking to you (possibly for days). A generic greeting like "H
     const scriptsDir = path.join(this.config.projectDir, '.claude', 'scripts');
     fs.mkdirSync(scriptsDir, { recursive: true });
 
-    // Telegram reply script — install if Telegram configured and script missing
+    // Telegram reply script — install if missing, or migrate if the existing
+    // copy is an older version that lacks HTTP 408 handling. The 408-handling
+    // fix prevents duplicate-send cascades when the outbound-route request
+    // timeout races a successful tone-gate + Telegram API send (see 408 branch
+    // in the current template). Detection: the telltale is the literal
+    // 'HTTP_CODE" = "408"' branch — older versions don't have it.
     if (this.config.hasTelegram) {
       const scriptPath = path.join(scriptsDir, 'telegram-reply.sh');
+      const newContent = this.getTelegramReplyScript();
       if (!fs.existsSync(scriptPath)) {
         try {
-          fs.writeFileSync(scriptPath, this.getTelegramReplyScript(), { mode: 0o755 });
+          fs.writeFileSync(scriptPath, newContent, { mode: 0o755 });
           result.upgraded.push('scripts/telegram-reply.sh (Telegram outbound relay)');
         } catch (err) {
           result.errors.push(`telegram-reply.sh: ${err instanceof Error ? err.message : String(err)}`);
         }
       } else {
-        result.skipped.push('scripts/telegram-reply.sh (already exists)');
+        // SHA-based migrator (spec § Layer 1, migration). Replaces the
+        // marker-string match — which silently overwrote any user
+        // customization that happened to keep the shipped header line.
+        // The new flow is hash-only: if the on-disk SHA matches a
+        // known prior shipped version, back up + overwrite; if it
+        // matches the new template, no-op; otherwise leave the
+        // original alone, write a `.new` candidate, and surface a
+        // degradation event so the operator sees the customization
+        // and can resolve it.
+        this.migrateReplyScriptToPortConfig({
+          scriptPath,
+          newContent,
+          label: 'scripts/telegram-reply.sh',
+          stateDir: this.config.stateDir,
+          result,
+        });
       }
     }
+
+    // Slack reply script — file-presence gated (migrator has no hasSlack
+    // signal and init.ts doesn't install this one; scripts get deployed
+    // through the template manifest). If the script is present and matches
+    // the shipped header but lacks 408 handling, migrate it. Custom scripts
+    // are preserved by the shipped-marker check.
+    this.migrateReplyScriptTo408({
+      scriptPath: path.join(scriptsDir, 'slack-reply.sh'),
+      templateFilename: 'slack-reply.sh',
+      shippedMarker: 'slack-reply.sh — Send a message to a Slack channel via the instar server',
+      label: 'scripts/slack-reply.sh',
+      result,
+    });
+
+    // WhatsApp reply script — lives in .instar/scripts/ per init.ts, not
+    // .claude/scripts/. File-presence gated same as Slack.
+    const whatsappScriptsDir = path.join(this.config.stateDir, 'scripts');
+    this.migrateReplyScriptTo408({
+      scriptPath: path.join(whatsappScriptsDir, 'whatsapp-reply.sh'),
+      templateFilename: 'whatsapp-reply.sh',
+      shippedMarker: 'whatsapp-reply.sh — Send a message back to a WhatsApp JID via instar server',
+      label: 'scripts/whatsapp-reply.sh',
+      result,
+    });
 
     // Health watchdog — install if missing
     const watchdogPath = path.join(scriptsDir, 'health-watchdog.sh');
@@ -1222,7 +1522,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
 
     const sessionStartHook = {
       type: 'command',
-      command: 'bash .instar/hooks/instar/session-start.sh',
+      command: 'bash ${CLAUDE_PROJECT_DIR}/.instar/hooks/instar/session-start.sh',
       timeout: 5,
     };
 
@@ -1253,7 +1553,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
         matcher: '',
         hooks: [{
           type: 'command',
-          command: 'bash .instar/hooks/instar/telegram-topic-context.sh',
+          command: 'bash ${CLAUDE_PROJECT_DIR}/.instar/hooks/instar/telegram-topic-context.sh',
           timeout: 5000,
         }],
       });
@@ -1274,7 +1574,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
         matcher: 'mcp__.*',
         hooks: [{
           type: 'command',
-          command: 'node .instar/hooks/instar/external-operation-gate.js',
+          command: 'node ${CLAUDE_PROJECT_DIR}/.instar/hooks/instar/external-operation-gate.js',
           blocking: true,
           timeout: 5000,
         }],
@@ -1322,6 +1622,27 @@ The user has been talking to you (possibly for days). A generic greeting like "H
         }
         patched = true;
         result.upgraded.push('.claude/settings.json: migrated compaction hook from Notification to SessionStart');
+      }
+    }
+
+    // Ensure PostToolUse skill-usage-telemetry hook exists
+    {
+      const postToolUse = (hooks.PostToolUse || []) as Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>;
+      const hasSkillTelemetry = postToolUse.some(e =>
+        e.matcher === 'Skill' && e.hooks?.some(h => h.command?.includes('skill-usage-telemetry'))
+      );
+      if (!hasSkillTelemetry) {
+        postToolUse.push({
+          matcher: 'Skill',
+          hooks: [{
+            type: 'command' as never,
+            command: 'bash ${CLAUDE_PROJECT_DIR}/.instar/hooks/instar/skill-usage-telemetry.sh',
+            timeout: 3000,
+          } as never],
+        });
+        hooks.PostToolUse = postToolUse;
+        patched = true;
+        result.upgraded.push('.claude/settings.json: added PostToolUse skill-usage-telemetry hook');
       }
     }
 
@@ -1520,6 +1841,304 @@ The user has been talking to you (possibly for days). A generic greeting like "H
     // Fix .instar-level .gitignore (GitStateManager's internal git tracking)
     const instarGitignore = path.join(this.config.stateDir, '.gitignore');
     this.removeGitignoreEntry(instarGitignore, 'relationships/', result, '.instar/.gitignore');
+
+    // PR-REVIEW-HARDENING Phase A: ensure .instar/secrets/pr-gate/ is excluded
+    // from the project repo. The BackupManager.BLOCKED_PATH_PREFIXES guard
+    // (commit 1) defends the backup path; this entry defends the plain
+    // `git add .` path so contributors can't accidentally commit pr-gate
+    // secrets from the project directory.
+    this.addGitignoreEntry(projectGitignore, '.instar/secrets/pr-gate/', result, 'project .gitignore');
+  }
+
+  /**
+   * PR-REVIEW-HARDENING Phase A — ensure pr-gate state paths are backed up.
+   *
+   * Uses the `config.backup.includeFiles` plumbing shipped in commit 2
+   * (see src/core/BackupManager.ts + src/config/ConfigDefaults.ts). The
+   * BackupManager's constructor unions these entries with
+   * DEFAULT_CONFIG.includeFiles at snapshot time — this migrator just
+   * persists the extra entries into the user's config.json so they
+   * survive process restarts and git-sync.
+   *
+   * Paths added to `config.backup.includeFiles`:
+   *   - .instar/state/pr-pipeline.jsonl*       (pipeline event log + rotations)
+   *   - .instar/state/pr-gate/phase-a-sha.json (grandfathering-boundary SHA)
+   *   - .instar/state/pr-debounce.jsonl        (PR-wave debounce window)
+   *   - .instar/state/pr-debounce-archive.jsonl
+   *   - .instar/state/pr-cost-ledger.jsonl     (daily cost accounting)
+   *   - .instar/state/security.jsonl*          (auth + revocation events)
+   *
+   * Set-union semantics preserve user-added entries. Idempotent on
+   * re-run. Atomic write (temp → fsync → rename).
+   *
+   * Safety assertion: no entry under .instar/secrets/ is ever allowed
+   * into the merged list. BackupManager.BLOCKED_PATH_PREFIXES (commit 1)
+   * is the authoritative enforcement; this migrator-level assertion is
+   * defense-in-depth and logs a warning if violated.
+   */
+  private migrateBackupManifest(result: MigrationResult): void {
+    const PR_GATE_BACKUP_ENTRIES = [
+      '.instar/state/pr-pipeline.jsonl*',
+      '.instar/state/pr-gate/phase-a-sha.json',
+      '.instar/state/pr-debounce.jsonl',
+      '.instar/state/pr-debounce-archive.jsonl',
+      '.instar/state/pr-cost-ledger.jsonl',
+      '.instar/state/security.jsonl*',
+    ];
+
+    const configPath = path.join(this.config.stateDir, 'config.json');
+    if (!fs.existsSync(configPath)) {
+      result.skipped.push('config.backup.includeFiles (config.json not found)');
+      return;
+    }
+
+    let config: Record<string, unknown>;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (err) {
+      result.errors.push(`migrateBackupManifest read: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const backup = (config.backup ?? {}) as { includeFiles?: unknown };
+    const existing = Array.isArray(backup.includeFiles)
+      ? (backup.includeFiles as unknown[]).filter((e): e is string => typeof e === 'string')
+      : [];
+
+    const merged = Array.from(new Set<string>([...existing, ...PR_GATE_BACKUP_ENTRIES]));
+
+    for (const entry of merged) {
+      if (path.normalize(entry).startsWith('.instar/secrets/')) {
+        result.errors.push(
+          `migrateBackupManifest: includeFiles contains secrets-prefix entry "${entry}" — BackupManager will refuse it at snapshot time, but the entry should not be here`,
+        );
+      }
+    }
+
+    const added = merged.filter((e) => !existing.includes(e));
+    if (added.length === 0) {
+      result.skipped.push('config.backup.includeFiles (already up to date)');
+      return;
+    }
+
+    const nextConfig = { ...config, backup: { ...backup, includeFiles: merged } };
+
+    try {
+      const tmpPath = `${configPath}.migrate-backup-${process.pid}-${Date.now()}.tmp`;
+      const serialized = JSON.stringify(nextConfig, null, 2) + '\n';
+      const fd = fs.openSync(tmpPath, 'w', 0o600);
+      try {
+        fs.writeSync(fd, serialized);
+        fs.fsyncSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.renameSync(tmpPath, configPath);
+      result.upgraded.push(
+        `config.backup.includeFiles: added ${added.length} pr-gate state path(s)`,
+      );
+    } catch (err) {
+      result.errors.push(`migrateBackupManifest write: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * PR-REVIEW-HARDENING Phase A — ship pr-gate pipeline artifacts.
+   *
+   * Writes four shipped files:
+   *   - scripts/pr-gate/eligibility-schema.sql   (all agents)
+   *   - .claude/skills/fork-and-fix/scripts/push-gate.sh  (all agents, 0755)
+   *   - .github/workflows/instar-pr-gate.yml     (instar source repo only)
+   *   - docs/pr-gate-setup.md                    (instar source repo only)
+   *
+   * Each write is gated by sha256(content) === expectedHash. A tamperer
+   * who modifies the content string in the published JS without also
+   * updating the hash constant trips this assertion; migration aborts
+   * for that file and logs a critical error.
+   *
+   * Idempotent: files whose on-disk content already matches the shipped
+   * content are skipped (no rewrite).
+   *
+   * Phase A landing: endpoints are inert (prGate.phase='off') so these
+   * artifacts have no runtime consumer yet. Later phases activate them.
+   */
+  private migratePrPipelineArtifacts(result: MigrationResult): void {
+    // Schema — always shipped. Primary (gate-serving) agents instantiate
+    // the SQLite file from this schema in later phases.
+    this.writeShippedArtifact({
+      destPath: path.join(this.config.projectDir, 'scripts', 'pr-gate', 'eligibility-schema.sql'),
+      content: ELIGIBILITY_SCHEMA_SQL,
+      expectedSha256: ELIGIBILITY_SCHEMA_SQL_SHA256,
+      label: 'scripts/pr-gate/eligibility-schema.sql',
+      result,
+    });
+
+    // Push-gate — always shipped to every agent. Fork-and-fix skill
+    // sources it from here during push. Mode 0o755 so it's executable.
+    this.writeShippedArtifact({
+      destPath: path.join(
+        this.config.projectDir, '.claude', 'skills', 'fork-and-fix', 'scripts', 'push-gate.sh',
+      ),
+      content: PUSH_GATE_SH,
+      expectedSha256: PUSH_GATE_SH_SHA256,
+      label: '.claude/skills/fork-and-fix/scripts/push-gate.sh',
+      mode: 0o755,
+      result,
+    });
+
+    // .github/workflows and docs/pr-gate-setup are instar-source-only.
+    // Non-instar-source agents don't gain a workflow file for a gate
+    // they neither host nor are gated by.
+    if (!this.isInstarSourceRepo()) {
+      return;
+    }
+
+    this.writeShippedArtifact({
+      destPath: path.join(this.config.projectDir, '.github', 'workflows', 'instar-pr-gate.yml'),
+      content: INSTAR_PR_GATE_WORKFLOW_YML,
+      expectedSha256: INSTAR_PR_GATE_WORKFLOW_YML_SHA256,
+      label: '.github/workflows/instar-pr-gate.yml',
+      result,
+    });
+
+    this.writeShippedArtifact({
+      destPath: path.join(this.config.projectDir, 'docs', 'pr-gate-setup.md'),
+      content: PR_GATE_SETUP_MD,
+      expectedSha256: PR_GATE_SETUP_MD_SHA256,
+      label: 'docs/pr-gate-setup.md',
+      result,
+    });
+  }
+
+  /**
+   * Write a shipped artifact with content-hash verification. Idempotent:
+   * skips write if on-disk content already matches. Aborts with a logged
+   * error if sha256(content) !== expectedSha256 (detects post-publish
+   * tamper of one side without the other).
+   */
+  private writeShippedArtifact(opts: {
+    destPath: string;
+    content: string;
+    expectedSha256: string;
+    label: string;
+    mode?: number;
+    result: MigrationResult;
+  }): void {
+    const actual = crypto.createHash('sha256').update(opts.content).digest('hex');
+    if (actual !== opts.expectedSha256) {
+      const msg = `${opts.label}: shipped content hash mismatch — expected ${opts.expectedSha256}, got ${actual}. Migration aborted for this file.`;
+      opts.result.errors.push(msg);
+      console.error(`[PR-GATE CRITICAL] ${msg}`);
+      return;
+    }
+
+    try {
+      if (fs.existsSync(opts.destPath)) {
+        const existing = fs.readFileSync(opts.destPath, 'utf-8');
+        if (existing === opts.content) {
+          opts.result.skipped.push(`${opts.label} (already up to date)`);
+          return;
+        }
+      }
+
+      fs.mkdirSync(path.dirname(opts.destPath), { recursive: true });
+      const writeOpts = opts.mode !== undefined ? { mode: opts.mode } : undefined;
+      fs.writeFileSync(opts.destPath, opts.content, writeOpts);
+      opts.result.upgraded.push(opts.label);
+    } catch (err) {
+      opts.result.errors.push(`${opts.label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Detect whether this agent lives in the JKHeadley/instar source repo.
+   * Two-signal check: normalized `git remote get-url origin` (or upstream
+   * if origin is a fork) points at github.com/JKHeadley/instar, AND
+   * package.json.name === 'instar'. Both must match — the package-name
+   * check prevents writing the workflow to a fork that happens to have
+   * a different package name.
+   *
+   * Silent false on any error (no git, no package.json, parse failure):
+   * non-instar agents should NOT have workflow/docs files dropped on them.
+   */
+  private isInstarSourceRepo(): boolean {
+    const remoteIsInstar = (remote: string): boolean => {
+      const normalized = remote
+        .trim()
+        .replace(/^https:\/\//, '')
+        .replace(/^http:\/\//, '')
+        .replace(/^git@/, '')
+        .replace(/\.git$/, '')
+        .replace(':', '/')
+        .toLowerCase();
+      return /^github\.com\/jkheadley\/instar(\/|$)/.test(normalized);
+    };
+
+    const getRemote = (name: string): string | null => {
+      try {
+        return SafeGitExecutor.readSync(['remote', 'get-url', name], {
+          cwd: this.config.projectDir,
+          stdio: ['ignore', 'pipe', 'ignore'],
+          encoding: 'utf-8',
+          operation: 'src/core/PostUpdateMigrator.ts:getRemote',
+        });
+      } catch {
+        return null;
+      }
+    };
+
+    const origin = getRemote('origin');
+    const upstream = getRemote('upstream');
+    const remoteOk =
+      (origin !== null && remoteIsInstar(origin)) ||
+      (upstream !== null && remoteIsInstar(upstream));
+    if (!remoteOk) return false;
+
+    try {
+      const pkgPath = path.join(this.config.projectDir, 'package.json');
+      if (!fs.existsSync(pkgPath)) return false;
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8')) as { name?: string };
+      return pkg.name === 'instar';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Idempotently add a .gitignore entry. No-op if the entry is already
+   * present as an active (non-comment, non-blank) line. Creates the file
+   * if it doesn't exist. A comment line that happens to contain the entry
+   * text is NOT treated as present — only exact-match active lines count.
+   */
+  private addGitignoreEntry(gitignorePath: string, entry: string, result: MigrationResult, label: string): void {
+    try {
+      let content = '';
+      if (fs.existsSync(gitignorePath)) {
+        content = fs.readFileSync(gitignorePath, 'utf-8');
+      }
+
+      const alreadyPresent = content.split('\n').some((line) => {
+        const trimmed = line.trim();
+        if (trimmed.length === 0 || trimmed.startsWith('#')) return false;
+        return trimmed === entry;
+      });
+      if (alreadyPresent) return;
+
+      let nextContent = content;
+      if (nextContent.length > 0 && !nextContent.endsWith('\n')) {
+        nextContent += '\n';
+      }
+      nextContent += entry + '\n';
+
+      const dir = path.dirname(gitignorePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(gitignorePath, nextContent);
+      result.upgraded.push(`${label}: added ${entry}`);
+    } catch (err) {
+      result.errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private removeGitignoreEntry(gitignorePath: string, entry: string, result: MigrationResult, label: string): void {
@@ -1627,7 +2246,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
    * Get the content of a named hook template.
    * Used by init.ts to share canonical hook content without duplication.
    */
-  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review' | 'auto-approve-permissions'): string {
+  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review' | 'auto-approve-permissions' | 'skill-usage-telemetry' | 'build-stop-hook'): string {
     switch (name) {
       case 'session-start': return this.getSessionStartHook();
       case 'compaction-recovery': return this.getCompactionRecovery();
@@ -1642,6 +2261,8 @@ The user has been talking to you (possibly for days). A generic greeting like "H
       case 'telegram-topic-context': return this.getTelegramTopicContextHook();
       case 'response-review': return this.getResponseReviewHook();
       case 'auto-approve-permissions': return this.getAutoApprovePermissionsHook();
+      case 'skill-usage-telemetry': return this.getSkillUsageTelemetryHook();
+      case 'build-stop-hook': return this.getBuildStopHook();
     }
   }
 
@@ -1715,6 +2336,74 @@ for m in d.get('recentMessages', []):
     fi
   fi
 fi
+
+# INTEGRATED-BEING LEDGER — cross-session observations (see docs/specs/integrated-being-ledger-v1.md)
+# Fetches /shared-state/render and injects it if non-empty. Silent on absence /
+# auth failure — endpoint returns 503 when disabled, empty body when enabled
+# but has no entries. Either way we only echo when content is present.
+if [ -f "$INSTAR_DIR/config.json" ]; then
+  PORT=\${PORT:-\$(grep -o '"port":[0-9]*' "$INSTAR_DIR/config.json" | head -1 | cut -d':' -f2)}
+  TOKEN=\$(grep -o '"authToken":"[^"]*"' "$INSTAR_DIR/config.json" | head -1 | sed 's/"authToken":"//;s/"$//')
+  if [ -n "\$PORT" ] && [ -n "\$TOKEN" ]; then
+    SHARED_STATE=\$(curl -sf -H "Authorization: Bearer \$TOKEN" "http://localhost:\${PORT}/shared-state/render?limit=50" 2>/dev/null)
+    if [ -n "\$SHARED_STATE" ]; then
+      echo ""
+      echo "--- INTEGRATED-BEING (cross-session observations) ---"
+      echo "\$SHARED_STATE"
+      echo "--- END INTEGRATED-BEING ---"
+      echo ""
+    fi
+  fi
+fi
+
+# BEGIN integrated-being-v2
+# INTEGRATED-BEING V2 — session-write binding (see docs/specs/integrated-being-ledger-v2.md §3)
+# Generates a session UUID, registers with /shared-state/session-bind, writes the
+# token file with mode 0o600 + atomic rename, writes .ready marker, confirms via
+# session-bind-confirm. Silent on 503 (v2Enabled=false) — v1 behavior preserved.
+# Section bounded by markers for inject-mode migration to re-update in place.
+if [ -f "$INSTAR_DIR/config.json" ] && [ -n "\$PORT" ] && [ -n "\$TOKEN" ]; then
+  SID=\$(python3 -c "import uuid; print(str(uuid.uuid4()))" 2>/dev/null)
+  if [ -n "\$SID" ]; then
+    BIND_RESP=\$(curl -sf -X POST -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" \\
+      -d "{\\"sessionId\\":\\"\$SID\\"}" \\
+      "http://localhost:\${PORT}/shared-state/session-bind" 2>/dev/null)
+    if [ -n "\$BIND_RESP" ] && echo "\$BIND_RESP" | grep -q '"token"'; then
+      LEDGER_TOKEN=\$(echo "\$BIND_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token',''))" 2>/dev/null)
+      if [ -n "\$LEDGER_TOKEN" ]; then
+        BIND_DIR="$INSTAR_DIR/session-binding"
+        # Create dir under umask 077 to avoid a mode-race window where
+        # a concurrent process could stat/listdir before chmod lands.
+        ( umask 077; mkdir -p "\$BIND_DIR" )
+        chmod 0700 "\$BIND_DIR" 2>/dev/null
+        TOK_FILE="\$BIND_DIR/\${SID}.token"
+        TMP_FILE="\${TOK_FILE}.tmp.\$\$"
+        # Atomic write: umask-safe 0o600 mode, explicit chmod, fsync, rename.
+        ( umask 077; printf '%s' "\$LEDGER_TOKEN" > "\$TMP_FILE" )
+        chmod 0600 "\$TMP_FILE" 2>/dev/null
+        python3 -c "import os,sys; fd=os.open('\$TMP_FILE', os.O_RDONLY); os.fsync(fd); os.close(fd)" 2>/dev/null
+        mv "\$TMP_FILE" "\$TOK_FILE"
+        chmod 0600 "\$TOK_FILE" 2>/dev/null
+        # Mode verification — fail-CLOSED on anything other than 0600.
+        MODE=\$(python3 -c "import os,stat; print(oct(stat.S_IMODE(os.stat('\$TOK_FILE').st_mode))[-4:])" 2>/dev/null)
+        if [ "\$MODE" = "0600" ]; then
+          touch "\$BIND_DIR/\${SID}.ready"
+          chmod 0600 "\$BIND_DIR/\${SID}.ready" 2>/dev/null
+          curl -sf -X POST -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" \\
+            -d "{\\"sessionId\\":\\"\$SID\\"}" \\
+            "http://localhost:\${PORT}/shared-state/session-bind-confirm" -o /dev/null 2>/dev/null || true
+          export INSTAR_LEDGER_SESSION_ID="\$SID"
+          export INSTAR_LEDGER_TOKEN_PATH="\$TOK_FILE"
+        else
+          # Mode mismatch → deny for this session's lifetime, clean up evidence.
+          echo "[integrated-being-v2] token file mode \$MODE != 0600; denying session-write for this session" >&2
+          rm -f "\$TOK_FILE"
+        fi
+      fi
+    fi
+  fi
+fi
+# END integrated-being-v2
 
 # Identity summary (first 20 lines of AGENT.md — enough for name + role)
 if [ -f "$INSTAR_DIR/AGENT.md" ]; then
@@ -2526,12 +3215,20 @@ echo "=== END IDENTITY RECOVERY ==="
 
   private getDeferralDetectorHook(): string {
     return `#!/usr/bin/env node
-// Deferral detector — catches agents deferring work they could do themselves.
-// PreToolUse hook for Bash commands. Scans outgoing messages for deferral patterns.
+// Deferral detector — catches agents deferring work they could do themselves
+// AND catches agents proposing orphan-TODO follow-ups with no infrastructure.
+// PreToolUse hook for Bash commands. Scans outgoing messages for the patterns.
 // When detected, injects a due diligence checklist (does NOT block).
 //
-// Born from an agent saying "This is credential input I cannot do myself"
-// when it already had the token available via CLI tools.
+// Born from two failure modes:
+//   1) An agent saying "This is credential input I cannot do myself" when it
+//      already had the token available via CLI tools.
+//   2) An agent saying "queue for next session" / "loop back later" / "we
+//      can pick this up in a follow-up" with no /schedule cron and no
+//      /commit-action tracker — the orphan-TODO trap that makes
+//      promised follow-through evaporate (incident: 2026-04-27, when
+//      Echo proposed exactly this pattern after Layer 1 of a multi-layer
+//      build shipped without infra to ensure follow-on layers landed).
 
 let data = '';
 process.stdin.on('data', chunk => data += chunk);
@@ -2553,8 +3250,8 @@ process.stdin.on('end', () => {
     // Exempt: genuinely human-only actions
     if (/password|captcha|legal|billing|payment credential/i.test(command)) process.exit(0);
 
-    // Deferral patterns
-    const patterns = [
+    // Inability / passing-the-buck patterns (original detector scope)
+    const inabilityPatterns = [
       { re: /(?:I |i )(?:can'?t|cannot|am (?:not |un)able to)/i, type: 'inability_claim' },
       { re: /(?:this |it )(?:requires|needs) (?:your|human|manual) (?:input|intervention|action)/i, type: 'human_required' },
       { re: /you(?:'ll| will)? need to (?:do|handle|complete|input|enter|run|execute|click)/i, type: 'directing_human' },
@@ -2563,25 +3260,78 @@ process.stdin.on('end', () => {
       { re: /(?:blocker|blocking issue|can'?t proceed (?:without|until))/i, type: 'claimed_blocker' },
     ];
 
-    const matches = patterns.filter(p => p.re.test(command));
-    if (matches.length === 0) process.exit(0);
+    // Orphan-TODO patterns — proposing future-self follow-up without infrastructure.
+    // The danger: "later" without /schedule or /commit-action evaporates between
+    // sessions because there is no automatic carry-over.
+    const orphanPatterns = [
+      { re: /queue (?:them |it |this )?(?:up |for )?(?:the )?(?:next session|later|future|follow[- ]?up)/i, type: 'queue_for_later' },
+      { re: /(?:pick (?:this |it )?up|circle back|loop back|come back) (?:later|in (?:a |the )?(?:next|future|follow[- ]?up))/i, type: 'pick_up_later' },
+      { re: /(?:in |for )(?:a |the |another )?(?:follow[- ]?up|next session|future session|later session)/i, type: 'follow_up_session' },
+      { re: /(?:i'?ll |i will |i can |we (?:can|could) )(?:address|tackle|handle|fix|do|build|implement) (?:that |this |it )?(?:later|next time|in (?:the |a )?(?:future|follow[- ]?up))/i, type: 'self_promised_later' },
+      { re: /(?:deferred|defer|deferring) (?:to|until|for) (?:a |the |next |another )?(?:follow[- ]?up|session|later|future)/i, type: 'explicit_defer' },
+      { re: /(?:next time|future work|left for later|future iteration|TODO:?\\s*later)/i, type: 'future_work_marker' },
+    ];
 
-    const checklist = [
-      'DEFERRAL DETECTED — Before claiming you cannot do something, verify:',
-      '',
-      '1. Did you check --help or docs for the tool you are using?',
-      '2. Did you search for a token/API-based alternative to interactive auth?',
-      '3. Do you already have credentials/tokens that might work? (env vars, CLI auth, saved configs)',
-      '4. Can you use browser automation to complete interactive flows?',
-      '5. Is this GENUINELY beyond your access? (e.g., typing a password, solving a CAPTCHA)',
-      '',
-      'If ANY check might work — try it first.',
-      'The pattern: You are DESCRIBING work instead of DOING work.',
-      '',
-      'Detected: ' + matches.map(m => m.type).join(', '),
-    ].join('\\n');
+    // Anti-trigger: messages that DO back the deferral with infrastructure
+    // get a pass — they are not orphan TODOs. The same message that mentions
+    // /schedule, /commit-action, a cron expression, or a tracked deadline
+    // is doing it right.
+    const infrastructureBackedPatterns = [
+      /\\/schedule\\b/i,
+      /\\/commit[-_ ]?action\\b/i,
+      /commit-action\\b/i,
+      /scheduled (?:agent|run|cron|routine)/i,
+      /cron expression|cron schedule/i,
+      /tracked (?:commitment|deadline|action[- ]?item)/i,
+      /follow[- ]?up (?:PR|commit|branch)\\b/i,
+    ];
+    const isInfrastructureBacked = infrastructureBackedPatterns.some(p => p.test(command));
 
-    process.stdout.write(JSON.stringify({ decision: 'approve', additionalContext: checklist }));
+    const inabilityMatches = inabilityPatterns.filter(p => p.re.test(command));
+    const orphanMatches = isInfrastructureBacked
+      ? []  // Backed by real infra — not an orphan TODO.
+      : orphanPatterns.filter(p => p.re.test(command));
+
+    const allMatches = [...inabilityMatches, ...orphanMatches];
+    if (allMatches.length === 0) process.exit(0);
+
+    const checklist = [];
+
+    if (inabilityMatches.length > 0) {
+      checklist.push(
+        'DEFERRAL DETECTED — Before claiming you cannot do something, verify:',
+        '',
+        '1. Did you check --help or docs for the tool you are using?',
+        '2. Did you search for a token/API-based alternative to interactive auth?',
+        '3. Do you already have credentials/tokens that might work? (env vars, CLI auth, saved configs)',
+        '4. Can you use browser automation to complete interactive flows?',
+        '5. Is this GENUINELY beyond your access? (e.g., typing a password, solving a CAPTCHA)',
+        '',
+        'If ANY check might work — try it first.',
+        'The pattern: You are DESCRIBING work instead of DOING work.',
+      );
+    }
+
+    if (orphanMatches.length > 0) {
+      if (checklist.length > 0) checklist.push('');
+      checklist.push(
+        'ORPHAN-TODO TRAP DETECTED — You proposed deferring work to "later" or "next session" without backing infrastructure.',
+        '',
+        'Without one of these, the work will not actually happen:',
+        '  - /schedule a remote agent (cron or one-shot) to do the work',
+        '  - /commit-action with a deadline so it surfaces on the work queue',
+        '  - A same-branch follow-up commit chained to merge before you stop',
+        '  - Tying the deferred work to an existing tracked spec/issue',
+        '',
+        'If none of those apply, the deferral evaporates between sessions.',
+        'Either back the deferral with infrastructure NOW, or do the work NOW.',
+        '"I will get to it next time" is not infrastructure.',
+      );
+    }
+
+    checklist.push('', 'Detected: ' + allMatches.map(m => m.type).join(', '));
+
+    process.stdout.write(JSON.stringify({ decision: 'approve', additionalContext: checklist.join('\\n') }));
   } catch { /* don't break on errors */ }
   process.exit(0);
 });
@@ -2947,56 +3697,265 @@ process.stdin.on('end', async () => {
 `;
   }
 
+  /**
+   * Apply the HTTP 408 ambiguous-outcome migration to an existing reply script
+   * if and only if:
+   *   - the file exists (we never install these from here — only upgrade),
+   *   - its header matches the shipped version (so we don't stomp custom scripts),
+   *   - and it does NOT already handle HTTP 408.
+   *
+   * Used by migrateScripts() for slack-reply.sh and whatsapp-reply.sh. The
+   * telegram-reply.sh migration uses similar logic inline because it ALSO
+   * installs on first run (hasTelegram gate); these two are upgrade-only.
+   */
+  /**
+   * Known-shipped SHA-256 hashes of `src/templates/scripts/telegram-reply.sh`.
+   *
+   * The migrator overwrites an on-disk copy only when its SHA matches one
+   * of these — meaning it is a verbatim prior shipped version. Any other
+   * content (user customization, partial edits, accidental damage) is
+   * preserved. The new template is written alongside as `.new` and a
+   * degradation event is raised so the operator can resolve it manually.
+   *
+   * Add the prior shipped SHA when shipping a new template; never remove
+   * old SHAs (they remain valid migration sources).
+   */
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  public static readonly TELEGRAM_REPLY_PRIOR_SHIPPED_SHAS: ReadonlySet<string> = new Set([
+    // Tier-1 initial-init shipped version. Shipped at 362ff59d.
+    '98f70b86856e37f2719c39ecec152adf07ec30ce73c8134ab831b35c5b1c25b3',
+    // Rebrand to Instar (no behavioral change). Shipped at 686f5758.
+    '6ebc835e0077dc1cd52ec15820722b7059cf11bf5796775902f82034d43b29c4',
+    // Batch feedback fixes — auth headers, job topics race, session limits.
+    // Shipped at d28120f0.
+    'ce73a2fd1941381b63eb591d7c30ed761496202437a8c7fffa4926c6dfa2b7cb',
+    // Tone-gate inline check on outbound messaging (no 408 handling yet).
+    // Shipped at 2cb50a9a.
+    'f3aa0c8aae3f3275d0efb45b333ad83c14f7513a9e27c743039a9a113c0d16ff',
+    // Adds 120s timeout + HTTP 408 ambiguous-outcome path (no port-from-
+    // config yet). Shipped at a049fc5f.
+    '4f8787df1bf6384545dd7f19093fd77daa1bf993ed48a8ab02b6598d41a2007c',
+    // Pre-port-config version (HTTP 408 handling, INSTAR_PORT-or-4040 default,
+    // no agent-id header). Shipped through 2026-04-27.
+    '3d08c63c6280d0a7ba94a345c259673a461ee5c1d116cb47c95c7626c67cee23',
+    // Layer 1 shipped version (port-from-config + agent-id header, no
+    // recoverable-class detection). Shipped 2026-04-27 with the Layer 1
+    // PR #100. Adding here so the Layer 2 migration cleanly upgrades from
+    // a Layer-1-deployed copy without producing a `.new` candidate.
+    '5ec2eb19bf35310471f107cb54219097698abad1c11166eb14daf746a63a2f08',
+    // Layer 2 shipped version (durable SQLite queue + structured failure
+    // events). Shipped 2026-04-27 with the Layer 2 PR #101. Recorded here
+    // (rather than left as the implicit current-template SHA) because the
+    // verifier and lint both treat any deployed SHA matching this set as
+    // a known-shipped instar version, not user-modified content.
+    '371d7e8f4f72146bf8bd07115873bdbbaaf32e851ac6e1318ba5b8929cd06e68',
+  ]);
+
+  /**
+   * SHA-based migrator for telegram-reply.sh — replaces marker-string
+   * detection with content-hash detection. See spec
+   * docs/specs/telegram-delivery-robustness.md § Layer 1 "Migration".
+   *
+   * Three branches:
+   *   - on-disk SHA ∈ prior-shipped → back up and overwrite with new template.
+   *   - on-disk SHA == new-template SHA → no-op (idempotent).
+   *   - otherwise → write `<scriptPath>.new`, raise a
+   *     `relay-script-modified-locally` degradation event, leave the
+   *     original untouched.
+   */
+  private migrateReplyScriptToPortConfig(opts: {
+    scriptPath: string;
+    newContent: string;
+    label: string;
+    stateDir: string;
+    result: MigrationResult;
+  }): void {
+    let existing: string;
+    try {
+      existing = fs.readFileSync(opts.scriptPath, 'utf-8');
+    } catch (err) {
+      opts.result.errors.push(
+        `${opts.label} migration: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return;
+    }
+
+    const existingSha = crypto.createHash('sha256').update(existing).digest('hex');
+    const newSha = crypto.createHash('sha256').update(opts.newContent).digest('hex');
+
+    if (existingSha === newSha) {
+      // Idempotent path — already on the new template. Assert this by
+      // recording a no-op result; never write, never back up.
+      opts.result.skipped.push(`${opts.label} (already current)`);
+      return;
+    }
+
+    if (PostUpdateMigrator.TELEGRAM_REPLY_PRIOR_SHIPPED_SHAS.has(existingSha)) {
+      // Backup-then-overwrite. Backup directory lives under the agent's
+      // state dir (so it follows backup/restore semantics already
+      // configured for .instar/).
+      const backupDir = path.join(opts.stateDir, 'backups');
+      try {
+        fs.mkdirSync(backupDir, { recursive: true });
+        const backupPath = path.join(
+          backupDir,
+          `telegram-reply.sh.${Date.now()}`
+        );
+        fs.writeFileSync(backupPath, existing, { mode: 0o644 });
+        fs.writeFileSync(opts.scriptPath, opts.newContent, { mode: 0o755 });
+        opts.result.upgraded.push(
+          `${opts.label} (upgraded to port-from-config + agent-id binding; ` +
+          `prior version backed up to ${path.relative(opts.stateDir, backupPath)})`
+        );
+      } catch (err) {
+        opts.result.errors.push(
+          `${opts.label} migration: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      return;
+    }
+
+    // Unknown content (user-modified or unknown version). Write a `.new`
+    // candidate next to the original and raise a degradation event so
+    // the operator can resolve it without us stomping their changes.
+    //
+    // Idempotency: if a `.new` file already exists with byte-identical
+    // content (e.g., this is the second `instar update` against the same
+    // user-modified script), skip the rewrite and the degradation event
+    // so the operator doesn't get duplicate noise on every upgrade.
+    const candidatePath = `${opts.scriptPath}.new`;
+    let candidateAlreadyCurrent = false;
+    try {
+      const existingCandidate = fs.readFileSync(candidatePath, 'utf-8');
+      if (existingCandidate === opts.newContent) {
+        candidateAlreadyCurrent = true;
+      }
+    } catch {
+      // No existing .new file — fall through to write.
+    }
+
+    if (!candidateAlreadyCurrent) {
+      try {
+        fs.writeFileSync(candidatePath, opts.newContent, { mode: 0o755 });
+      } catch (err) {
+        opts.result.errors.push(
+          `${opts.label} migration: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return;
+      }
+
+      // Only fire the degradation event the first time we detect the
+      // drift OR when the new template content has shifted since the
+      // last `.new` write. Re-running the migrator on the same unknown
+      // on-disk SHA + same new template SHA is a no-op event-wise.
+      try {
+        const reporter = DegradationReporter.getInstance();
+        if (reporter && typeof reporter.report === 'function') {
+          reporter.report({
+            feature: 'relay-script-modified-locally',
+            primary: 'overwrite shipped relay script with new template',
+            fallback: 'wrote new template alongside as .new — operator review required',
+            reason:
+              `${opts.label} content does not match any prior shipped SHA ` +
+              `(found sha256:${existingSha.slice(0, 12)}…). New template ` +
+              `written to ${path.basename(candidatePath)}.`,
+            impact:
+              'Relay script keeps running with user-modified content; the ' +
+              'port-from-config + agent-id binding fix is NOT active until ' +
+              'the operator reconciles the .new file.',
+          });
+        }
+      } catch {
+        // DegradationReporter is best-effort; don't block migration on it.
+      }
+    }
+
+    opts.result.skipped.push(
+      `${opts.label} (user-modified — new version ` +
+      `${candidateAlreadyCurrent ? 'already' : ''} written to ${path.basename(candidatePath)})`
+    );
+  }
+
+  private migrateReplyScriptTo408(opts: {
+    scriptPath: string;
+    templateFilename: string;
+    shippedMarker: string;
+    label: string;
+    result: MigrationResult;
+  }): void {
+    if (!fs.existsSync(opts.scriptPath)) return; // Not installed — not our responsibility here
+    try {
+      const existing = fs.readFileSync(opts.scriptPath, 'utf-8');
+      const looksShipped = existing.includes(opts.shippedMarker);
+      const hasNewHandling = existing.includes('HTTP_CODE" = "408"');
+      if (!looksShipped || hasNewHandling) {
+        opts.result.skipped.push(`${opts.label} (already up to date or customized)`);
+        return;
+      }
+      const template = this.loadRelayTemplate(opts.templateFilename);
+      if (!template) {
+        opts.result.errors.push(`${opts.label}: template file not found`);
+        return;
+      }
+      fs.writeFileSync(opts.scriptPath, template, { mode: 0o755 });
+      opts.result.upgraded.push(`${opts.label} (upgraded to HTTP 408 ambiguous-outcome handling)`);
+    } catch (err) {
+      opts.result.errors.push(`${opts.label} migration: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Read a reply-script template from src/templates/scripts/.
+   * Returns null if the template file cannot be located (shouldn't happen in
+   * a healthy install). The caller is responsible for handling the null case.
+   */
+  private loadRelayTemplate(filename: string): string | null {
+    const modDir = path.dirname(new URL(import.meta.url).pathname);
+    const candidates = [
+      path.resolve(modDir, '..', 'templates', 'scripts', filename),
+      path.resolve(modDir, '..', '..', 'src', 'templates', 'scripts', filename),
+    ];
+    for (const candidate of candidates) {
+      if (fs.existsSync(candidate)) {
+        return fs.readFileSync(candidate, 'utf-8');
+      }
+    }
+    return null;
+  }
+
   private getTelegramReplyScript(): string {
+    // Read the canonical template from the templates directory. Keeping this
+    // in sync with src/commands/init.ts (scaffold-time installer) matters —
+    // both paths must ship the same HTTP 408 handling, or an upgraded agent
+    // would still duplicate-send if it re-ran init after the upgrade.
+    // Same pattern as getConvergenceCheck() above.
+    const template = this.loadRelayTemplate('telegram-reply.sh');
+    if (template !== null) {
+      return template;
+    }
+    // Fallback: minimal inline version that still handles HTTP 408 correctly.
+    // Used only if template file isn't found (shouldn't happen in a healthy
+    // install). The full-featured version — auth header, 422 tone-gate UX,
+    // 408 ambiguous-outcome — lives in src/templates/scripts/telegram-reply.sh.
     const port = this.config.port;
     return `#!/bin/bash
-# telegram-reply.sh — Send a message back to a Telegram topic via instar server.
-#
-# Usage:
-#   .claude/scripts/telegram-reply.sh TOPIC_ID "message text"
-#   echo "message text" | .claude/scripts/telegram-reply.sh TOPIC_ID
-#   cat <<'EOF' | .claude/scripts/telegram-reply.sh TOPIC_ID
-#   Multi-line message here
-#   EOF
-
+# telegram-reply.sh — fallback version (template file not found).
 TOPIC_ID="$1"
 shift
-
-if [ -z "$TOPIC_ID" ]; then
-  echo "Usage: telegram-reply.sh TOPIC_ID [message]" >&2
-  exit 1
-fi
-
-# Read message from args or stdin
-if [ $# -gt 0 ]; then
-  MSG="$*"
-else
-  MSG="$(cat)"
-fi
-
-if [ -z "$MSG" ]; then
-  echo "No message provided" >&2
-  exit 1
-fi
-
+MSG="\${*:-$(cat)}"
 PORT="\${INSTAR_PORT:-${port}}"
-
-# Escape for JSON
 JSON_MSG=$(printf '%s' "$MSG" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))' 2>/dev/null)
-if [ -z "$JSON_MSG" ]; then
-  JSON_MSG="$(printf '%s' "$MSG" | sed 's/\\\\\\\\/\\\\\\\\\\\\\\\\/g; s/"/\\\\\\\\"/g' | sed ':a;N;$!ba;s/\\\\n/\\\\\\\\n/g')"
-  JSON_MSG="\\"$JSON_MSG\\""
-fi
-
 RESPONSE=$(curl -s -w "\\n%{http_code}" -X POST "http://localhost:\${PORT}/telegram/reply/\${TOPIC_ID}" \\
   -H 'Content-Type: application/json' \\
   -d "{\\"text\\":\${JSON_MSG}}")
-
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 BODY=$(echo "$RESPONSE" | sed '$d')
-
 if [ "$HTTP_CODE" = "200" ]; then
   echo "Sent $(echo "$MSG" | wc -c | tr -d ' ') chars to topic $TOPIC_ID"
+elif [ "$HTTP_CODE" = "408" ]; then
+  echo "AMBIGUOUS (HTTP 408): server timed out; send may have completed — verify before retrying." >&2
+  echo "AMBIGUOUS (HTTP 408): outcome unknown — verify in conversation before retrying"
+  exit 0
 else
   echo "Failed (HTTP $HTTP_CODE): $BODY" >&2
   exit 1
@@ -3221,6 +4180,14 @@ let data = '';
 process.stdin.on('data', chunk => data += chunk);
 process.stdin.on('end', async () => {
   try {
+    // Never block headless/job sessions — no human to dismiss the block.
+    // INSTAR_SESSION_ID is set for all server-spawned sessions.
+    if (process.env.INSTAR_SESSION_ID && !process.env.TERM_PROGRAM) {
+      process.stdout.write(JSON.stringify({ decision: 'approve' }));
+      process.exit(0);
+      return;
+    }
+
     const state = loadState();
     const now = Date.now();
     const depth = state.implementationDepth || 0;
@@ -3821,6 +4788,123 @@ process.stdin.on('end', () => {
   } catch {}
   process.exit(0);
 });
+`;
+  }
+
+  private getSkillUsageTelemetryHook(): string {
+    return `#!/bin/bash
+# Skill Usage Telemetry — PostToolUse hook for Skill tool.
+#
+# Logs every skill invocation to .instar/skill-telemetry.jsonl
+# for future pattern detection (which skills are used, when, how often).
+#
+# Cross-pollinated from Dawn's Portal project (2026-04-09).
+# Lightweight: appends one JSONL line, no network calls.
+
+INPUT=$(cat)
+
+TOOL_NAME=$(echo "$INPUT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('tool_name',''))" 2>/dev/null)
+if [ "$TOOL_NAME" != "Skill" ]; then
+  exit 0
+fi
+
+INSTAR_DIR="\${CLAUDE_PROJECT_DIR:-.}/.instar"
+TELEMETRY_FILE="$INSTAR_DIR/skill-telemetry.jsonl"
+
+SKILL_NAME=$(echo "$INPUT" | python3 -c "import json,sys; print(json.load(sys.stdin).get('tool_input',{}).get('skill','unknown'))" 2>/dev/null)
+SKILL_ARGS=$(echo "$INPUT" | python3 -c "import json,sys; a=json.load(sys.stdin).get('tool_input',{}).get('args',''); print(a[:200])" 2>/dev/null)
+OUTPUT_LEN=$(echo "$INPUT" | python3 -c "import json,sys; print(len(str(json.load(sys.stdin).get('tool_output',''))))" 2>/dev/null)
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+SESSION_ID="\${INSTAR_SESSION_ID:-}"
+
+mkdir -p "$INSTAR_DIR"
+echo "{\\"timestamp\\":\\"$TIMESTAMP\\",\\"skill\\":\\"$SKILL_NAME\\",\\"args\\":\\"$SKILL_ARGS\\",\\"session_id\\":\\"$SESSION_ID\\",\\"output_length\\":$OUTPUT_LEN}" >> "$TELEMETRY_FILE"
+`;
+  }
+
+  private getBuildStopHook(): string {
+    // Canonical source: src/templates/hooks/build-stop-hook.sh
+    // If you edit either, keep them byte-identical — tests assert equality.
+    return `#!/bin/bash
+# Build Stop Hook — Structural enforcement for the /build pipeline.
+#
+# Prevents premature exit during active builds. Graduated protection:
+#   SMALL  (light):  3 reinforcements
+#   STANDARD (medium): 5 reinforcements
+#   LARGE  (heavy):  10 reinforcements
+#
+# Reads state from .instar/state/build/build-state.json.
+
+STATE_FILE=".instar/state/build/build-state.json"
+
+# No state file = no active build = allow exit
+if [ ! -f "\$STATE_FILE" ]; then
+  echo '{"decision":"approve"}'
+  exit 0
+fi
+
+# Read state
+PHASE=\$(python3 -c "import json; d=json.load(open('\$STATE_FILE')); print(d.get('phase','idle'))" 2>/dev/null)
+
+# Terminal phases — allow exit
+if [ "\$PHASE" = "complete" ] || [ "\$PHASE" = "failed" ] || [ "\$PHASE" = "escalated" ]; then
+  echo '{"decision":"approve"}'
+  exit 0
+fi
+
+# Check and update reinforcement counter
+RESULT=\$(python3 -c "
+import json, sys
+with open('\$STATE_FILE') as f:
+    state = json.load(f)
+
+protection = state.get('protection', {})
+max_r = protection.get('reinforcements', 5)
+used = state.get('reinforcementsUsed', 0)
+
+if used >= max_r:
+    print(json.dumps({'decision': 'approve'}))
+    sys.exit(0)
+
+state['reinforcementsUsed'] = used + 1
+with open('\$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+
+phase = state.get('phase', 'idle')
+task = state.get('task', 'unknown')
+label = protection.get('label', '?')
+steps = state.get('steps', [])
+total_tests = state.get('totalTests', 0)
+wt = state.get('worktree')
+
+prompts = {
+    'idle': 'Build initialized. Begin with Phase 0 (CLARIFY) or Phase 1 (PLAN).',
+    'clarify': 'In CLARIFY phase. Resolve ambiguity, then transition to PLAN.',
+    'planning': 'In PLAN phase. Complete plan with test strategy, then EXECUTE.',
+    'executing': 'In EXECUTE phase. Complete current step: code, tests, verify.',
+    'verifying': 'In VERIFY phase. Run independent verification and real-world tests.',
+    'fixing': 'In FIXING phase. Address findings, return to VERIFY.',
+    'hardening': 'In HARDEN phase. Complete observability checklists.',
+}
+
+hint = prompts.get(phase, 'Continue with current phase.')
+steps_info = ' | %d steps, %d tests' % (len(steps), total_tests) if steps else ''
+wt_info = ' | worktree: %s' % wt['path'] if wt else ''
+
+reason = (
+    '/build active. Phase: %s (%s, %d/%d reinforcements)%s%s\\n\\n'
+    'Task: %s\\n\\n%s\\n\\n'
+    'Use \\\`python3 playbook-scripts/build-state.py status\\\` to check state.\\n'
+    'Use \\\`python3 playbook-scripts/build-state.py transition <phase>\\\` to advance.\\n\\n'
+    'The build pipeline is not complete. Continue working.'
+) % (phase, label, state['reinforcementsUsed'], max_r, steps_info, wt_info, task, hint)
+
+print(json.dumps({'decision': 'block', 'reason': reason}))
+" 2>/dev/null)
+
+echo "\$RESULT"
+exit 0
 `;
   }
 

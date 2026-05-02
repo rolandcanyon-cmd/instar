@@ -18,13 +18,14 @@ import path from 'node:path';
 import os from 'node:os';
 import { mergeConfigWithSecrets, migrateSecrets } from '../../src/core/SecretMigrator.js';
 import { SecretStore } from '../../src/core/SecretStore.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'instar-config-merge-'));
 }
 
 function cleanup(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/config-secret-merge.test.ts:28' });
 }
 
 describe('Config + SecretStore merge', () => {

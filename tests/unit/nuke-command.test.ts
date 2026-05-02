@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('nuke command prerequisites', () => {
   let tmpDir: string;
@@ -18,7 +19,7 @@ describe('nuke command prerequisites', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/nuke-command.test.ts:22' });
   });
 
   it('detects when agent directory does not exist', () => {
@@ -57,7 +58,7 @@ describe('nuke command prerequisites', () => {
     fs.writeFileSync(path.join(stateDir, 'config.json'), '{}');
     fs.writeFileSync(path.join(stateDir, 'MEMORY.md'), '# Memory');
 
-    fs.rmSync(agentDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(agentDir, { recursive: true, force: true, operation: 'tests/unit/nuke-command.test.ts:62' });
     expect(fs.existsSync(agentDir)).toBe(false);
   });
 });

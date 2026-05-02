@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { initProject } from '../../src/commands/init.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('Fresh install: instar init <project-name>', () => {
   const testBase = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-fresh-'));
@@ -18,7 +19,7 @@ describe('Fresh install: instar init <project-name>', () => {
   const projectDir = path.join(testBase, projectName);
 
   afterAll(() => {
-    fs.rmSync(testBase, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(testBase, { recursive: true, force: true, operation: 'tests/integration/fresh-install.test.ts:22' });
   });
 
   it('creates project directory and all required files', async () => {
@@ -111,7 +112,7 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(fs.existsSync(jobsPath)).toBe(true);
 
     const jobs = JSON.parse(fs.readFileSync(jobsPath, 'utf-8'));
-    expect(jobs.length).toBe(26);
+    expect(jobs.length).toBe(27);
 
     const slugs = jobs.map((j: any) => j.slug);
     // Core jobs
@@ -150,6 +151,8 @@ describe('Fresh install: instar init <project-name>', () => {
     expect(slugs).toContain('overseer-maintenance');
     expect(slugs).toContain('overseer-infrastructure');
     expect(slugs).toContain('overseer-development');
+    // Layer 7 templates-drift verifier (telegram-delivery-robustness § 7)
+    expect(slugs).toContain('templates-drift-verifier');
   });
 
   it('installs behavioral hooks', () => {
@@ -252,7 +255,7 @@ describe('Existing project: instar init (no project name)', () => {
   const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'instar-existing-'));
 
   afterAll(() => {
-    fs.rmSync(testDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(testDir, { recursive: true, force: true, operation: 'tests/integration/fresh-install.test.ts:257' });
   });
 
   it('adds .instar/ to an existing directory without CLAUDE.md', async () => {
@@ -288,7 +291,7 @@ describe('Existing project: instar init (no project name)', () => {
     expect(result).toContain('This is my project.');
     expect(result).toContain('## Agent Infrastructure');
 
-    fs.rmSync(anotherDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(anotherDir, { recursive: true, force: true, operation: 'tests/integration/fresh-install.test.ts:294' });
   });
 
   it('does not re-append if already initialized', async () => {
@@ -303,6 +306,6 @@ describe('Existing project: instar init (no project name)', () => {
     const count = (result.match(/## Agent Infrastructure/g) || []).length;
     expect(count).toBe(1);
 
-    fs.rmSync(anotherDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(anotherDir, { recursive: true, force: true, operation: 'tests/integration/fresh-install.test.ts:310' });
   });
 });

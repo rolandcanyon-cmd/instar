@@ -25,6 +25,7 @@ import type {
   ConsentRecord,
 } from '../../src/core/types.js';
 import { UserManager } from '../../src/users/UserManager.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -35,7 +36,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  fs.rmSync(testDir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(testDir, { recursive: true, force: true, operation: 'tests/unit/user-profile-extended.test.ts:39' });
 });
 
 function makeMinimalProfile(id: string, overrides?: Partial<UserProfile>): UserProfile {

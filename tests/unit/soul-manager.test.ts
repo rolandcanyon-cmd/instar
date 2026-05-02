@@ -11,6 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { SoulManager, SoulError } from '../../src/core/SoulManager.js';
 import { generateSoulMd } from '../../src/scaffold/templates.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Test Setup ──────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ function createTestSetup(opts?: { skipInit?: boolean }): TestSetup {
     dir,
     stateDir,
     manager,
-    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+    cleanup: () => SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/soul-manager.test.ts:41' }),
   };
 }
 
@@ -317,7 +318,7 @@ describe('SoulManager', () => {
 
     it('reports no drift without init snapshot', () => {
       // Delete the init snapshot
-      fs.unlinkSync(path.join(setup.stateDir, 'state', 'soul.init.md'));
+      SafeFsExecutor.safeUnlinkSync(path.join(setup.stateDir, 'state', 'soul.init.md'), { operation: 'tests/unit/soul-manager.test.ts:322' });
 
       const drift = setup.manager.analyzeDrift();
       expect(drift.initSnapshotExists).toBe(false);

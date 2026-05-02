@@ -32,7 +32,8 @@ interface OutboundQueueItem {
 }
 
 const MAX_OUTBOUND_QUEUE = 100;
-const HEARTBEAT_TIMEOUT_MS = 3_600_000; // 1 hour — quiet channels have no events; WebSocket close handles real disconnections
+const HEARTBEAT_INTERVAL_MS = 30_000;   // Check connection health every 30s
+const DEAD_SILENCE_MS = 300_000;        // 5 min with no events → send liveness probe
 const MAX_BACKOFF_MS = 60_000;
 const TOO_MANY_WS_DELAY_MS = 30_000;
 
@@ -250,17 +251,52 @@ export class SocketModeClient {
 
   private _startHeartbeat(): void {
     this._clearHeartbeat();
+
     this.heartbeatTimer = setInterval(() => {
-      const elapsed = Date.now() - this.lastEventAt;
-      if (elapsed > HEARTBEAT_TIMEOUT_MS) {
-        console.warn('[slack-socket] No events for 1h — connection presumed dead, reconnecting');
-        if (this.ws) {
-          this.ws.close();
-          this.ws = null;
-        }
-        // Close event handler will trigger reconnect
+      // 1. Check if WebSocket is still in OPEN state
+      if (this.ws && this.ws.readyState !== WebSocket.OPEN) {
+        console.warn(`[slack-socket] WebSocket readyState=${this.ws.readyState} (not OPEN), forcing reconnect`);
+        this._forceReconnect();
+        return;
       }
-    }, HEARTBEAT_TIMEOUT_MS / 2); // Check every 30min
+
+      // 2. If no events for DEAD_SILENCE_MS, send a probe to test the connection.
+      //    Slack Socket Mode has no application-level ping/pong — Slack will
+      //    silently ignore any JSON we send. So we test with send(): if it
+      //    throws, the socket is dead at the OS level → force reconnect.
+      //    If send() succeeds, the TCP connection is alive — reset the silence
+      //    timer and check again later.
+      const sinceLastEvent = Date.now() - this.lastEventAt;
+      if (sinceLastEvent > DEAD_SILENCE_MS) {
+        console.log(`[slack-socket] No events for ${Math.round(sinceLastEvent / 60000)}m — sending liveness probe`);
+        try {
+          this.ws?.send('{"type":"ping"}');
+          // send() succeeded → TCP connection is alive. Reset silence timer
+          // so we don't immediately re-probe on the next tick.
+          this.lastEventAt = Date.now();
+        } catch {
+          console.warn('[slack-socket] Liveness probe send failed, forcing reconnect');
+          this._forceReconnect();
+        }
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private _forceReconnect(): void {
+    this._clearHeartbeat();
+    if (this.ws) {
+      // Temporarily clear started to prevent the close handler from
+      // triggering its own reconnect (same pattern as reconnect()).
+      const wasStarted = this.started;
+      this.started = false;
+      try { this.ws.close(); } catch { /* ok */ }
+      this.ws = null;
+      this.started = wasStarted;
+    }
+    // Trigger reconnect directly instead of relying on close event
+    if (this.started && !this.reconnecting) {
+      this._backoffReconnect().catch(() => {});
+    }
   }
 
   private _clearHeartbeat(): void {

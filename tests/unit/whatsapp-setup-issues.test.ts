@@ -391,7 +391,7 @@ describe('Issue 5: Baileys as bundled dependency + wizard pre-flight', () => {
   });
 
   it('setup wizard has Baileys pre-flight check', () => {
-    const skillPath = path.join(process.cwd(), '.claude/skills/setup-wizard/skill.md');
+    const skillPath = path.join(process.cwd(), '.claude/skills/setup-wizard/SKILL.md');
     const skill = fs.readFileSync(skillPath, 'utf-8');
     expect(skill).toContain('BAILEYS_V7_OK');
     expect(skill).toContain('BAILEYS_NOT_FOUND');
@@ -399,7 +399,7 @@ describe('Issue 5: Baileys as bundled dependency + wizard pre-flight', () => {
   });
 
   it('setup wizard has QR timeout with fallback instructions', () => {
-    const skillPath = path.join(process.cwd(), '.claude/skills/setup-wizard/skill.md');
+    const skillPath = path.join(process.cwd(), '.claude/skills/setup-wizard/SKILL.md');
     const skill = fs.readFileSync(skillPath, 'utf-8');
     expect(skill).toContain('TIMEOUT CHECK');
     expect(skill).toContain('30 seconds');
@@ -504,7 +504,7 @@ describe('Issue 7: Stale credential auto-clear on 401', () => {
       src.indexOf('if (loggedOut)'),
       src.indexOf('} else if (isTerminalFailure)'),
     );
-    expect(loggedOutSection).toContain('rmSync');
+    expect(loggedOutSection).toMatch(/(safeRmSync|rmSync)/);
     expect(loggedOutSection).toContain('recursive: true');
     expect(loggedOutSection).toContain('force: true');
     // Should recreate the directory after clearing

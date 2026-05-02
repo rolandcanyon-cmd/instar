@@ -40,8 +40,16 @@ import { createRoutes } from './routes.js';
 import { createFileRoutes } from './fileRoutes.js';
 import { mountWhatsAppWebhooks } from '../messaging/backends/WhatsAppWebhookRoutes.js';
 import { createMachineRoutes } from './machineRoutes.js';
+import { createWorktreeRoutes, createOidcWorktreeRoutes } from './worktreeRoutes.js';
+import type { WorktreeManager } from '../core/WorktreeManager.js';
 import { corsMiddleware, authMiddleware, requestTimeout, errorHandler, dashboardSecurityHeaders } from './middleware.js';
 import { WebSocketManager } from './WebSocketManager.js';
+import { assertSqliteAvailable, PendingRelayStore } from '../messaging/pending-relay-store.js';
+import { getOrCreateBootId } from './boot-id.js';
+import { DeliveryFailureSentinel } from '../monitoring/delivery-failure-sentinel.js';
+import os from 'node:os';
+import { TokenLedger } from '../monitoring/TokenLedger.js';
+import { TokenLedgerPoller } from '../monitoring/TokenLedgerPoller.js';
 
 export class AgentServer {
   private app: Express;
@@ -53,6 +61,11 @@ export class AgentServer {
   private state: StateManager;
   private hookEventReceiver?: import('../monitoring/HookEventReceiver.js').HookEventReceiver;
   private routeContext: { wsManager: import('./WebSocketManager.js').WebSocketManager | null } | null = null;
+  private deliverySentinel: DeliveryFailureSentinel | null = null;
+  private deliveryStore: PendingRelayStore | null = null;
+  private toneGate: import('../core/MessagingToneGate.js').MessagingToneGate | null = null;
+  private tokenLedger: TokenLedger | null = null;
+  private tokenLedgerPoller: TokenLedgerPoller | null = null;
 
   constructor(options: {
     config: InstarConfig;
@@ -115,8 +128,11 @@ export class AgentServer {
     threadlineRouter?: import('../threadline/ThreadlineRouter.js').ThreadlineRouter;
     handshakeManager?: import('../threadline/HandshakeManager.js').HandshakeManager;
     threadlineRelayClient?: import('../threadline/client/ThreadlineClient.js').ThreadlineClient;
+    threadlineReplyWaiters?: Map<string, { resolve: (reply: string) => void; threadId: string; senderAgent: string; timer: ReturnType<typeof setTimeout> }>;
     listenerManager?: import('../threadline/ListenerSessionManager.js').ListenerSessionManager;
     responseReviewGate?: import('../core/CoherenceGate.js').CoherenceGate;
+    messagingToneGate?: import('../core/MessagingToneGate.js').MessagingToneGate;
+    outboundDedupGate?: import('../core/OutboundDedupGate.js').OutboundDedupGate;
     telemetryHeartbeat?: import('../monitoring/TelemetryHeartbeat.js').TelemetryHeartbeat;
     pasteManager?: import('../paste/PasteManager.js').PasteManager;
     soulManager?: import('../core/SoulManager.js').SoulManager;
@@ -124,12 +140,37 @@ export class AgentServer {
     discoveryEvaluator?: import('../core/DiscoveryEvaluator.js').DiscoveryEvaluator;
     unifiedTrust?: import('../threadline/UnifiedTrustWiring.js').UnifiedTrustSystem;
     liveConfig?: { set(path: string, value: unknown): void };
+    /** Shared proxy coordinator (PresenceProxy ↔ PromiseBeacon ↔ /build heartbeat). */
+    proxyCoordinator?: import('../monitoring/ProxyCoordinator.js').ProxyCoordinator;
+    /** Integrated-Being shared-state ledger (v1). Null/undefined when disabled. */
+    sharedStateLedger?: import('../core/SharedStateLedger.js').SharedStateLedger;
+    /** Integrated-Being LedgerSessionRegistry (v2). Null/undefined when v2Enabled=false. */
+    ledgerSessionRegistry?: import('../core/LedgerSessionRegistry.js').LedgerSessionRegistry;
+    /** Worktree manager — parallel-dev isolation (PARALLEL-DEV-ISOLATION-SPEC.md). */
+    worktreeManager?: WorktreeManager;
+    /** OIDC verification function for the GH-check endpoint (injected for testability). */
+    oidcVerify?: (token: string) => Promise<{ repository: string; workflow_ref: string; ref: string }>;
+    /** Enrolled GitHub repos allowed to call the GH-check endpoint. */
+    oidcEnrolledRepos?: Array<{ owner: string; repo: string }>;
+    /** UnjustifiedStopGate authority (PR3 — context-death spec). */
+    unjustifiedStopGate?: import('../core/UnjustifiedStopGate.js').UnjustifiedStopGate;
+    /** Stop-gate SQLite persistence (PR3). */
+    stopGateDb?: import('../core/StopGateDb.js').StopGateDb;
+    /** Initiative tracker — persisted record of multi-phase long-running work. */
+    initiativeTracker?: import('../core/InitiativeTracker.js').InitiativeTracker;
+    /** Threadline → Telegram bridge config — toggles + allow/deny list. */
+    telegramBridgeConfig?: import('../threadline/TelegramBridgeConfig.js').TelegramBridgeConfig;
+    /** Threadline → Telegram bridge — relay-only mirror of threadline messages. */
+    telegramBridge?: import('../threadline/TelegramBridge.js').TelegramBridge;
+    /** Threadline observability — read-only views over inbox/outbox/bindings. */
+    threadlineObservability?: import('../threadline/ThreadlineObservability.js').ThreadlineObservability;
   }) {
     this.config = options.config;
     this.startTime = new Date();
     this.sessionManager = options.sessionManager;
     this.state = options.state;
     this.hookEventReceiver = options.hookEventReceiver ?? undefined;
+    this.toneGate = options.messagingToneGate ?? null;
     this.app = express();
 
     // Middleware
@@ -232,6 +273,20 @@ export class AgentServer {
       this.app.use(machineRoutes);
     }
 
+    // Worktree GH-check endpoint — mounted BEFORE auth middleware because it uses
+    // GitHub OIDC tokens, not bearer tokens. Authority for the parallel-dev isolation
+    // push gate (PARALLEL-DEV-ISOLATION-SPEC.md, "Authoritative push gate" section).
+    if (options.worktreeManager && options.oidcVerify) {
+      const oidcRoutes = createOidcWorktreeRoutes({
+        worktreeManager: options.worktreeManager,
+        oidc: {
+          enrolledRepos: options.oidcEnrolledRepos ?? [],
+          verifyOidcToken: options.oidcVerify,
+        },
+      });
+      this.app.use(oidcRoutes);
+    }
+
     // WhatsApp Business API webhook routes — mounted BEFORE auth middleware because
     // Meta's webhook verification sends GET requests without Bearer tokens.
     if (options.whatsappBusinessBackend) {
@@ -242,8 +297,55 @@ export class AgentServer {
       });
     }
 
-    this.app.use(authMiddleware(options.config.authToken));
-    this.app.use(requestTimeout(options.config.requestTimeoutMs));
+    // Agent-id binding (spec telegram-delivery-robustness § Layer 1b):
+    // pass projectName as the agent identity so the auth middleware can
+    // structurally reject tokens sent to the wrong agent's server BEFORE
+    // any token comparison runs. This closes the cross-tenant misroute
+    // class proven by the Inspec/cheryl 2026-04-27 incident.
+    this.app.use(authMiddleware(options.config.authToken, options.config.projectName));
+    // Outbound messaging routes are intentionally LLM-backed (tone gate review)
+    // and involve third-party API calls (Telegram/Slack/WhatsApp Bot APIs) whose
+    // latency we don't control. The default 30s budget is routinely exceeded
+    // under normal load; a 408 fired while the handler's send is in flight
+    // causes the agent's client to treat a successful delivery as failure,
+    // regenerate, and retry — shipping a duplicate message. Extended budget
+    // of 120s accommodates the realistic p99 of this path.
+    const OUTBOUND_MESSAGING_TIMEOUT_MS = 120_000;
+    this.app.use(requestTimeout(options.config.requestTimeoutMs, {
+      '/telegram/reply': OUTBOUND_MESSAGING_TIMEOUT_MS,
+      '/telegram/post-update': OUTBOUND_MESSAGING_TIMEOUT_MS,
+      '/slack/reply': OUTBOUND_MESSAGING_TIMEOUT_MS,
+      '/whatsapp/send': OUTBOUND_MESSAGING_TIMEOUT_MS,
+      '/imessage/reply': OUTBOUND_MESSAGING_TIMEOUT_MS,
+      '/imessage/validate-send': OUTBOUND_MESSAGING_TIMEOUT_MS,
+    }));
+
+    // ── Token Ledger ──────────────────────────────────────────────────
+    // Read-only token-usage observability. Reads Claude Code's per-session
+    // JSONL transcripts and rolls up into SQLite. Never mutates source files.
+    try {
+      if (options.config.stateDir) {
+        const serverDataDir = path.join(options.config.stateDir, 'server-data');
+        fs.mkdirSync(serverDataDir, { recursive: true });
+        const dbPath = path.join(serverDataDir, 'token-ledger.db');
+        const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+        // Bound the first-boot scan: with deep history (eg one local agent
+        // had 119k JSONLs / 12GB of transcripts), an unbounded synchronous
+        // scan blocks the event loop for minutes. We cap per-tick work and
+        // skip files older than the backfill window — the source JSONLs
+        // remain authoritative if the operator wants to widen the window.
+        this.tokenLedger = new TokenLedger({
+          dbPath,
+          claudeProjectsDir,
+          maxFileAgeMs: 30 * 24 * 60 * 60 * 1000, // 30 days
+          maxFilesPerScan: 500,
+          yieldEveryNFiles: 25,
+        });
+      }
+    } catch (err) {
+      console.warn('[instar] token-ledger init failed (non-fatal):', err);
+      this.tokenLedger = null;
+    }
 
     // Routes
     const routeCtx = {
@@ -306,6 +408,8 @@ export class AgentServer {
       threadlineRelayClient: options.threadlineRelayClient ?? null,
       listenerManager: options.listenerManager ?? null,
       responseReviewGate: options.responseReviewGate ?? null,
+      messagingToneGate: options.messagingToneGate ?? null,
+      outboundDedupGate: options.outboundDedupGate ?? null,
       telemetryHeartbeat: options.telemetryHeartbeat ?? null,
       pasteManager: options.pasteManager ?? null,
       wsManager: null, // Set after WebSocket manager is initialized
@@ -313,6 +417,17 @@ export class AgentServer {
       featureRegistry: options.featureRegistry ?? null,
       discoveryEvaluator: options.discoveryEvaluator ?? null,
       unifiedTrust: options.unifiedTrust ?? null,
+      threadlineReplyWaiters: options.threadlineReplyWaiters ?? new Map(),
+      proxyCoordinator: options.proxyCoordinator ?? null,
+      sharedStateLedger: options.sharedStateLedger ?? null,
+      ledgerSessionRegistry: options.ledgerSessionRegistry ?? null,
+      unjustifiedStopGate: options.unjustifiedStopGate ?? null,
+      stopGateDb: options.stopGateDb ?? null,
+      initiativeTracker: options.initiativeTracker ?? null,
+      tokenLedger: this.tokenLedger,
+      telegramBridgeConfig: options.telegramBridgeConfig ?? null,
+      telegramBridge: options.telegramBridge ?? null,
+      threadlineObservability: options.threadlineObservability ?? null,
       startTime: this.startTime,
     };
     this.routeContext = routeCtx;
@@ -322,6 +437,15 @@ export class AgentServer {
     // File viewer routes (after auth middleware)
     const fileRoutes = createFileRoutes({ config: options.config, liveConfig: options.liveConfig });
     this.app.use(fileRoutes);
+
+    // Worktree manager (auth-required) routes — bindings, locks, preflight, sign-trailer.
+    if (options.worktreeManager) {
+      const worktreeRoutes = createWorktreeRoutes({
+        worktreeManager: options.worktreeManager,
+        projectDir: options.config.projectDir,
+      });
+      this.app.use(worktreeRoutes);
+    }
 
     // Error handler (must be last)
     this.app.use(errorHandler);
@@ -347,6 +471,32 @@ export class AgentServer {
    * Start the HTTP server.
    */
   async start(): Promise<void> {
+    // Layer 2 boot self-check (spec § 2a "Runtime dependency"). Probes the
+    // sqlite3 CLI + better-sqlite3 in-process driver and emits degradation
+    // events on missing/broken substrate. Never throws — Layer 2 is best-
+    // effort signal infrastructure, not a critical-path dependency.
+    try {
+      assertSqliteAvailable();
+    } catch (err) {
+      // Defensive: assertSqliteAvailable is documented as non-throwing,
+      // but a malformed DegradationReporter could still raise. Log and
+      // continue.
+      console.warn('[instar] sqlite boot self-check raised:', err);
+    }
+
+    // Layer 3 spec §3b: create boot.id SYNCHRONOUSLY before binding the
+    // listener. The sentinel reads this at start() to disambiguate stale
+    // leases from prior boots (PID reuse). Any I/O failure here is
+    // non-fatal — boot id is best-effort infrastructure for the sentinel,
+    // which is itself feature-flagged default-off.
+    try {
+      if (this.config.stateDir) {
+        getOrCreateBootId(this.config.stateDir, this.config.version);
+      }
+    } catch (err) {
+      console.warn('[instar] boot.id creation raised (sentinel will fail to start):', err);
+    }
+
     return new Promise((resolve, reject) => {
       const host = this.config.host || '127.0.0.1';
       this.server = this.app.listen(this.config.port, host, () => {
@@ -368,6 +518,35 @@ export class AgentServer {
           this.routeContext.wsManager = this.wsManager;
         }
 
+        // ── Token Ledger Poller ─────────────────────────────────────────
+        // 60s tick scans `~/.claude/projects/*/*.jsonl` and rolls up into
+        // the token_events table. Strictly read-only against source files.
+        if (this.tokenLedger) {
+          try {
+            this.tokenLedgerPoller = new TokenLedgerPoller({ ledger: this.tokenLedger });
+            this.tokenLedgerPoller.start();
+          } catch (err) {
+            console.warn('[instar] token-ledger poller start failed:', err);
+          }
+        }
+
+        // ── Layer 3 DeliveryFailureSentinel — default-OFF feature flag ──
+        // Spec § 3j: `monitoring.deliveryFailureSentinel.enabled` defaults
+        // false. The sentinel only spins up when an operator explicitly
+        // opts in. Layer 1 + Layer 2 ship unconditionally; Layer 3 is the
+        // opt-in upgrade for general delivery resilience.
+        const monitoringCfg = (this.config as { monitoring?: { deliveryFailureSentinel?: { enabled?: boolean } } }).monitoring;
+        const sentinelEnabled = monitoringCfg?.deliveryFailureSentinel?.enabled === true;
+        if (sentinelEnabled && this.config.stateDir) {
+          try {
+            this.startDeliverySentinel().catch((err) => {
+              console.warn('[instar] delivery-failure-sentinel start failed:', err);
+            });
+          } catch (err) {
+            console.warn('[instar] delivery-failure-sentinel start raised:', err);
+          }
+        }
+
         resolve();
       });
       this.server.on('error', (err: NodeJS.ErrnoException) => {
@@ -381,10 +560,107 @@ export class AgentServer {
   }
 
   /**
+   * Spin up the Layer 3 DeliveryFailureSentinel. Opens the per-agent
+   * pending-relay SQLite store (creating it lazily if needed), wires
+   * the sentinel into the WebSocket event stream so `delivery_failed`
+   * events drive recovery in <1s, and arms the watchdog tick.
+   *
+   * Failures here are isolated — the sentinel is opt-in default-OFF
+   * infrastructure, not a critical-path dependency. Any error here is
+   * logged and the rest of the server continues running.
+   */
+  private async startDeliverySentinel(): Promise<void> {
+    const stateDir = this.config.stateDir;
+    const agentId = this.config.projectName;
+    if (!stateDir || !agentId) return;
+
+    let store: PendingRelayStore;
+    try {
+      store = PendingRelayStore.open(agentId, stateDir);
+    } catch (err) {
+      console.warn('[delivery-sentinel] pending-relay-store open failed; sentinel disabled:', err);
+      return;
+    }
+    this.deliveryStore = store;
+
+    const bootId = (await import('./boot-id.js')).getCurrentBootId();
+    if (!bootId) {
+      console.warn('[delivery-sentinel] bootId not initialized; sentinel cannot start');
+      return;
+    }
+
+    const configPath = path.join(stateDir, 'config.json');
+    const sentinel = new DeliveryFailureSentinel(
+      {
+        store,
+        configPath,
+        readConfig: () => ({
+          port: this.config.port,
+          authToken: this.config.authToken ?? '',
+          agentId,
+        }),
+        bootId,
+        toneGate: this.toneGate,
+        subscribeFailureEvents: this.wsManager
+          ? (listener) => {
+              const handler = (event: Record<string, unknown>) => {
+                if (event.type === 'delivery_failed' && event.agentId === agentId) {
+                  listener(event as unknown as { delivery_id: string; topic_id: number; agentId: string });
+                }
+              };
+              return this.wsManager!.subscribeEvents(handler);
+            }
+          : undefined,
+      },
+    );
+    this.deliverySentinel = sentinel;
+    await sentinel.start();
+    console.log('[instar] delivery-failure-sentinel started (Layer 3 recovery active)');
+  }
+
+  /**
    * Stop the HTTP server gracefully.
    * Closes keep-alive connections after a timeout to prevent hanging.
    */
   async stop(): Promise<void> {
+    // Stop the Layer 3 sentinel BEFORE the WebSocket manager — the
+    // sentinel's SSE subscription needs an alive wsManager to clean up
+    // its listener. Order: sentinel → wsManager → server.
+    if (this.deliverySentinel) {
+      try {
+        await this.deliverySentinel.stop();
+      } catch (err) {
+        console.warn('[instar] delivery-failure-sentinel stop raised:', err);
+      }
+      this.deliverySentinel = null;
+    }
+    if (this.deliveryStore) {
+      try {
+        this.deliveryStore.close();
+      } catch {
+        // best-effort
+      }
+      this.deliveryStore = null;
+    }
+
+    // Stop the token-ledger poller and close its DB.
+    if (this.tokenLedgerPoller) {
+      try {
+        this.tokenLedgerPoller.stop();
+      } catch {
+        // best-effort
+      }
+      this.tokenLedgerPoller = null;
+    }
+    if (this.tokenLedger) {
+      try {
+        this.tokenLedger.close();
+      } catch {
+        // best-effort
+      }
+      this.tokenLedger = null;
+    }
+
     // Shutdown WebSocket manager first
     if (this.wsManager) {
       this.wsManager.shutdown();

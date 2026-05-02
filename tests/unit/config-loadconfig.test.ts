@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { detectProjectDir, ensureStateDir, loadConfig } from '../../src/core/Config.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('Config module', () => {
   let tmpDir: string;
@@ -19,7 +20,7 @@ describe('Config module', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/config-loadconfig.test.ts:23' });
   });
 
   describe('detectProjectDir', () => {
@@ -128,6 +129,35 @@ describe('Config module', () => {
       fs.writeFileSync(path.join(instarDir, 'config.json'), '{"projectName": "test", "port": ');
 
       expect(() => loadConfig(projectDir)).toThrow(/Failed to parse/);
+    });
+  });
+
+  describe('loadConfig passes through optional config fields', () => {
+    it('spreads fileConfig so safety, evolution, agentAutonomy etc. are not dropped', () => {
+      const source = fs.readFileSync(
+        path.join(process.cwd(), 'src/core/Config.ts'),
+        'utf-8',
+      );
+      // The return statement should spread fileConfig before explicit overrides
+      expect(source).toContain('...fileConfig,');
+    });
+
+    it('loadConfig preserves safety config from config file', () => {
+      const projectDir = path.join(tmpDir, 'safety-project');
+      const instarDir = path.join(projectDir, '.instar');
+      fs.mkdirSync(instarDir, { recursive: true });
+      fs.writeFileSync(path.join(projectDir, 'CLAUDE.md'), '# Test');
+      fs.writeFileSync(path.join(instarDir, 'config.json'), JSON.stringify({
+        safety: { level: 2 },
+        agentAutonomy: { level: 'autonomous' },
+        autonomyProfile: 'collaborative',
+        sessions: { tmuxPath: '/usr/bin/tmux', claudePath: '/usr/bin/claude' },
+      }));
+
+      const config = loadConfig(projectDir);
+      expect(config.safety).toEqual({ level: 2 });
+      expect(config.agentAutonomy).toEqual({ level: 'autonomous' });
+      expect(config.autonomyProfile).toBe('collaborative');
     });
   });
 

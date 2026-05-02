@@ -17,6 +17,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -133,7 +134,7 @@ export class InstructionsVerifier {
   clearSession(sessionId?: string): void {
     const file = this.getTrackingFile(sessionId);
     if (fs.existsSync(file)) {
-      fs.unlinkSync(file);
+      SafeFsExecutor.safeUnlinkSync(file, { operation: 'src/monitoring/InstructionsVerifier.ts:137' });
     }
   }
 

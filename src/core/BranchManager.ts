@@ -13,6 +13,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { assertNotInstarSourceTree } from './SourceTreeGuard.js';
+import { SafeGitExecutor } from './SafeGitExecutor.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -114,6 +116,7 @@ export class BranchManager {
   private branchStateDir: string;
 
   constructor(config: BranchManagerConfig) {
+    assertNotInstarSourceTree(config.projectDir, 'BranchManager');
     this.projectDir = config.projectDir;
     this.stateDir = config.stateDir;
     this.machineId = config.machineId;
@@ -530,11 +533,12 @@ export class BranchManager {
   // ── Private: Git Helper ────────────────────────────────────────────
 
   private git(...args: string[]): string {
-    return execFileSync('git', args, {
+    return SafeGitExecutor.run(args, {
       cwd: this.projectDir,
       encoding: 'utf-8',
       timeout: 30_000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      operation: 'src/core/BranchManager.ts:git',
     }).trim();
   }
 }

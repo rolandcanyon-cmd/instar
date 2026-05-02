@@ -22,6 +22,9 @@ import type { ConflictFile, EscalationContext, ResolutionResult } from './LLMCon
 import { FileClassifier } from './FileClassifier.js';
 import type { ClassificationResult } from './FileClassifier.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { assertNotInstarSourceTree } from './SourceTreeGuard.js';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
+import { SafeGitExecutor } from './SafeGitExecutor.js';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -90,6 +93,7 @@ export class GitSyncManager {
   private fileClassifier: FileClassifier;
 
   constructor(config: GitSyncConfig) {
+    assertNotInstarSourceTree(config.projectDir, 'GitSyncManager');
     this.projectDir = config.projectDir;
     this.stateDir = config.stateDir;
     this.identityManager = config.identityManager;
@@ -340,8 +344,8 @@ export class GitSyncManager {
             console.warn(`[GitSync] rebase --abort failed, cleaning up rebase state manually: ${abortErr}`);
             const rebaseMerge = path.join(this.projectDir, '.git', 'rebase-merge');
             const rebaseApply = path.join(this.projectDir, '.git', 'rebase-apply');
-            if (fs.existsSync(rebaseMerge)) fs.rmSync(rebaseMerge, { recursive: true, force: true });
-            if (fs.existsSync(rebaseApply)) fs.rmSync(rebaseApply, { recursive: true, force: true });
+            if (fs.existsSync(rebaseMerge)) SafeFsExecutor.safeRmSync(rebaseMerge, { recursive: true, force: true, operation: 'src/core/GitSync.ts:346' });
+            if (fs.existsSync(rebaseApply)) SafeFsExecutor.safeRmSync(rebaseApply, { recursive: true, force: true, operation: 'src/core/GitSync.ts:348' });
           }
           const beforeHead = this.gitHead();
           // Use merge (not rebase) to avoid recreating the same stuck rebase
@@ -1003,11 +1007,12 @@ export class GitSyncManager {
   // ── Git Helpers ─────────────────────────────────────────────────
 
   private gitExec(args: string[]): string {
-    return execFileSync('git', args, {
+    return SafeGitExecutor.run(args, {
       cwd: this.projectDir,
       encoding: 'utf-8',
       timeout: 30_000,
       stdio: ['pipe', 'pipe', 'pipe'],
+      operation: 'src/core/GitSync.ts:gitExec',
     }).trim();
   }
 

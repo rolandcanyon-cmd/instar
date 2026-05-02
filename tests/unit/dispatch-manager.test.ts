@@ -11,6 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { DispatchManager } from '../../src/core/DispatchManager.js';
 import type { Dispatch, EvaluationDecision } from '../../src/core/DispatchManager.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('DispatchManager URL validation', () => {
   it('rejects HTTP URLs', () => {
@@ -72,7 +73,7 @@ describe('DispatchManager local storage', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:76' });
   });
 
   it('returns empty list when no dispatches exist', () => {
@@ -187,7 +188,7 @@ describe('DispatchManager context generation', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:192' });
   });
 
   it('returns empty string when no pending dispatches', () => {
@@ -314,7 +315,7 @@ describe('DispatchManager polling', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:320' });
   });
 
   it('returns empty result when disabled', async () => {
@@ -518,7 +519,7 @@ describe('DispatchManager evaluation', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:525' });
   });
 
   function seedDispatch(overrides: Partial<Dispatch> = {}): Dispatch {
@@ -607,7 +608,7 @@ describe('DispatchManager context file', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:615' });
   });
 
   function createManager(overrides: Record<string, unknown> = {}) {
@@ -739,7 +740,7 @@ describe('DispatchManager auto-apply', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:748' });
   });
 
   function mockFetchDispatches(dispatches: Array<Record<string, unknown>>) {
@@ -1014,7 +1015,7 @@ describe('DispatchManager feedback', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:1024' });
   });
 
   function seedDispatches(): Dispatch[] {
@@ -1133,7 +1134,7 @@ describe('DispatchManager stats', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/dispatch-manager.test.ts:1144' });
   });
 
   function createManager() {

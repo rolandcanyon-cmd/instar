@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { UpdateChecker } from '../../src/core/UpdateChecker.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('UpdateChecker.applyUpdate()', () => {
   let tmpDir: string;
@@ -25,7 +26,7 @@ describe('UpdateChecker.applyUpdate()', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/update-checker-apply.test.ts:29' });
   });
 
   it('returns already-up-to-date when no update available', async () => {
@@ -99,7 +100,7 @@ describe('UpdateChecker.fetchChangelog()', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/update-checker-apply.test.ts:104' });
   });
 
   it('returns changelog body from GitHub release', async () => {
@@ -212,7 +213,7 @@ describe('UpdateChecker.rollback()', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/update-checker-apply.test.ts:218' });
   });
 
   it('returns error when no rollback info exists', async () => {
@@ -292,7 +293,7 @@ describe('UpdateChecker.check() with changeSummary', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/update-checker-apply.test.ts:299' });
   });
 
   it('includes changeSummary in UpdateInfo when update available', async () => {

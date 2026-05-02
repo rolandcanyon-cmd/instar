@@ -35,6 +35,7 @@ import { AccessControl } from '../../src/core/AccessControl.js';
 import type { AccessControlConfig, Permission } from '../../src/core/AccessControl.js';
 
 import { AuditTrail } from '../../src/core/AuditTrail.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -801,7 +802,7 @@ describe('AuditTrail wiring integrity', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/security-wiring.test.ts:805' });
   });
 
   function makeAudit(machineId = 'test-machine-001') {
@@ -1069,7 +1070,7 @@ describe('Cross-module wiring integrity', () => {
     });
 
     afterEach(() => {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/integration/security-wiring.test.ts:1074' });
     });
 
     it('PromptGuard scan result can be logged to AuditTrail and queried back', () => {

@@ -30,6 +30,7 @@ import {
   MachineIdentityManager,
   ensureGitignore,
 } from '../../src/core/MachineIdentity.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Test Helpers ─────────────────────────────────────────────────────
 
@@ -38,7 +39,7 @@ function createTempDir(): string {
 }
 
 function cleanup(dir: string): void {
-  fs.rmSync(dir, { recursive: true, force: true });
+  SafeFsExecutor.safeRmSync(dir, { recursive: true, force: true, operation: 'tests/unit/machine-identity.test.ts:42' });
 }
 
 // ── Key Generation ───────────────────────────────────────────────────
@@ -415,6 +416,44 @@ describe('MachineIdentityManager', () => {
 
     it('throws for unknown machine', () => {
       expect(() => manager.updateRole('m_nonexistent', 'awake')).toThrow(/not found/);
+    });
+  });
+
+  describe('ensureSelfRegistered', () => {
+    it('self-registers when machine missing from registry (registry wiped scenario)', async () => {
+      // Generate identity (this also registers it once), then simulate a wiped registry
+      const identity = await manager.generateIdentity();
+      SafeFsExecutor.safeRmSync(path.join(instarDir, 'machines'), { recursive: true, force: true, operation: 'tests/unit/machine-identity.test.ts:427' });
+
+      const registered = manager.ensureSelfRegistered(identity, 'awake');
+      expect(registered).toBe(true);
+
+      const registry = manager.loadRegistry();
+      expect(registry.machines[identity.machineId]).toBeDefined();
+      expect(registry.machines[identity.machineId].role).toBe('awake');
+      expect(registry.machines[identity.machineId].name).toBe(identity.name);
+    });
+
+    it('is a no-op when machine already registered', async () => {
+      const identity = await manager.generateIdentity();
+      const before = manager.loadRegistry().machines[identity.machineId];
+
+      const registered = manager.ensureSelfRegistered(identity, 'awake');
+      expect(registered).toBe(false);
+
+      const after = manager.loadRegistry().machines[identity.machineId];
+      // pairedAt should be preserved — we didn't re-register
+      expect(after.pairedAt).toBe(before.pairedAt);
+    });
+
+    it('allows subsequent updateRole calls after self-registration', async () => {
+      const identity = await manager.generateIdentity();
+      SafeFsExecutor.safeRmSync(path.join(instarDir, 'machines'), { recursive: true, force: true, operation: 'tests/unit/machine-identity.test.ts:453' });
+
+      manager.ensureSelfRegistered(identity, 'standby');
+      // This would previously throw with MACHINE_NOT_FOUND
+      expect(() => manager.updateRole(identity.machineId, 'awake')).not.toThrow();
+      expect(manager.loadRegistry().machines[identity.machineId].role).toBe('awake');
     });
   });
 

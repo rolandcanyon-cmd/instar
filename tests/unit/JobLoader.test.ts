@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { loadJobs, validateJob } from '../../src/scheduler/JobLoader.js';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 describe('JobLoader', () => {
   let tmpDir: string;
@@ -12,7 +13,7 @@ describe('JobLoader', () => {
   });
 
   afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/JobLoader.test.ts:16' });
   });
 
   const validJob = {
@@ -66,9 +67,12 @@ describe('JobLoader', () => {
       expect(jobs[1].enabled).toBe(false);
     });
 
-    it('throws for missing file', () => {
-      expect(() => loadJobs('/nonexistent/jobs.json'))
-        .toThrow('Jobs file not found');
+    it('returns empty list for missing file (does not throw)', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const jobs = loadJobs('/nonexistent/jobs.json');
+      expect(jobs).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('Jobs file not found'));
+      warn.mockRestore();
     });
 
     it('throws for non-array JSON', () => {
@@ -76,6 +80,25 @@ describe('JobLoader', () => {
       fs.writeFileSync(file, JSON.stringify({ jobs: [] }));
       expect(() => loadJobs(file))
         .toThrow('must contain a JSON array');
+    });
+
+    it('skips invalid entries and loads valid ones (does not throw)', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const file = writeJobsFile([
+        validJob,
+        // Missing name + priority, invalid execute.type — the exact shape
+        // of the contact-proposer job that crashed the scheduler in prod.
+        { slug: 'broken-job', description: 'x', schedule: '0 * * * *', enabled: true, execute: { type: 'bash', value: 'echo hi' } },
+        { ...validJob, slug: 'third-job', name: 'Third' },
+      ]);
+      const jobs = loadJobs(file);
+      expect(jobs).toHaveLength(2);
+      expect(jobs.map((j) => j.slug)).toEqual(['test-job', 'third-job']);
+      expect(err).toHaveBeenCalledWith(expect.stringContaining('Skipping invalid job at index 1'));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('skipped 1 invalid entry'));
+      warn.mockRestore();
+      err.mockRestore();
     });
   });
 

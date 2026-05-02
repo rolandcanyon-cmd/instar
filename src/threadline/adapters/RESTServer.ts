@@ -42,6 +42,8 @@ export interface RESTServerConfig {
   host?: string;              // default '127.0.0.1' (localhost only)
   tokenPath?: string;         // default ~/.threadline/api-token
   maxMessageHistoryPerThread?: number; // default 100
+  historyPath?: string;       // default ~/.threadline/thread-history.json
+  persistHistory?: boolean;   // default true
 }
 
 // ── Implementation ───────────────────────────────────────────────────
@@ -52,8 +54,9 @@ export class ThreadlineRESTServer {
   private server: http.Server | null = null;
   private token: string = '';
   private running = false;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** In-memory thread history (for GET /threads/:id) */
+  /** Thread history (for GET /threads/:id). Hydrated from disk on start, persisted debounced. */
   private readonly threadHistory = new Map<string, ReceivedMessage[]>();
 
   constructor(client: ThreadlineClient, config?: Partial<RESTServerConfig>) {
@@ -63,6 +66,8 @@ export class ThreadlineRESTServer {
       host: config?.host ?? '127.0.0.1',
       tokenPath: config?.tokenPath ?? path.join(os.homedir(), '.threadline', 'api-token'),
       maxMessageHistoryPerThread: config?.maxMessageHistoryPerThread ?? 100,
+      historyPath: config?.historyPath ?? path.join(os.homedir(), '.threadline', 'thread-history.json'),
+      persistHistory: config?.persistHistory ?? true,
     };
 
     // Track incoming messages for thread history
@@ -76,6 +81,7 @@ export class ThreadlineRESTServer {
       if (history.length > this.config.maxMessageHistoryPerThread) {
         history.shift();
       }
+      this.schedulePersist();
     });
   }
 
@@ -87,6 +93,9 @@ export class ThreadlineRESTServer {
 
     // Get or create auth token
     this.token = this.getOrCreateToken();
+
+    // Hydrate thread history from disk (survives restarts)
+    this.loadHistoryFromDisk();
 
     return new Promise((resolve) => {
       this.server = http.createServer((req, res) => {
@@ -105,6 +114,13 @@ export class ThreadlineRESTServer {
    */
   async stop(): Promise<void> {
     if (!this.running || !this.server) return;
+
+    // Flush any pending persist before shutdown
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      this.persistHistoryToDisk();
+    }
 
     return new Promise((resolve) => {
       this.server!.close(() => {
@@ -280,7 +296,53 @@ export class ThreadlineRESTServer {
 
   private handleDeleteThread(res: http.ServerResponse, threadId: string): void {
     const deleted = this.threadHistory.delete(threadId);
+    if (deleted) this.schedulePersist();
     this.sendJson(res, 200, { deleted, threadId });
+  }
+
+  // ── Thread History Persistence ─────────────────────────────────────
+
+  private loadHistoryFromDisk(): void {
+    if (!this.config.persistHistory) return;
+    try {
+      const raw = fs.readFileSync(this.config.historyPath, 'utf-8');
+      const data = JSON.parse(raw) as Record<string, ReceivedMessage[]>;
+      for (const [threadId, messages] of Object.entries(data)) {
+        if (Array.isArray(messages)) {
+          const trimmed = messages.slice(-this.config.maxMessageHistoryPerThread);
+          this.threadHistory.set(threadId, trimmed);
+        }
+      }
+    } catch {
+      // No history file yet, or unreadable — start fresh
+    }
+  }
+
+  private schedulePersist(): void {
+    if (!this.config.persistHistory) return;
+    if (this.persistTimer) return;
+    // Debounce writes to avoid thrashing on message bursts
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistHistoryToDisk();
+    }, 1000);
+  }
+
+  private persistHistoryToDisk(): void {
+    if (!this.config.persistHistory) return;
+    try {
+      const dir = path.dirname(this.config.historyPath);
+      fs.mkdirSync(dir, { recursive: true });
+      const data: Record<string, ReceivedMessage[]> = {};
+      for (const [threadId, messages] of this.threadHistory) {
+        data[threadId] = messages;
+      }
+      const tmp = `${this.config.historyPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(data), { mode: 0o600 });
+      fs.renameSync(tmp, this.config.historyPath);
+    } catch {
+      // Persistence is best-effort; don't crash the server if disk is full
+    }
   }
 
   // ── Helpers ────────────────────────────────────────────────────────

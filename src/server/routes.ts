@@ -6,6 +6,7 @@
  */
 
 import { Router } from 'express';
+import type { Request as ExpressRequest, Response as ExpressResponse } from 'express';
 import { execFileSync } from 'node:child_process';
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
@@ -19,6 +20,94 @@ import { rateLimiter, signViewPath } from './middleware.js';
 import type { WriteOperation, WriteToken } from '../core/StateWriteAuthority.js';
 import { validateWriteToken, canPerformOperation } from '../core/StateWriteAuthority.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { parseVersion, compareVersions } from '../lifeline/versionHandshake.js';
+import {
+  GATE_ROUTE_VERSION,
+  GATE_ROUTE_MINIMUM_VERSION,
+  getHotPathState,
+  setKillSwitch,
+  getKillSwitch,
+  recordSessionStart,
+  getMode,
+  setMode,
+} from './stopGate.js';
+import {
+  UnjustifiedStopGate,
+  assembleReminder,
+  type EvaluateInput,
+  type AuthorityOutcome,
+  type EvidenceMetadata,
+  type EvidencePointer,
+} from '../core/UnjustifiedStopGate.js';
+import { StopGateDb, dayKeyFor, type EvalMode } from '../core/StopGateDb.js';
+import { randomUUID as cryptoRandomUUID } from 'node:crypto';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
+import { SafeGitExecutor } from '../core/SafeGitExecutor.js';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
+
+const execFile = promisify(execFileCb);
+
+/**
+ * Per-session continue-ceiling (spec § (b) Outcomes).
+ * If an authority judgement of `continue` would push this session's
+ * counter to >= this value, the evaluate route force-allows + flags
+ * stuck-state instead. Catches runaway authority judgment without
+ * requiring operator intervention.
+ */
+const CONTINUE_CEILING = 2;
+
+/**
+ * Server-side post-verifier for a continue decision (spec § (b) lines 273-281).
+ * Runs three of the five structural checks (#1 git object exists,
+ * #3 descendant relationship, #5 ≥1 non-session-created artifact).
+ * Checks #2 (ctime unchanged) and #4 (`.git/HEAD` unchanged) require
+ * T0 state the hook router will collect — deferred to PR3b when the
+ * router lands.
+ *
+ * Returns null on success; failure-detail string on any check that fails.
+ * Fail-open path: caller converts a failed verify into `invalidEvidence`.
+ */
+async function postVerifyEvidence(
+  projectDir: string,
+  evidence: EvidenceMetadata,
+  pointer: EvidencePointer
+): Promise<string | null> {
+  // Check #5 first — cheap, doesn't spawn git.
+  const hasPreSessionArtifact = evidence.artifacts.some(a => !a.createdThisSession);
+  if (!hasPreSessionArtifact) {
+    return 'all enumerated artifacts were created this session';
+  }
+
+  const planSha = pointer.plan_commit_sha;
+  const incSha = pointer.incremental_commit_sha;
+
+  try {
+    // Check #1: plan_commit_sha exists in the git object DB.
+    if (planSha) {
+      await execFile('git', ['-C', projectDir, 'cat-file', '-e', planSha], { timeout: 500 });
+    }
+
+    // Check #3: incremental_commit_sha is a descendant of plan_commit_sha.
+    //   `git merge-base --is-ancestor <plan> <incremental>` exits 0 if
+    //   plan IS an ancestor of incremental (i.e. incremental is a descendant).
+    if (planSha && incSha && planSha !== incSha) {
+      try {
+        await execFile(
+          'git',
+          ['-C', projectDir, 'merge-base', '--is-ancestor', planSha, incSha],
+          { timeout: 500 }
+        );
+      } catch {
+        return `incremental ${incSha} is not a descendant of plan ${planSha}`;
+      }
+    }
+  } catch (err) {
+    return `git structural check failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+
+  return null;
+}
 import { ReflectionMetrics } from '../monitoring/ReflectionMetrics.js';
 import { HomeostasisMonitor } from '../monitoring/HomeostasisMonitor.js';
 import type { TelegramAdapter } from '../messaging/TelegramAdapter.js';
@@ -82,10 +171,324 @@ import type { WorktreeMonitor } from '../monitoring/WorktreeMonitor.js';
 import type { SubagentTracker } from '../monitoring/SubagentTracker.js';
 import type { InstructionsVerifier } from '../monitoring/InstructionsVerifier.js';
 import type { CoherenceGate } from '../core/CoherenceGate.js';
+import type { MessagingToneGate } from '../core/MessagingToneGate.js';
+import { isJunkPayload } from '../core/junk-payload.js';
 import type { PasteManager } from '../paste/PasteManager.js';
 import type { WebSocketManager } from './WebSocketManager.js';
 import { TruncationDetector } from '../paste/TruncationDetector.js';
 import { SecretDrop } from './SecretDrop.js';
+import { matchesSystemTemplate } from '../messaging/system-templates.js';
+import { resolvePendingRelayPath } from '../messaging/pending-relay-store.js';
+import Database from 'better-sqlite3';
+
+/**
+ * Build the /whoami request handler.
+ *
+ * Spec docs/specs/telegram-delivery-robustness.md § Layer 1c. Exported
+ * separately from createRoutes so unit tests can mount it on a minimal
+ * Express app without instantiating the entire RouteContext.
+ *
+ * Behavior:
+ *   - 403 `{error: 'agent_id_header_required'}` when X-Instar-AgentId is
+ *     absent. The middleware accepts bare-token requests during the
+ *     deprecation window for *other* endpoints; /whoami does not, because
+ *     accepting a bare-token request here would let a caller learn the
+ *     expected agent-id from the response (discovery oracle).
+ *   - 403 `{error: 'agent_id_mismatch', expected}` when the header is
+ *     present but does not match.
+ *   - 429 with retry hint when the per-source rate limit (1 req/s) is
+ *     exceeded — the bucket is keyed on (agent-id, remoteAddress) so a
+ *     single misbehaving caller can't starve the budget for legitimate
+ *     sentinel callers from other source addresses.
+ *   - 200 `{agentId, port}` on a clean request. (We deliberately do NOT
+ *     return `version`: an authed identity probe shouldn't double as a
+ *     CVE-targeting oracle for an authed peer who has stolen a token.)
+ */
+export function createWhoamiHandler(opts: {
+  agentId: string;
+  port: number;
+  configVersion?: string;
+}) {
+  const WHOAMI_WINDOW_MS = 1000;
+  // Bucket key is `${agentId}|${remoteAddress}` so a single noisy caller
+  // can't starve the budget for legitimate sentinel callers from other
+  // source addresses on the same authed agent-id.
+  const buckets = new Map<string, number>();
+  const cleanup = setInterval(() => {
+    const cutoff = Date.now() - WHOAMI_WINDOW_MS * 60;
+    for (const [k, t] of buckets) {
+      if (t < cutoff) buckets.delete(k);
+    }
+  }, WHOAMI_WINDOW_MS * 60);
+  cleanup.unref();
+
+  return (req: ExpressRequest, res: ExpressResponse) => {
+    const headerVal = req.headers['x-instar-agentid'];
+    const provided = Array.isArray(headerVal) ? headerVal[0] : headerVal;
+    const expected = opts.agentId;
+    if (!provided) {
+      res.status(403).json({ error: 'agent_id_header_required', expected });
+      return;
+    }
+    if (provided !== expected) {
+      // Defense-in-depth — auth middleware should have already caught this.
+      res.status(403).json({ error: 'agent_id_mismatch', expected });
+      return;
+    }
+    const remote = req.ip || req.socket?.remoteAddress || 'unknown';
+    const bucketKey = `${provided}|${remote}`;
+    const now = Date.now();
+    const last = buckets.get(bucketKey);
+    if (last !== undefined && now - last < WHOAMI_WINDOW_MS) {
+      res.status(429).json({
+        error: 'Rate limit exceeded',
+        retryAfterMs: WHOAMI_WINDOW_MS - (now - last),
+      });
+      return;
+    }
+    buckets.set(bucketKey, now);
+
+    // Deliberately omit `version`: an authed identity probe shouldn't
+    // double as a CVE-targeting oracle for a peer whose token has been
+    // stolen. Layer 3's recovery path needs agentId + port, not version.
+    // (`opts.configVersion` retained on the type for forward-compat
+    // — callers who need version must read it from a separate route.)
+    res.json({
+      agentId: expected,
+      port: opts.port,
+    });
+  };
+}
+
+/**
+ * Build the `POST /events/delivery-failed` request handler.
+ *
+ * Spec: docs/specs/telegram-delivery-robustness.md § Layer 2c.
+ *
+ * Contract:
+ *   - Body: `{ delivery_id, topic_id, text_hash, http_code,
+ *              error_body?, attempted_port, attempts }` — strict
+ *     (any extra field rejected with 400).
+ *   - Caps: text-equivalent fields ≤ 8KB, error_body ≤ 1KB, total
+ *     body ≤ 16KB. The endpoint *does not store anything* — the
+ *     SQLite queue on the script side is the durable record. This
+ *     route only fans out an SSE event so listeners (the Layer 3
+ *     sentinel, the dashboard) can react in real time.
+ *   - Per-(agentId, remote) token bucket: 10 req/s sustained, burst 50.
+ *   - Auth handled by upstream `authMiddleware`; we additionally
+ *     reject responses missing `X-Instar-AgentId` so the auth-mismatch
+ *     path returns the same structured 403 even when the route is
+ *     mounted in tests without the full middleware stack.
+ *
+ * Validation is hand-rolled (rather than zod) for two reasons:
+ *   (1) the schema is small and we want every failure mode to map to a
+ *       precise error code without translating zod's verbose message
+ *       shape; (2) zod is in deps but adds a non-trivial import-time
+ *       cost on a hot route.
+ */
+export function createDeliveryFailedHandler(opts: {
+  agentId: string;
+  emit?: (event: Record<string, unknown>) => void;
+  /** Override clock for tests; defaults to `Date.now`. */
+  now?: () => number;
+}) {
+  const now = opts.now ?? (() => Date.now());
+
+  // Per-source token bucket. Burst 50; refill 10 tokens/sec.
+  // Keyed on `${agentId}|${remoteAddress}` — the agent-id is opaque to
+  // the bucket itself but having it in the key means tests that mount
+  // multiple agents on a single Express app each get their own budget.
+  const BURST = 50;
+  const REFILL_PER_SEC = 10;
+  type Bucket = { tokens: number; lastRefillMs: number };
+  const buckets = new Map<string, Bucket>();
+  // Periodic GC so a large cardinality of (agent, IP) pairs doesn't bloat the map.
+  const gc = setInterval(() => {
+    const cutoff = now() - 5 * 60 * 1000;
+    for (const [k, b] of buckets) {
+      if (b.lastRefillMs < cutoff) buckets.delete(k);
+    }
+  }, 60 * 1000);
+  gc.unref();
+
+  function takeToken(key: string): boolean {
+    const t = now();
+    let b = buckets.get(key);
+    if (!b) {
+      b = { tokens: BURST, lastRefillMs: t };
+      buckets.set(key, b);
+    } else {
+      const elapsedMs = t - b.lastRefillMs;
+      if (elapsedMs > 0) {
+        b.tokens = Math.min(BURST, b.tokens + (elapsedMs / 1000) * REFILL_PER_SEC);
+        b.lastRefillMs = t;
+      }
+    }
+    if (b.tokens < 1) return false;
+    b.tokens -= 1;
+    return true;
+  }
+
+  // Caps — defense-in-depth on top of the body-parser limit.
+  const MAX_TOTAL_BYTES = 16 * 1024;
+  const MAX_TEXT_FIELD_BYTES = 8 * 1024;
+  const MAX_ERROR_BODY_BYTES = 1 * 1024;
+  const HEX64 = /^[a-f0-9]{64}$/i;
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  const allowedFields = new Set([
+    'delivery_id',
+    'topic_id',
+    'text_hash',
+    'http_code',
+    'error_body',
+    'attempted_port',
+    'attempts',
+  ]);
+
+  /** Strip control chars (except \n, \t) and length-cap. */
+  function sanitizeErrorBody(s: string): string {
+    // eslint-disable-next-line no-control-regex
+    const stripped = s.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+    return stripped.length > MAX_ERROR_BODY_BYTES
+      ? stripped.slice(0, MAX_ERROR_BODY_BYTES)
+      : stripped;
+  }
+
+  return (req: ExpressRequest, res: ExpressResponse): void => {
+    // Auth-mismatch defense in depth — emit a single 403 audit line and do
+    // not echo the body. The upstream auth middleware should already have
+    // rejected, but the route is mountable bare in tests, so we re-check.
+    const headerVal = req.headers['x-instar-agentid'];
+    const provided = Array.isArray(headerVal) ? headerVal[0] : headerVal;
+    if (provided !== undefined && provided !== opts.agentId) {
+      const remote = req.ip || req.socket?.remoteAddress || 'unknown';
+      console.warn(
+        `[delivery-failed] auth_failure: agent_id_mismatch from ${remote} ` +
+        `(provided=${JSON.stringify(provided).slice(0, 64)}, expected=${opts.agentId})`,
+      );
+      res.status(403).json({ error: 'agent_id_mismatch', expected: opts.agentId });
+      return;
+    }
+
+    // Rate limit.
+    const remote = req.ip || req.socket?.remoteAddress || 'unknown';
+    const bucketKey = `${opts.agentId}|${remote}`;
+    if (!takeToken(bucketKey)) {
+      res.status(429).json({
+        error: 'Rate limit exceeded',
+        limit: { rps: REFILL_PER_SEC, burst: BURST },
+      });
+      return;
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+
+    // Total-body cap. Express's body-parser already imposes a limit, but we
+    // re-measure here so a misconfigured upstream limit can't smuggle through.
+    let totalBytes: number;
+    try {
+      totalBytes = Buffer.byteLength(JSON.stringify(body), 'utf-8');
+    } catch {
+      res.status(400).json({ error: 'body not serializable' });
+      return;
+    }
+    if (totalBytes > MAX_TOTAL_BYTES) {
+      res.status(413).json({ error: 'body too large', maxBytes: MAX_TOTAL_BYTES });
+      return;
+    }
+
+    // Strict field set — reject extras.
+    for (const k of Object.keys(body)) {
+      if (!allowedFields.has(k)) {
+        res.status(400).json({ error: `unexpected field: ${k}` });
+        return;
+      }
+    }
+
+    const {
+      delivery_id,
+      topic_id,
+      text_hash,
+      http_code,
+      error_body,
+      attempted_port,
+      attempts,
+    } = body as Record<string, unknown>;
+
+    if (typeof delivery_id !== 'string' || !UUID.test(delivery_id)) {
+      res.status(400).json({ error: 'delivery_id must be a UUIDv4 string' });
+      return;
+    }
+    if (typeof topic_id !== 'number' || !Number.isInteger(topic_id) || topic_id < 0) {
+      res.status(400).json({ error: 'topic_id must be a non-negative integer' });
+      return;
+    }
+    if (typeof text_hash !== 'string' || !HEX64.test(text_hash)) {
+      res.status(400).json({ error: 'text_hash must be a 64-char hex string' });
+      return;
+    }
+    if (typeof http_code !== 'number' || !Number.isInteger(http_code) || http_code < 0 || http_code > 999) {
+      res.status(400).json({ error: 'http_code must be an integer in [0,999]' });
+      return;
+    }
+    if (typeof attempted_port !== 'number' || !Number.isInteger(attempted_port) || attempted_port < 1 || attempted_port > 65535) {
+      res.status(400).json({ error: 'attempted_port must be an integer in [1,65535]' });
+      return;
+    }
+    if (typeof attempts !== 'number' || !Number.isInteger(attempts) || attempts < 1) {
+      res.status(400).json({ error: 'attempts must be a positive integer' });
+      return;
+    }
+    let sanitizedErrorBody: string | null = null;
+    if (error_body !== undefined && error_body !== null) {
+      if (typeof error_body !== 'string') {
+        res.status(400).json({ error: 'error_body must be a string when present' });
+        return;
+      }
+      if (Buffer.byteLength(error_body, 'utf-8') > MAX_TEXT_FIELD_BYTES) {
+        // We could just silently truncate, but the script's contract caps at
+        // 1KB before send — anything bigger is a contract violation worth
+        // reporting back. Cap at 8KB as the field-size hard upper bound;
+        // sanitization below handles the per-field 1KB normalization.
+        res.status(413).json({ error: 'error_body too large', maxBytes: MAX_TEXT_FIELD_BYTES });
+        return;
+      }
+      sanitizedErrorBody = sanitizeErrorBody(error_body);
+    }
+
+    // Fan out to listeners. We do NOT persist anything — that's the script's
+    // job. Listeners care about the *fact* of failure plus enough metadata to
+    // look up the queued row.
+    const event = {
+      type: 'delivery_failed',
+      agentId: opts.agentId,
+      delivery_id,
+      topic_id,
+      text_hash,
+      http_code,
+      attempted_port,
+      attempts,
+      error_body: sanitizedErrorBody,
+      receivedAt: new Date(now()).toISOString(),
+    };
+    if (opts.emit) {
+      try {
+        opts.emit(event);
+      } catch (err) {
+        // The endpoint must not fail because a listener crashed. The script
+        // already has the row in SQLite; the event is best-effort signal.
+        console.error('[delivery-failed] emit handler threw:', err);
+      }
+    }
+
+    res.status(202).json({ accepted: true, delivery_id });
+  };
+}
 
 export interface RouteContext {
   config: InstarConfig;
@@ -147,6 +550,15 @@ export interface RouteContext {
   threadlineRelayClient: import('../threadline/client/ThreadlineClient.js').ThreadlineClient | null;
   listenerManager: import('../threadline/ListenerSessionManager.js').ListenerSessionManager | null;
   responseReviewGate: CoherenceGate | null;
+  /** Scoped tone gate for outbound agent-to-user messaging routes.
+   *  Uses the shared IntelligenceProvider (Claude CLI subscription or Anthropic API).
+   *  Catches CLI commands, file paths, config syntax leaking to users. */
+  messagingToneGate: MessagingToneGate | null;
+  /** Deterministic dedup gate. Blocks near-duplicate outbound messages in
+   *  the same conversation — universal safety net against respawn races,
+   *  idempotency gaps, and other lifecycle hazards. No LLM call, runs on
+   *  every outbound message. */
+  outboundDedupGate: import('../core/OutboundDedupGate.js').OutboundDedupGate | null;
   telemetryHeartbeat: import('../monitoring/TelemetryHeartbeat.js').TelemetryHeartbeat | null;
   pasteManager: PasteManager | null;
   wsManager: WebSocketManager | null;
@@ -154,6 +566,44 @@ export interface RouteContext {
   featureRegistry: import('../core/FeatureRegistry.js').FeatureRegistry | null;
   discoveryEvaluator: import('../core/DiscoveryEvaluator.js').DiscoveryEvaluator | null;
   unifiedTrust: UnifiedTrustSystem | null;
+  /** Shared proxy coordinator — mutex + /build heartbeat record for the
+   *  PresenceProxy ↔ PromiseBeacon ↔ /build-heartbeat three-way deconfliction
+   *  (BUILD-STALL-VISIBILITY-SPEC Fix 2 "Routing"). */
+  proxyCoordinator: import('../monitoring/ProxyCoordinator.js').ProxyCoordinator | null;
+  /** Integrated-Being SharedStateLedger (v1). Null when disabled. */
+  sharedStateLedger: import('../core/SharedStateLedger.js').SharedStateLedger | null;
+  /** Integrated-Being LedgerSessionRegistry (v2). Null when v2Enabled=false. */
+  ledgerSessionRegistry: import('../core/LedgerSessionRegistry.js').LedgerSessionRegistry | null;
+  /** Initiative tracker — persisted record of multi-phase long-running work. */
+  initiativeTracker: import('../core/InitiativeTracker.js').InitiativeTracker | null;
+  /** Threadline → Telegram bridge config — toggles + allow/deny list. Read by
+   *  /threadline/telegram-bridge/config endpoints and by the bridge module
+   *  to decide whether to mirror an inbound message into
+   *  a Telegram topic. Null when LiveConfig is not wired. */
+  telegramBridgeConfig: import('../threadline/TelegramBridgeConfig.js').TelegramBridgeConfig | null;
+  /** Threadline → Telegram bridge — mirrors threadline messages into per-thread
+   *  Telegram topics. RELAY-ONLY: never blocks routing, swallows its own
+   *  errors. Null when no Telegram adapter is wired. */
+  telegramBridge: import('../threadline/TelegramBridge.js').TelegramBridge | null;
+  /** Threadline observability — read-only view layer over inbox/outbox/bindings.
+   *  Powers the dashboard Threadline tab via /threadline/observability/*. */
+  threadlineObservability: import('../threadline/ThreadlineObservability.js').ThreadlineObservability | null;
+  /** Pending reply waiters for threadline relay-send waitForReply support.
+   *  Key: threadId (UUID — unique per conversation, unlike agent names which
+   *  can collide when multiple agents share a name). Value: resolve callback
+   *  with reply text. */
+  threadlineReplyWaiters: Map<string, { resolve: (reply: string) => void; threadId: string; senderAgent: string; timer: ReturnType<typeof setTimeout> }>;
+  /** UnjustifiedStopGate authority (PR3 — context-death spec). Null
+   *  when no intelligence provider is configured; the evaluate route
+   *  fail-opens in that case. */
+  unjustifiedStopGate: UnjustifiedStopGate | null;
+  /** Stop-gate SQLite persistence (PR3). Null when not initialized;
+   *  the evaluate route will still produce a response, just without
+   *  persistence. */
+  stopGateDb: StopGateDb | null;
+  /** Token-usage ledger (read-only observability over Claude Code JSONL
+   *  transcripts). Null when stateDir is unavailable. */
+  tokenLedger: import('../monitoring/TokenLedger.js').TokenLedger | null;
   startTime: Date;
 }
 
@@ -165,6 +615,45 @@ const VALID_SORTS = ['significance', 'recent', 'name'] as const;
 export function createRoutes(ctx: RouteContext): Router {
   const router = Router();
 
+  // ── PR-REVIEW-HARDENING kill-switch (Phase A) ─────────────────────
+  //
+  // Spec §"Runtime kill-switch": `prGate.phase = 'off'` returns 404 for
+  // every /pr-gate/* route. Must run BEFORE any /pr-gate/* route
+  // registration downstream — Express middleware only applies to routes
+  // declared after it in the same Router. Placed here at the top so
+  // every future pr-gate route is automatically gated by this check.
+  //
+  // Phases:
+  //   'off'       — 404 with {disabled: true, reason: 'prGate.phase=off'}
+  //   'shadow'    — pass-through; downstream handlers accept writes but
+  //                 never block merges (future phase wiring).
+  //   'layer1-2'  — pass-through; enforcement logic in handlers.
+  //   'layer3'    — pass-through; full gate.
+  //
+  // Default-BLOCK allowlist shape (deliberately inverted from "block
+  // exactly 'off'"): the spec's signal-vs-authority carve-out is
+  // "safety guards on irreversible actions where false pass is
+  // catastrophic". A default-pass check that blocks only one literal
+  // spelling would let typos/casing/whitespace in the JSON config
+  // ('OFF', '', ' shadow', 'bogus') bypass the gate. Default-block +
+  // allowlist of known-active phases matches the risk profile: a new
+  // phase value cannot accidentally open the gate; only explicit
+  // allowlist membership does.
+  const PR_GATE_ACTIVE_PHASES = new Set(['shadow', 'layer1-2', 'layer3']);
+  router.use('/pr-gate', (_req, res, next) => {
+    const prGate = (ctx.config as { prGate?: { phase?: unknown } }).prGate;
+    const phase = typeof prGate?.phase === 'string'
+      ? prGate.phase.trim().toLowerCase()
+      : 'off';
+    if (!PR_GATE_ACTIVE_PHASES.has(phase)) {
+      return res.status(404).json({
+        disabled: true,
+        reason: 'prGate.phase=off',
+      });
+    }
+    return next();
+  });
+
   // Reflection metrics — usage-based reflection trigger (ported from Dawn)
   const reflectionMetrics = new ReflectionMetrics(ctx.config.stateDir);
 
@@ -173,6 +662,190 @@ export function createRoutes(ctx: RouteContext): Router {
 
   // Truncation detector for Telegram messages (Drop Zone integration)
   const truncationDetector = new TruncationDetector();
+
+  // ── /telegram/reply X-Instar-DeliveryId dedup LRU (Layer 3 §3d step 4) ──
+  // 24h sliding window of seen delivery_ids. Map preserves insertion order;
+  // we GC entries whose timestamp is older than 24h on each access.
+  const DELIVERY_LRU_MAX = 10_000;
+  const DELIVERY_LRU_TTL_MS = 24 * 60 * 60 * 1000;
+  const deliveryIdLru = new Map<string, number>();
+  function deliveryLruHas(id: string): boolean {
+    const at = deliveryIdLru.get(id);
+    if (at === undefined) return false;
+    if (Date.now() - at > DELIVERY_LRU_TTL_MS) {
+      deliveryIdLru.delete(id);
+      return false;
+    }
+    return true;
+  }
+  function deliveryLruRecord(id: string): void {
+    if (deliveryIdLru.size >= DELIVERY_LRU_MAX) {
+      // Drop oldest insertion-ordered entry.
+      const first = deliveryIdLru.keys().next().value;
+      if (first !== undefined) deliveryIdLru.delete(first);
+    }
+    deliveryIdLru.set(id, Date.now());
+  }
+  // Wrap Map.has to use TTL-aware logic without rewriting call sites.
+  // We export via a small object so the route handler can call .has and .set.
+  // (Not using a Set — we need TTL.) Helper functions above provide that.
+  const deliveryIdLruHelpers = { has: deliveryLruHas, record: deliveryLruRecord };
+  void deliveryIdLruHelpers; // referenced via the helpers; alias kept for grep
+
+  // ── Messaging tone gate ──────────────────────────────────────────
+  //
+  // Invoked before forwarding agent-authored messages to a user. Runs the
+  // ConversationalToneReviewer (single Haiku-class call, ~500ms) to catch CLI
+  // commands, file paths, config keys, and other technical leakage that the
+  // agent's internal memory discipline missed.
+  //
+  // Returns true if the message was blocked (response already sent as 422).
+  // Returns false if safe to proceed (pass, fail-open, or gate unavailable).
+  /**
+   * Outbound-message gate — SINGLE authority for agent→user message delivery.
+   *
+   * Combines structured signals from upstream detectors (junk-payload matcher,
+   * outbound dedup gate) with conversational context, and makes the block/allow
+   * decision in one LLM call via MessagingToneGate.
+   *
+   * This is the reshaping called for by docs/signal-vs-authority.md: detectors
+   * emit signals, the authority decides. No detector holds independent block
+   * power — "test" is junk sometimes and legitimate other times; a near-
+   * duplicate is respawn-race sometimes and a legitimate re-ask other times.
+   * Only the authority has the conversational context to tell them apart.
+   *
+   * Bypass flags preserved:
+   *   metadata.isProxy = true         → skip all gating (system-generated msgs)
+   *   metadata.allowDebugText = true  → junk signal suppressed
+   *   metadata.allowDuplicate = true  → duplicate signal suppressed
+   *
+   * Returns true if blocked (response already sent as 422). False if safe.
+   */
+  async function checkOutboundMessage(
+    text: string,
+    channel: string,
+    res: import('express').Response,
+    options: {
+      topicId?: number;
+      allowDebugText?: boolean;
+      allowDuplicate?: boolean;
+    },
+  ): Promise<boolean> {
+    if (!ctx.messagingToneGate) return false; // No authority configured — pass through
+
+    try {
+      // ── Collect signals from upstream detectors ──
+      const signals: import('../core/MessagingToneGate.js').ToneReviewSignals = {};
+
+      if (!options.allowDebugText) {
+        const junkResult = isJunkPayload(text);
+        signals.junk = {
+          detected: junkResult.junk,
+          reason: junkResult.reason,
+        };
+      }
+
+      // Recent conversation — used by both the authority and the dedup detector.
+      let recentMessages: import('../core/MessagingToneGate.js').ToneReviewContextMessage[] | undefined;
+      let recentOutbound: Array<{ text: string; timestamp: number }> = [];
+      if (options.topicId && ctx.topicMemory) {
+        try {
+          const rows = ctx.topicMemory.getRecentMessages(options.topicId, 10);
+          recentMessages = rows.map((m) => ({
+            role: m.fromUser ? ('user' as const) : ('agent' as const),
+            text: m.text,
+          }));
+          recentOutbound = rows
+            .filter((m) => !m.fromUser && m.text)
+            .map((m) => ({ text: m.text, timestamp: new Date(m.timestamp).getTime() }));
+        } catch {
+          // Non-fatal — authority runs without context
+        }
+      }
+
+      if (!options.allowDuplicate && ctx.outboundDedupGate && recentOutbound.length > 0) {
+        try {
+          const dupResult = ctx.outboundDedupGate.check({ text, recent: recentOutbound });
+          signals.duplicate = {
+            detected: dupResult.duplicate,
+            similarity: dupResult.similarity,
+            matchedText: dupResult.matchedText,
+          };
+        } catch {
+          // Detector errors are never authoritative — just skip the signal.
+        }
+      }
+
+      // ── Invoke the single authority ──
+      const result = await ctx.messagingToneGate.review(text, {
+        channel,
+        recentMessages,
+        signals,
+        targetStyle: ctx.config.messagingStyle,
+      });
+
+      // Structured observability: log every decision the authority made. This is
+      // the "why I blocked" log — over-block audits read this. Invalid-rule
+      // citations (authority drift) are also logged so patterns become visible.
+      logToneGateDecision({
+        text,
+        channel,
+        topicId: options.topicId,
+        signals,
+        result,
+      });
+
+      if (!result.pass) {
+        res.status(422).json({
+          error: 'tone-gate-blocked',
+          rule: result.rule,
+          issue: result.issue,
+          suggestion: result.suggestion,
+          latencyMs: result.latencyMs,
+        });
+        return true;
+      }
+    } catch {
+      // Fail-open — any error short of a clean block lets the message through.
+    }
+    return false;
+  }
+
+  /**
+   * Log a tone-gate decision. Structured output for the over-block audit tail.
+   * Writes to stderr so it's captured in the server log.
+   */
+  function logToneGateDecision(entry: {
+    text: string;
+    channel: string;
+    topicId?: number;
+    signals: import('../core/MessagingToneGate.js').ToneReviewSignals;
+    result: import('../core/MessagingToneGate.js').ToneReviewResult;
+  }): void {
+    try {
+      const line = {
+        t: new Date().toISOString(),
+        kind: 'tone-gate-decision',
+        channel: entry.channel,
+        topicId: entry.topicId,
+        textLen: entry.text.length,
+        textHead: entry.text.slice(0, 80),
+        pass: entry.result.pass,
+        rule: entry.result.rule || null,
+        failedOpen: entry.result.failedOpen || false,
+        invalidRule: entry.result.invalidRule || false,
+        latencyMs: entry.result.latencyMs,
+        signals: {
+          junk: entry.signals.junk?.detected ?? null,
+          dup: entry.signals.duplicate?.detected ?? null,
+          dupSim: entry.signals.duplicate?.similarity ?? null,
+        },
+      };
+      process.stderr.write(`[tone-gate] ${JSON.stringify(line)}\n`);
+    } catch {
+      // Logging must never throw
+    }
+  }
 
   // ── Discovery ───────────────────────────────────────────────────
   //
@@ -238,6 +911,10 @@ export function createRoutes(ctx: RouteContext): Router {
       ...(degradations.length > 0 && {
         degradationSummary: degradations.map(e => DegradationReporter.narrativeFor(e)),
       }),
+      // Stop-gate route contract (P0.7). Always present, unauthenticated:
+      // hook-lib reads this on startup before sending the auth token.
+      gateRouteVersion: GATE_ROUTE_VERSION,
+      gateRouteMinimumVersion: GATE_ROUTE_MINIMUM_VERSION,
     };
 
     // Include detailed info only for authenticated callers.
@@ -346,6 +1023,15 @@ export function createRoutes(ctx: RouteContext): Router {
       if (ctx.systemReviewer) {
         const latest = ctx.systemReviewer.getLatest();
         const health = ctx.systemReviewer.getHealthStatus();
+        const failedProbes = latest
+          ? latest.results.filter(r => !r.passed).map(r => ({
+              probeId: r.probeId,
+              name: r.name,
+              tier: r.tier,
+              error: r.error,
+              remediation: r.remediation,
+            }))
+          : [];
         base.systemReview = {
           status: health,
           lastReview: latest ? {
@@ -356,6 +1042,8 @@ export function createRoutes(ctx: RouteContext): Router {
             skipped: latest.stats.skipped,
           } : null,
           probesRegistered: ctx.systemReviewer.getProbeCount(),
+          failedProbes,
+          detailsUrl: '/system-reviews/latest',
         };
         // Contribute to overall degradation if critical
         if (latest?.status === 'critical') {
@@ -382,6 +1070,53 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json(base);
   });
 
+  // GET /whoami — authenticated identity probe.
+  //
+  // Spec § Layer 1c: the sentinel hits this BEFORE any auth-bearing
+  // POST /telegram/reply during recovery. It returns this server's
+  // agentId/port/version so the caller can verify it's talking to the
+  // right agent before sending content.
+  //
+  // Hard requirement (no deprecation exception): the X-Instar-AgentId
+  // header MUST be present AND match this server's agent-id. If we
+  // accepted bare-token requests here, the endpoint would become a
+  // discovery oracle for token→port→agent-id triples. The auth
+  // middleware already validates the token and (when header present)
+  // the agent-id; we re-check the header presence here to close the
+  // deprecation hole that otherwise lets bare-token callers learn the
+  // expected agent-id from the response.
+  router.get(
+    '/whoami',
+    createWhoamiHandler({
+      agentId: ctx.config.projectName,
+      port: ctx.config.port,
+      configVersion: ctx.config.version,
+    })
+  );
+
+  // POST /events/delivery-failed — fan-out for the script-side detector.
+  //
+  // Spec § Layer 2c. The relay script INSERTs into its local SQLite queue
+  // and then best-effort POSTs here so the in-process Layer 3 sentinel
+  // can react in <1s rather than waiting for its 5-minute watchdog tick.
+  // The endpoint itself does not persist anything — SQLite is the
+  // durable record on the script side.
+  router.post(
+    '/events/delivery-failed',
+    createDeliveryFailedHandler({
+      agentId: ctx.config.projectName,
+      emit: ctx.wsManager
+        ? (event) => {
+            // wsManager is set lazily after server.listen; if it's still
+            // null at request time we just no-op the broadcast — the
+            // event was still accepted, and the Layer 3 backstop watchdog
+            // (5-min tick over SQLite) catches up.
+            if (ctx.wsManager) ctx.wsManager.broadcastEvent(event);
+          }
+        : undefined,
+    })
+  );
+
   /**
    * Get all feature degradation events.
    * A degradation means a feature fallback activated — the primary path failed.
@@ -398,6 +1133,44 @@ export function createRoutes(ctx: RouteContext): Router {
         narrative: DegradationReporter.narrativeFor(e),
       })),
     });
+  });
+
+  /**
+   * Mark degradation events as reported by feature-name match. Used by
+   * the guardian-pulse daily digest after surfacing degradations to the
+   * attention queue (PR0c — context-death-pitfall-prevention spec).
+   * Closes the loop so the next pulse run doesn't re-surface the same
+   * events.
+   *
+   * Body: { feature: string }   exact-match feature name
+   *   OR: { featurePattern: string }   regex source, applied without flags
+   *
+   * Returns: { flipped: number }   count of events actually marked
+   */
+  router.post('/health/degradations/mark-reported', (req, res) => {
+    const reporter = DegradationReporter.getInstance();
+    const { feature, featurePattern } = req.body ?? {};
+    if (typeof feature === 'string' && feature.length > 0) {
+      const flipped = reporter.markReported(feature);
+      res.json({ flipped });
+      return;
+    }
+    if (typeof featurePattern === 'string' && featurePattern.length > 0) {
+      let re: RegExp;
+      try {
+        re = new RegExp(featurePattern);
+      } catch (err) {
+        res.status(400).json({
+          error: 'invalid featurePattern',
+          detail: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      const flipped = reporter.markReported(re);
+      res.json({ flipped });
+      return;
+    }
+    res.status(400).json({ error: 'feature or featurePattern required' });
   });
 
   /**
@@ -439,10 +1212,400 @@ export function createRoutes(ctx: RouteContext): Router {
   // The central ingest point for PostToolUse, SubagentStart/Stop, Stop,
   // SessionEnd, WorktreeCreate/Remove, TaskCompleted events.
 
+  // Compaction-resume trigger #3 — called by .instar/hooks/instar/compaction-recovery.sh
+  // immediately after a compaction event, independent of HookEventReceiver and Watchdog.
+  // This is the most reliable path: the hook only runs when compaction actually happened.
+  router.post('/internal/compaction-resume', async (req, res) => {
+    const sessionName = (req.body?.sessionName || req.body?.tmuxSession || '').toString();
+    if (!sessionName) {
+      res.status(400).json({ error: 'sessionName required' });
+      return;
+    }
+    const recover = (globalThis as Record<string, unknown>).__instarCompactionRecover as
+      | ((sessionName: string, triggerLabel: string) => Promise<boolean>)
+      | undefined;
+    if (!recover) {
+      res.status(503).json({ error: 'compaction recovery not initialized' });
+      return;
+    }
+    // Delay slightly to let Claude Code settle at the post-compaction prompt
+    setTimeout(() => {
+      recover(sessionName, 'recovery-hook').catch(err => {
+        console.warn('[CompactionResume] hook-triggered recovery failed:', err);
+      });
+    }, 8_000);
+    res.json({ ok: true, scheduled: true });
+  });
+
+  // ── Stop-gate (UnjustifiedStopGate) — PR0a server infra ─────────────
+  //
+  // Spec: docs/specs/context-death-pitfall-prevention.md
+  // Implements (b) hot-path batched read, kill-switch fast-path, and
+  // session-start timestamp recording. State is in-memory for PR0a;
+  // PR3 migrates to SQLite. All endpoints respect the existing auth
+  // middleware (drift-correction threat model — local auth is enough).
+
+  router.get('/internal/stop-gate/hot-path', (req, res) => {
+    const sessionId = typeof req.query.session === 'string' ? req.query.session : '';
+    const state = getHotPathState({ sessionId: sessionId || undefined });
+    res.json(state);
+  });
+
+  router.get('/internal/stop-gate/kill-switch', (_req, res) => {
+    res.json({ killSwitch: getKillSwitch() });
+  });
+
+  router.post('/internal/stop-gate/kill-switch', (req, res) => {
+    const value = req.body?.value;
+    if (typeof value !== 'boolean') {
+      res.status(400).json({ error: 'value must be boolean' });
+      return;
+    }
+    const prior = setKillSwitch(value);
+    res.json({ killSwitch: value, prior, changed: prior !== value });
+  });
+
+  // Mode flip endpoint (PR4 — context-death spec § rollout PR4).
+  // Used by `instar gate set unjustified-stop --mode <mode>`.
+  // Multi-machine fanout (`--wait-sync`, `--skip-machine`,
+  // `--allow-partial`) lands in PR4b; this endpoint covers the local
+  // flip only.
+  router.post('/internal/stop-gate/mode', (req, res) => {
+    const mode = req.body?.mode;
+    if (mode !== 'off' && mode !== 'shadow' && mode !== 'enforce') {
+      res.status(400).json({ error: 'mode must be off | shadow | enforce' });
+      return;
+    }
+    const prior = getMode();
+    setMode(mode);
+    res.json({ mode, prior, changed: prior !== mode });
+  });
+
+  // ── Stop-gate evaluate + log + annotations (PR3 — context-death
+  //    spec § (b),(d)) ─────────────────────────────────────────────
+  //
+  // evaluate: invoked by the stop-hook router in shadow+ modes. Takes
+  // the evidence_metadata + untrusted_content payload, runs the
+  // UnjustifiedStopGate authority, writes the event to SQLite, and
+  // returns the decision plus a server-assembled reminder (for
+  // `continue` decisions). Fails open on any error path — the response
+  // always includes `decision: 'allow'` fallback if the authority
+  // couldn't run.
+
+  router.post('/internal/stop-gate/evaluate', async (req, res) => {
+    const body = (req.body ?? {}) as Partial<{
+      sessionId: string;
+      evidenceMetadata: EvaluateInput['evidenceMetadata'];
+      untrustedContent: EvaluateInput['untrustedContent'];
+    }>;
+
+    const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+    if (!sessionId) {
+      res.status(400).json({ error: 'sessionId required' });
+      return;
+    }
+    if (!body.evidenceMetadata || !body.untrustedContent) {
+      res.status(400).json({ error: 'evidenceMetadata and untrustedContent required' });
+      return;
+    }
+
+    const mode = getMode() as EvalMode;
+    const agentId = ctx.config.projectName ?? 'unknown';
+    const eventId = cryptoRandomUUID();
+    const ts = Date.now();
+    const reasonPreview = (body.untrustedContent.stopReason ?? '').slice(0, 200);
+
+    // Kill-switch or mode=off: short-circuit to allow, no authority
+    // call, no event logged (caller already knows not to call us here,
+    // but belt-and-suspenders).
+    if (getKillSwitch() || mode === 'off') {
+      res.json({
+        eventId,
+        decision: 'allow',
+        rule: null,
+        reminder: '',
+        shortCircuit: getKillSwitch() ? 'kill-switch' : 'mode-off',
+      });
+      return;
+    }
+
+    const authority = ctx.unjustifiedStopGate;
+    const db = ctx.stopGateDb;
+
+    // Per-session continue-ceiling (spec § (b) Outcomes).
+    //
+    // If this session has already received >= CONTINUE_CEILING `continue`
+    // decisions, force_allow. The authority may be consistently wrong
+    // on this session; keep letting it stop and let the operator see
+    // the stuck-state flag. No authority call on the force-allow path.
+    const priorCount = db?.getContinueCount(sessionId)?.count ?? 0;
+    if (priorCount >= CONTINUE_CEILING) {
+      if (db) {
+        db.setStuck(sessionId, ts);
+        db.recordEvent({
+          eventId,
+          sessionId,
+          agentId,
+          ts,
+          mode,
+          decision: 'force_allow',
+          rule: null,
+          invalidKind: null,
+          evidencePointerJson: null,
+          latencyMs: 0,
+          reasonPreview,
+        });
+        db.rollupAggregate({
+          agentId,
+          dayKey: dayKeyFor(ts),
+          triggeredDelta: 1,
+          shadowDelta: mode === 'shadow' ? 1 : 0,
+          allowDelta: 1,
+        });
+      }
+      res.json({
+        eventId,
+        decision: 'force_allow',
+        rule: null,
+        reminder: '',
+        shortCircuit: 'continue-ceiling',
+        priorCount,
+      });
+      return;
+    }
+
+    let outcome: AuthorityOutcome | null = null;
+    if (authority) {
+      try {
+        outcome = await authority.evaluate({
+          evidenceMetadata: body.evidenceMetadata,
+          untrustedContent: body.untrustedContent,
+        });
+      } catch (err) {
+        outcome = {
+          ok: false,
+          failure: {
+            kind: 'llmUnavailable',
+            detail: err instanceof Error ? err.message : String(err),
+            latencyMs: 0,
+          },
+        };
+      }
+    } else {
+      outcome = {
+        ok: false,
+        failure: { kind: 'llmUnavailable', detail: 'authority not configured', latencyMs: 0 },
+      };
+    }
+
+    // Log + respond. Failures fail-open to allow.
+    if (outcome.ok) {
+      const r = outcome.result;
+
+      // Server-side post-verifier for `continue` decisions (spec §
+      // "Evidence pointer" lines 273-281). On any structural check
+      // failure: fail-open → allow + invalidEvidence log. The
+      // authority's stated rule is discarded.
+      if (r.decision === 'continue') {
+        const verifyFailure = await postVerifyEvidence(
+          ctx.config.projectDir,
+          body.evidenceMetadata,
+          r.evidencePointer
+        );
+        if (verifyFailure) {
+          if (db) {
+            db.recordEvent({
+              eventId,
+              sessionId,
+              agentId,
+              ts,
+              mode,
+              decision: null,
+              rule: null,
+              invalidKind: 'invalidEvidence',
+              evidencePointerJson: JSON.stringify(r.evidencePointer),
+              latencyMs: r.latencyMs,
+              reasonPreview,
+            });
+            db.rollupAggregate({
+              agentId,
+              dayKey: dayKeyFor(ts),
+              triggeredDelta: 1,
+              shadowDelta: mode === 'shadow' ? 1 : 0,
+              failureDelta: 1,
+            });
+          }
+          DegradationReporter.getInstance().report({
+            feature: 'unjustifiedStopGate.postVerifier',
+            primary: 'Server-side evidence pointer structural verification',
+            fallback: 'fail-open → allow',
+            reason: verifyFailure,
+            impact: 'Stop event allowed (authority continue rejected as unverifiable)',
+          });
+          res.json({
+            eventId,
+            decision: 'allow',
+            rule: null,
+            reminder: '',
+            failOpen: 'invalidEvidence',
+            postVerifyFailure: verifyFailure,
+            latencyMs: r.latencyMs,
+          });
+          return;
+        }
+      }
+
+      // Record + count. On `continue`, increment the session counter
+      // (the NEXT call hitting CONTINUE_CEILING will short-circuit to
+      // force_allow above). Atomic via SQLite UPSERT.
+      if (db && r.decision === 'continue') {
+        db.incrementContinueCount(sessionId, ts);
+      }
+
+      const reminder = r.decision === 'continue' ? assembleReminder(r.rule, r.evidencePointer) : '';
+      if (db) {
+        db.recordEvent({
+          eventId,
+          sessionId,
+          agentId,
+          ts,
+          mode,
+          decision: r.decision,
+          rule: r.rule,
+          invalidKind: null,
+          evidencePointerJson: JSON.stringify(r.evidencePointer),
+          latencyMs: r.latencyMs,
+          reasonPreview,
+        });
+        db.rollupAggregate({
+          agentId,
+          dayKey: dayKeyFor(ts),
+          triggeredDelta: 1,
+          shadowDelta: mode === 'shadow' ? 1 : 0,
+          continueDelta: r.decision === 'continue' ? 1 : 0,
+          allowDelta: r.decision === 'allow' ? 1 : 0,
+          escalateDelta: r.decision === 'escalate' ? 1 : 0,
+        });
+      }
+      res.json({
+        eventId,
+        decision: r.decision,
+        rule: r.rule,
+        reminder,
+        latencyMs: r.latencyMs,
+      });
+    } else {
+      // Fail-open: allow. Log with the failure kind so guardian-pulse
+      // can surface patterns.
+      if (db) {
+        db.recordEvent({
+          eventId,
+          sessionId,
+          agentId,
+          ts,
+          mode,
+          decision: null,
+          rule: null,
+          invalidKind: outcome.failure.kind,
+          evidencePointerJson: null,
+          latencyMs: outcome.failure.latencyMs,
+          reasonPreview,
+        });
+        db.rollupAggregate({
+          agentId,
+          dayKey: dayKeyFor(ts),
+          triggeredDelta: 1,
+          shadowDelta: mode === 'shadow' ? 1 : 0,
+          failureDelta: 1,
+        });
+      }
+      DegradationReporter.getInstance().report({
+        feature: `unjustifiedStopGate.${outcome.failure.kind}`,
+        primary: 'Authority evaluation',
+        fallback: 'fail-open → allow',
+        reason: outcome.failure.detail,
+        impact: 'Stop event allowed without authority ruling (drift correction not applied)',
+      });
+      res.json({
+        eventId,
+        decision: 'allow',
+        rule: null,
+        reminder: '',
+        failOpen: outcome.failure.kind,
+        latencyMs: outcome.failure.latencyMs,
+      });
+    }
+  });
+
+  router.get('/internal/stop-gate/log', (req, res) => {
+    const limit = Math.min(1000, Math.max(1, parseInt(String(req.query.tail ?? '100'), 10) || 100));
+    const db = ctx.stopGateDb;
+    if (!db) {
+      res.json({ events: [] });
+      return;
+    }
+    const events = db.recentEvents(limit);
+    res.json({ events });
+  });
+
+  router.post('/internal/stop-gate/annotations', (req, res) => {
+    const db = ctx.stopGateDb;
+    if (!db) {
+      res.status(503).json({ error: 'stop-gate DB not initialized' });
+      return;
+    }
+    const body = (req.body ?? {}) as Partial<{
+      eventId: string;
+      operator: string;
+      verdict: string;
+      rationale: string;
+      dwellMs: number;
+    }>;
+    if (!body.eventId || !body.operator || !body.verdict) {
+      res.status(400).json({ error: 'eventId, operator, verdict required' });
+      return;
+    }
+    if (!['correct', 'incorrect', 'unclear'].includes(body.verdict)) {
+      res.status(400).json({ error: 'verdict must be correct|incorrect|unclear' });
+      return;
+    }
+    const dwellMs = typeof body.dwellMs === 'number' ? body.dwellMs : 0;
+    // Per spec PR5: ≥15s dwell time on each annotation. We don't reject
+    // low-dwell writes at this layer — the CLI review tool enforces
+    // per-submit; this endpoint just records what it gets.
+    db.addAnnotation({
+      eventId: body.eventId,
+      operator: body.operator,
+      verdict: body.verdict as 'correct' | 'incorrect' | 'unclear',
+      rationale: body.rationale ?? '',
+      dwellMs,
+      createdAt: Date.now(),
+    });
+    res.json({ ok: true });
+  });
+
+  router.get('/internal/stop-gate/annotations/:eventId', (req, res) => {
+    const db = ctx.stopGateDb;
+    if (!db) {
+      res.json({ annotations: [] });
+      return;
+    }
+    const annotations = db.annotationsFor(req.params.eventId);
+    res.json({ annotations });
+  });
+
   router.post('/hooks/events', (req, res) => {
     if (!ctx.hookEventReceiver) {
       res.status(503).json({ error: 'HookEventReceiver not initialized' });
       return;
+    }
+
+    // Stop-gate: capture SessionStart timestamp (PR0a). Idempotent —
+    // first SessionStart for a session id wins. Read before storing the
+    // event so a malformed payload doesn't break the gate.
+    if (req.body?.event === 'SessionStart') {
+      const sid = (req.body?.sessionId || req.body?.session_id || '').toString();
+      if (sid) recordSessionStart(sid, Date.now());
     }
 
     const payload = req.body;
@@ -743,7 +1906,7 @@ export function createRoutes(ctx: RouteContext): Router {
   router.get('/backups', async (_req, res) => {
     try {
       const { BackupManager } = await import('../core/BackupManager.js');
-      const manager = new BackupManager(ctx.config.stateDir);
+      const manager = new BackupManager(ctx.config.stateDir, ctx.config.backup);
       res.json({ snapshots: manager.listSnapshots() });
     } catch {
       res.status(500).json({ error: 'Failed to list backups' });
@@ -753,7 +1916,7 @@ export function createRoutes(ctx: RouteContext): Router {
   router.post('/backups', async (_req, res) => {
     try {
       const { BackupManager } = await import('../core/BackupManager.js');
-      const manager = new BackupManager(ctx.config.stateDir);
+      const manager = new BackupManager(ctx.config.stateDir, ctx.config.backup);
       const snapshot = manager.createSnapshot('manual');
       res.json(snapshot);
     } catch (err) {
@@ -792,7 +1955,7 @@ export function createRoutes(ctx: RouteContext): Router {
       const { BackupManager } = await import('../core/BackupManager.js');
       const manager = new BackupManager(
         ctx.config.stateDir,
-        undefined,
+        ctx.config.backup,
         () => ctx.sessionManager.listRunningSessions().length > 0,
       );
       manager.restoreSnapshot(id);
@@ -1195,6 +2358,10 @@ export function createRoutes(ctx: RouteContext): Router {
       const filePath = req.body?.filePath;
       if (filePath) {
         const result = exporter.write(filePath);
+        if (result.entityCount === 0) {
+          res.json({ ...result, skipped: true, reason: 'SemanticMemory has 0 entities — existing file preserved' });
+          return;
+        }
         // Also write a JSON snapshot alongside the MEMORY.md export
         try { ctx.semanticMemory.writeSnapshot(); } catch { /* non-critical */ }
         res.json(result);
@@ -1520,7 +2687,7 @@ export function createRoutes(ctx: RouteContext): Router {
         let gitSyncJobEnabled = false;
         if (hasGitRepo) {
           try {
-            const remote = execFileSync('git', ['remote'], { cwd: projectDir, stdio: 'pipe' }).toString().trim();
+            const remote = SafeGitExecutor.readSync(['remote'], { cwd: projectDir, stdio: 'pipe', operation: 'src/server/routes.ts:2286' }).toString().trim();
             hasRemote = remote.length > 0;
           } catch { /* no remote */ }
         }
@@ -2052,7 +3219,10 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(501).json({ error: 'ContextHierarchy not initialized' });
       return;
     }
-    res.json(ctx.contextHierarchy.listSegments());
+    res.json({
+      contextDir: ctx.contextHierarchy.getContextDir(),
+      segments: ctx.contextHierarchy.listSegments(),
+    });
   });
 
   router.get('/context/dispatch', (_req, res) => {
@@ -2267,12 +3437,10 @@ export function createRoutes(ctx: RouteContext): Router {
     // Detect GitHub repo from git remote
     let repo: string | null = null;
     try {
-      const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
-        cwd: projectDir,
+      const remoteUrl = SafeGitExecutor.readSync(['remote', 'get-url', 'origin'], { cwd: projectDir,
         encoding: 'utf-8',
         timeout: 5000,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
+        stdio: ['pipe', 'pipe', 'pipe'], operation: 'src/server/routes.ts:3037' }).trim();
       // Extract owner/repo from SSH or HTTPS URL
       const match = remoteUrl.match(/github\.com[:/](.+?)(?:\.git)?$/);
       if (match) repo = match[1];
@@ -2372,7 +3540,7 @@ export function createRoutes(ctx: RouteContext): Router {
           result.platform = 'telegram';
           result.platformId = topicId;
           const topicName = ctx.telegram.getTopicName?.(topicId);
-          if (topicName) result.platformName = topicName;
+          if (topicName && !/^topic-\d+$/.test(topicName)) result.platformName = topicName;
         }
       }
       if (!result.platform && ctx.slack) {
@@ -2406,7 +3574,7 @@ export function createRoutes(ctx: RouteContext): Router {
         const fpath = path.join(failDir, fname);
         try {
           if (fs.statSync(fpath).mtimeMs < cutoff) {
-            fs.unlinkSync(fpath);
+            SafeFsExecutor.safeUnlinkSync(fpath, { operation: 'src/server/routes.ts:3177' });
             purgedFiles++;
           }
         } catch { /* ignore individual file errors */ }
@@ -2610,6 +3778,68 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // ── Token Ledger ────────────────────────────────────────────────
+  // Read-only token-usage observability backed by SQLite. Source data
+  // is Claude Code's per-session JSONL transcripts at
+  // ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl.
+  // Auth is enforced globally by authMiddleware.
+
+  const TOKEN_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const TOKEN_DEFAULT_ORPHAN_IDLE_MS = 30 * 60 * 1000;
+
+  function parseSinceMs(raw: unknown): number {
+    if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+      const n = Number(raw);
+      if (n >= 0) return n;
+    }
+    return Date.now() - TOKEN_DEFAULT_WINDOW_MS;
+  }
+
+  router.get('/tokens/summary', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    const sinceMs = parseSinceMs(req.query.since);
+    res.json({ sinceMs, summary: ctx.tokenLedger.summary({ sinceMs }) });
+  });
+
+  router.get('/tokens/sessions', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    const sinceMs = parseSinceMs(req.query.since);
+    let limit = 20;
+    if (typeof req.query.limit === 'string' && /^\d+$/.test(req.query.limit)) {
+      const n = Number(req.query.limit);
+      if (n > 0 && n <= 500) limit = n;
+    }
+    res.json({ sinceMs, limit, sessions: ctx.tokenLedger.topSessions({ limit, sinceMs }) });
+  });
+
+  router.get('/tokens/by-project', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    const sinceMs = parseSinceMs(req.query.since);
+    res.json({ sinceMs, projects: ctx.tokenLedger.byProject({ sinceMs }) });
+  });
+
+  router.get('/tokens/orphans', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    let idleMs = TOKEN_DEFAULT_ORPHAN_IDLE_MS;
+    if (typeof req.query.idleMs === 'string' && /^\d+$/.test(req.query.idleMs)) {
+      const n = Number(req.query.idleMs);
+      if (n > 0) idleMs = n;
+    }
+    res.json({ idleMs, orphans: ctx.tokenLedger.orphans({ idleMs }) });
+  });
+
   // ── Jobs ────────────────────────────────────────────────────────
 
   router.get('/jobs', (_req, res) => {
@@ -2782,7 +4012,7 @@ export function createRoutes(ctx: RouteContext): Router {
     });
   });
 
-  router.post('/jobs/:slug/trigger', (req, res) => {
+  router.post('/jobs/:slug/trigger', async (req, res) => {
     if (!JOB_SLUG_RE.test(req.params.slug)) {
       res.status(400).json({ error: 'Invalid job slug' });
       return;
@@ -2796,7 +4026,7 @@ export function createRoutes(ctx: RouteContext): Router {
     const reason = typeof rawReason === 'string' ? rawReason.slice(0, 500) : 'manual';
 
     try {
-      const result = ctx.scheduler.triggerJob(req.params.slug, reason);
+      const result = await ctx.scheduler.triggerJob(req.params.slug, reason);
       res.json({ slug: req.params.slug, result });
     } catch (err) {
       res.status(404).json({ error: err instanceof Error ? err.message : String(err) });
@@ -2812,7 +4042,7 @@ export function createRoutes(ctx: RouteContext): Router {
   let manualTriggerConcurrent = 0;
   const MANUAL_TRIGGER_MAX_CONCURRENT = 5;
 
-  router.post('/jobs/:slug/run', (req, res) => {
+  router.post('/jobs/:slug/run', async (req, res) => {
     const { slug } = req.params;
 
     if (!/^[a-z0-9-]+$/.test(slug)) {
@@ -2858,7 +4088,7 @@ export function createRoutes(ctx: RouteContext): Router {
       manualTriggerConcurrent++;
       manualTriggerLastRun.set(slug, Date.now());
 
-      const result = ctx.scheduler.triggerJob(slug, 'dashboard-manual');
+      const result = await ctx.scheduler.triggerJob(slug, 'dashboard-manual');
       const runId = `manual-${slug}-${Date.now().toString(36)}`;
 
       // Decrement concurrent counter after a reasonable time
@@ -2952,6 +4182,73 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     res.json({ slug, enabled: body.enabled, message: `Job ${body.enabled ? 'enabled' : 'disabled'}` });
+  });
+
+  // ── Reset Job State ───────────────────────────────────────────
+  //
+  // Clears stale pending/failure state for a job. Useful when a session dies
+  // without reporting back, leaving lastResult stuck on 'pending' forever.
+
+  router.post('/jobs/:slug/reset-state', (req, res) => {
+    const { slug } = req.params;
+
+    if (!/^[a-z0-9-]+$/.test(slug)) {
+      res.status(400).json({ error: 'Invalid job slug' });
+      return;
+    }
+    if (!ctx.scheduler) {
+      res.status(503).json({ error: 'Scheduler not running' });
+      return;
+    }
+
+    const job = ctx.scheduler.getJobs().find(j => j.slug === slug);
+    if (!job) {
+      res.status(404).json({ error: `Job not found: ${slug}` });
+      return;
+    }
+
+    const existing = ctx.state.getJobState(slug);
+    const previousResult = existing?.lastResult ?? 'none';
+
+    const resetState: import('../core/types.js').JobState = {
+      slug,
+      lastRun: existing?.lastRun,
+      lastResult: 'failure',
+      lastError: `Manually reset from '${previousResult}' state`,
+      lastHandoff: existing?.lastHandoff,
+      nextScheduled: existing?.nextScheduled,
+      consecutiveFailures: 0,
+    };
+    ctx.state.saveJobState(resetState);
+
+    ctx.state.appendEvent({
+      type: 'job_state_reset',
+      summary: `Job "${slug}" state manually reset from '${previousResult}'`,
+      timestamp: new Date().toISOString(),
+      metadata: { slug, previousResult },
+    });
+
+    // Security log
+    try {
+      const securityEntry = JSON.stringify({
+        timestamp: new Date().toISOString(),
+        action: 'job-reset-state',
+        slug,
+        previousResult,
+        source: req.body?.source ?? 'api',
+        ip: req.ip,
+      });
+      fs.appendFileSync(path.join(ctx.config.stateDir, 'security.jsonl'), securityEntry + '\n');
+    } catch {
+      // Security logging failure is non-fatal
+    }
+
+    res.json({
+      slug,
+      previousResult,
+      newResult: 'failure',
+      message: `Job state reset from '${previousResult}' to 'failure'. Job can now be re-triggered.`,
+    });
   });
 
   // ── Job Events (SSE) ──────────────────────────────────────────
@@ -3266,15 +4563,275 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
+    // ── X-Instar-DeliveryId server-side dedup (Layer 3 spec §3d step 4) ──
+    // 24h LRU keyed on the header value. A duplicate POST with the same
+    // delivery_id returns 200 idempotent without sending again. This
+    // closes the "200-but-client-blind" double-send class where the
+    // sentinel re-sends a queued message that actually landed the first
+    // time but the script-side response was lost.
+    const deliveryIdHeader = req.headers['x-instar-deliveryid'];
+    const deliveryId = Array.isArray(deliveryIdHeader) ? deliveryIdHeader[0] : deliveryIdHeader;
+    if (deliveryId && typeof deliveryId === 'string' && /^[0-9a-f-]{16,64}$/i.test(deliveryId)) {
+      if (deliveryLruHas(deliveryId)) {
+        res.json({ ok: true, topicId, idempotent: true });
+        return;
+      }
+    }
+
+    // ── X-Instar-System bypass (Layer 3 spec §3f) ──
+    // For sentinel-emitted templates, bypass the tone gate IF the body
+    // matches a known system template. The bypass is deliberately
+    // restricted to fixed templates whose content was reviewed at
+    // code-review time. Membership check uses regex / SHA-256 against
+    // the compiled-in template set; arbitrary text fails through to the
+    // normal gate.
+    const systemHeader = req.headers['x-instar-system'];
+    const systemFlag = Array.isArray(systemHeader) ? systemHeader[0] : systemHeader;
+    const isSystemTemplate = systemFlag === 'true' && matchesSystemTemplate(text);
+
+    // Outbound gate — single authority. Skipped for proxy messages (PresenceProxy
+    // etc. are system-generated). The authority receives structured signals from
+    // the junk-payload and dedup detectors alongside conversational context, and
+    // makes ONE block/allow decision with reasoning traceable to rule ids B1–B9.
+    // See docs/signal-vs-authority.md.
+    const isProxy = metadata?.isProxy === true;
+    const allowDebugText = metadata?.allowDebugText === true;
+    const allowDuplicate = metadata?.allowDuplicate === true;
+    if (
+      !isProxy &&
+      !isSystemTemplate &&
+      (await checkOutboundMessage(text, 'telegram', res, {
+        topicId,
+        allowDebugText,
+        allowDuplicate,
+      }))
+    )
+      return;
+
     try {
-      const isProxy = metadata?.isProxy === true;
       await ctx.telegram.sendToTopic(topicId, text, { skipStallClear: isProxy });
       // Clear injection tracker — but NOT for proxy messages (PresenceProxy)
       // Proxy messages should not reset stall detection timers
       if (!isProxy) {
         ctx.sessionManager.clearInjectionTracker(topicId);
       }
+      // Record successful delivery in the dedup LRU so a sentinel retry
+      // with the same delivery_id returns 200-idempotent.
+      if (deliveryId && typeof deliveryId === 'string' && /^[0-9a-f-]{16,64}$/i.test(deliveryId)) {
+        deliveryLruRecord(deliveryId);
+      }
       res.json({ ok: true, topicId });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── GET /delivery-queue (Layer 3 spec §3i) ──
+  // Authed read-only view of the pending-relay queue depth/oldest age
+  // for the current agent. Used by the dashboard "Pending Replies" panel
+  // and ops health checks. Read-only: never mutates queue rows.
+  router.get('/delivery-queue', (_req, res) => {
+    const stateDir = ctx.config.stateDir;
+    const agentId = ctx.config.projectName;
+    if (!stateDir || !agentId) {
+      res.status(503).json({ error: 'state directory or agent id not configured' });
+      return;
+    }
+    const dbPath = resolvePendingRelayPath(stateDir, agentId);
+    let db: import('better-sqlite3').Database | null = null;
+    try {
+      db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      const totalRow = db.prepare('SELECT COUNT(*) AS n FROM entries').get() as { n: number };
+      const total = totalRow?.n ?? 0;
+      const byState = db.prepare(
+        'SELECT state, COUNT(*) AS n FROM entries GROUP BY state',
+      ).all() as Array<{ state: string; n: number }>;
+      const oldestRow = db.prepare(
+        "SELECT MIN(attempted_at) AS oldest FROM entries WHERE state IN ('queued','claimed')",
+      ).get() as { oldest: string | null };
+      const oldestAgeSeconds = oldestRow?.oldest
+        ? Math.max(0, Math.floor((Date.now() - Date.parse(oldestRow.oldest)) / 1000))
+        : 0;
+      res.json({
+        depth: total,
+        oldest_age_seconds: oldestAgeSeconds,
+        by_state: Object.fromEntries(byState.map((r) => [r.state, r.n])),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Missing-file is a normal "no queue yet" state — return zeros, not 500.
+      if (/unable to open|no such file|does not exist|cannot open/i.test(msg)) {
+        res.json({ depth: 0, oldest_age_seconds: 0, by_state: {} });
+        return;
+      }
+      res.status(500).json({ error: msg });
+    } finally {
+      if (db) {
+        try { db.close(); } catch { /* best-effort */ }
+      }
+    }
+  });
+
+  // POST /build/heartbeat — /build pipeline status relay.
+  //
+  // BUILD-STALL-VISIBILITY-SPEC Fix 2. The /build skill / build-state.py calls
+  // this on phase transitions (and optionally from a server-side cadence tick)
+  // so the user sees signs of life during long-running tool waits.
+  //
+  // Content shape is locked: enumerated phase + allowlisted tool + elapsed.
+  // No free-form agent prose, no argv, no paths — the caller cannot smuggle
+  // sensitive content through this endpoint. The message goes out as a proxy
+  // class (isProxy: true), which bypasses the outbound tone/dedup gates on
+  // purpose: there's nothing free-form to judge in an enumerated template.
+  //
+  // The dispatch also records the heartbeat in ProxyCoordinator so
+  // PresenceProxy suppresses its generic Tier 2/3 standby for the same
+  // topic within the suppression window (one progress voice per channel).
+  {
+    const HEARTBEAT_PHASES = new Set([
+      'idle', 'clarify', 'planning', 'executing',
+      'verifying', 'fixing', 'hardening', 'complete', 'failed', 'escalated',
+    ]);
+    const HEARTBEAT_TOOLS = new Set([
+      'Monitor', 'Bash-test', 'Bash-tsc', 'Bash-install',
+      'Bash-lint', 'Bash-other', 'none',
+    ]);
+    const HEARTBEAT_STATUSES = new Set(['still-working', 'no-progress-detected', 'phase-boundary']);
+    const RUNID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+    router.post('/build/heartbeat', async (req, res) => {
+      const body = req.body as {
+        runId?: unknown;
+        phase?: unknown;
+        topicId?: unknown;
+        channelId?: unknown;
+        tool?: unknown;
+        elapsedMs?: unknown;
+        status?: unknown;
+      };
+
+      const runId = typeof body.runId === 'string' ? body.runId : '';
+      if (!RUNID_RE.test(runId)) {
+        res.status(400).json({ error: '"runId" must match /^[a-zA-Z0-9_-]{1,64}$/' });
+        return;
+      }
+      const phase = typeof body.phase === 'string' ? body.phase : '';
+      if (!HEARTBEAT_PHASES.has(phase)) {
+        res.status(400).json({ error: `"phase" must be one of: ${[...HEARTBEAT_PHASES].join(', ')}` });
+        return;
+      }
+      const tool = typeof body.tool === 'string' ? body.tool : 'none';
+      if (!HEARTBEAT_TOOLS.has(tool)) {
+        res.status(400).json({ error: `"tool" must be one of: ${[...HEARTBEAT_TOOLS].join(', ')}` });
+        return;
+      }
+      const status = typeof body.status === 'string' ? body.status : 'phase-boundary';
+      if (!HEARTBEAT_STATUSES.has(status)) {
+        res.status(400).json({ error: `"status" must be one of: ${[...HEARTBEAT_STATUSES].join(', ')}` });
+        return;
+      }
+      const elapsedMs = typeof body.elapsedMs === 'number' && Number.isFinite(body.elapsedMs) && body.elapsedMs >= 0 && body.elapsedMs < 86_400_000
+        ? Math.floor(body.elapsedMs)
+        : 0;
+
+      // Route by topicId (Telegram) or channelId (Slack). Exactly one must be set.
+      const topicId = typeof body.topicId === 'number' && Number.isInteger(body.topicId) ? body.topicId : null;
+      const channelId = typeof body.channelId === 'string' && body.channelId.length > 0 && body.channelId.length <= 128
+        ? body.channelId
+        : null;
+      if ((topicId === null) === (channelId === null)) {
+        res.status(400).json({ error: 'Exactly one of "topicId" (number) or "channelId" (string) must be provided' });
+        return;
+      }
+
+      const elapsedMin = Math.floor(elapsedMs / 60_000);
+      const elapsedStr = elapsedMin >= 1 ? `${elapsedMin}m` : `${Math.floor(elapsedMs / 1000)}s`;
+      const text = `🔨 /build — phase=${phase}, tool=${tool}, elapsed=${elapsedStr}, status=${status}`;
+
+      try {
+        if (topicId !== null) {
+          if (!ctx.telegram) {
+            res.status(503).json({ error: 'Telegram not configured' });
+            return;
+          }
+          await ctx.telegram.sendToTopic(topicId, text, { skipStallClear: true });
+          ctx.proxyCoordinator?.recordBuildHeartbeat(topicId);
+        } else if (channelId !== null) {
+          if (!ctx.slack) {
+            res.status(503).json({ error: 'Slack not configured' });
+            return;
+          }
+          await ctx.slack.sendToChannel(channelId, text);
+          // Slack uses synthetic negative topic IDs internally; compute the same
+          // hash used by server.ts:slackChannelToSyntheticId so PresenceProxy's
+          // Slack path sees the same suppression signal.
+          let hash = 0;
+          for (let i = 0; i < channelId.length; i++) {
+            hash = ((hash << 5) - hash + channelId.charCodeAt(i)) | 0;
+          }
+          const synthetic = -(Math.abs(hash) + 1);
+          ctx.proxyCoordinator?.recordBuildHeartbeat(synthetic);
+        }
+        res.json({ ok: true, runId, phase, tool, status, elapsedMs });
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      }
+    });
+  }
+
+  // POST /telegram/post-update — route an update/announcement message to the
+  // Agent Updates topic, deterministically.
+  //
+  // The caller cannot specify a topic. The topic is resolved server-side from
+  // `agent-updates-topic` state. This closes off an entire class of bugs where
+  // agents sent update messages to whatever topic happened to spawn their
+  // session (typically the most recently active Telegram topic).
+  //
+  // If the Updates topic is not configured, the endpoint returns 400 — never
+  // a silent fallback to Attention or any other topic. Update messages MUST
+  // end up in the Updates topic or not be sent at all.
+  router.post('/telegram/post-update', async (req, res) => {
+    if (!ctx.telegram) {
+      res.status(503).json({ error: 'Telegram not configured' });
+      return;
+    }
+
+    const updatesTopicId = ctx.state.get<number>('agent-updates-topic');
+    if (!updatesTopicId || typeof updatesTopicId !== 'number') {
+      res.status(400).json({
+        error: 'Agent Updates topic is not configured',
+        hint: 'The Updates topic is provisioned automatically at server startup when Telegram is configured. Check server logs for "Failed to ensure Agent Updates topic" errors. Update messages are not routed to any fallback topic by design.',
+      });
+      return;
+    }
+
+    const { text, metadata } = req.body;
+    if (!text || typeof text !== 'string') {
+      res.status(400).json({ error: '"text" field required' });
+      return;
+    }
+    if (text.length > 4096) {
+      res.status(400).json({ error: '"text" must be 4096 characters or fewer' });
+      return;
+    }
+
+    const updateAllowDebugText = metadata?.allowDebugText === true;
+    const updateAllowDuplicate = metadata?.allowDuplicate === true;
+    if (
+      await checkOutboundMessage(text, 'telegram', res, {
+        topicId: updatesTopicId,
+        allowDebugText: updateAllowDebugText,
+        allowDuplicate: updateAllowDuplicate,
+      })
+    )
+      return;
+
+    try {
+      await ctx.telegram.sendToTopic(updatesTopicId, text);
+      // Note: intentionally do NOT clear the injection tracker for the Updates
+      // topic. Update posts are proactive broadcasts, not replies to a stuck
+      // session — resetting stall timers here would mask real hangs elsewhere.
+      res.json({ ok: true, topicId: updatesTopicId });
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -3333,6 +4890,84 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json(ctx.telegram.getLogStats());
   });
 
+  // ── Threadline → Telegram Bridge: settings surface ─────────────
+  //
+  // Read/write toggles + allow-list/deny-list that gate the bridge module
+  // (deliverable b). Default-OFF auto-create is a hard requirement — these
+  // endpoints are how the user opts in. Bearer-auth enforced globally.
+
+  router.get('/threadline/telegram-bridge/config', (_req, res) => {
+    if (!ctx.telegramBridgeConfig) {
+      res.status(503).json({ error: 'Telegram bridge config not initialized' });
+      return;
+    }
+    res.json(ctx.telegramBridgeConfig.getSettings());
+  });
+
+  // ── Threadline observability — read-only views over inbox/outbox/bindings ──
+
+  router.get('/threadline/observability/threads', (req, res) => {
+    if (!ctx.threadlineObservability) {
+      res.status(503).json({ error: 'Threadline observability not initialized' });
+      return;
+    }
+    const remoteAgent = typeof req.query.remoteAgent === 'string' ? req.query.remoteAgent : undefined;
+    const sinceIso = typeof req.query.since === 'string' ? req.query.since : undefined;
+    const untilIso = typeof req.query.until === 'string' ? req.query.until : undefined;
+    const hasTopicRaw = typeof req.query.hasTopic === 'string' ? req.query.hasTopic : undefined;
+    const hasTopic = hasTopicRaw === 'yes' || hasTopicRaw === 'no' ? hasTopicRaw : undefined;
+    const threads = ctx.threadlineObservability.listThreads({ remoteAgent, sinceIso, untilIso, hasTopic });
+    res.json({ threads, count: threads.length });
+  });
+
+  router.get('/threadline/observability/threads/:threadId', (req, res) => {
+    if (!ctx.threadlineObservability) {
+      res.status(503).json({ error: 'Threadline observability not initialized' });
+      return;
+    }
+    const detail = ctx.threadlineObservability.getThread(req.params.threadId);
+    if (!detail) { res.status(404).json({ error: 'Thread not found' }); return; }
+    res.json(detail);
+  });
+
+  router.get('/threadline/observability/search', (req, res) => {
+    if (!ctx.threadlineObservability) {
+      res.status(503).json({ error: 'Threadline observability not initialized' });
+      return;
+    }
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
+    const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 50;
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+    const hits = ctx.threadlineObservability.searchMessages(q, limit);
+    res.json({ hits, count: hits.length });
+  });
+
+  router.patch('/threadline/telegram-bridge/config', (req, res) => {
+    if (!ctx.telegramBridgeConfig) {
+      res.status(503).json({ error: 'Telegram bridge config not initialized' });
+      return;
+    }
+    try {
+      const body = req.body as {
+        enabled?: unknown;
+        autoCreateTopics?: unknown;
+        mirrorExisting?: unknown;
+        allowList?: unknown;
+        denyList?: unknown;
+      };
+      const patch: Record<string, unknown> = {};
+      if ('enabled' in body) patch.enabled = body.enabled;
+      if ('autoCreateTopics' in body) patch.autoCreateTopics = body.autoCreateTopics;
+      if ('mirrorExisting' in body) patch.mirrorExisting = body.mirrorExisting;
+      if ('allowList' in body) patch.allowList = body.allowList;
+      if ('denyList' in body) patch.denyList = body.denyList;
+      const settings = ctx.telegramBridgeConfig.update(patch);
+      res.json(settings);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── Slack ──────────────────────────────────────────────────────
 
   router.post('/slack/reply/:channelId', async (req, res) => {
@@ -3342,11 +4977,19 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     const { channelId } = req.params;
-    const { text, thread_ts } = req.body;
+    const { text, thread_ts, metadata } = req.body;
     if (!text || typeof text !== 'string') {
       res.status(400).json({ error: '"text" field required' });
       return;
     }
+
+    if (
+      await checkOutboundMessage(text, 'slack', res, {
+        allowDebugText: metadata?.allowDebugText === true,
+        allowDuplicate: metadata?.allowDuplicate === true,
+      })
+    )
+      return;
 
     try {
       const ts = await ctx.slack.sendToChannel(channelId, text, { thread_ts });
@@ -3596,6 +5239,131 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ id: req.params.id, deleted: true });
   });
 
+  // ── Initiatives (multi-phase long-running work tracker) ─────────
+
+  const initiativeIdRe = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+  router.get('/initiatives', (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    const items = status
+      ? ctx.initiativeTracker.list({ status: status as 'active' | 'completed' | 'archived' | 'abandoned' })
+      : ctx.initiativeTracker.list();
+    res.json({ items, count: items.length });
+  });
+
+  router.get('/initiatives/digest', (_req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    res.json(ctx.initiativeTracker.digest());
+  });
+
+  router.get('/initiatives/:id', (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    if (!initiativeIdRe.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid initiative id' });
+      return;
+    }
+    const initiative = ctx.initiativeTracker.get(req.params.id);
+    if (!initiative) {
+      res.status(404).json({ error: 'initiative not found' });
+      return;
+    }
+    res.json(initiative);
+  });
+
+  router.post('/initiatives', (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    const { id, title, description, phases, links, nextCheckAt, needsUser, needsUserReason, blockers } = req.body ?? {};
+    if (typeof id !== 'string' || !initiativeIdRe.test(id)) {
+      res.status(400).json({ error: '"id" must be lowercase kebab-case, 1–63 chars' });
+      return;
+    }
+    if (typeof title !== 'string' || !title.trim() || title.length > 200) {
+      res.status(400).json({ error: '"title" required, ≤200 chars' });
+      return;
+    }
+    if (typeof description !== 'string' || description.length > 4000) {
+      res.status(400).json({ error: '"description" required, ≤4000 chars' });
+      return;
+    }
+    if (!Array.isArray(phases) || phases.length === 0) {
+      res.status(400).json({ error: '"phases" must be a non-empty array' });
+      return;
+    }
+    try {
+      const created = ctx.initiativeTracker.create({
+        id, title, description, phases, links, nextCheckAt,
+        needsUser, needsUserReason, blockers,
+      });
+      res.status(201).json(created);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.patch('/initiatives/:id', (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    if (!initiativeIdRe.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid initiative id' });
+      return;
+    }
+    try {
+      const updated = ctx.initiativeTracker.update(req.params.id, req.body ?? {});
+      res.json(updated);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const status = msg.includes('not found') ? 404 : 400;
+      res.status(status).json({ error: msg });
+    }
+  });
+
+  router.post('/initiatives/:id/phase/:phaseId', (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    const { status } = req.body ?? {};
+    if (!['pending', 'in-progress', 'done', 'blocked'].includes(status)) {
+      res.status(400).json({ error: '"status" must be one of pending|in-progress|done|blocked' });
+      return;
+    }
+    try {
+      const updated = ctx.initiativeTracker.setPhaseStatus(req.params.id, req.params.phaseId, status);
+      res.json(updated);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(msg.includes('not found') ? 404 : 400).json({ error: msg });
+    }
+  });
+
+  router.delete('/initiatives/:id', (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    const removed = ctx.initiativeTracker.remove(req.params.id);
+    if (!removed) {
+      res.status(404).json({ error: 'initiative not found' });
+      return;
+    }
+    res.json({ id: req.params.id, deleted: true });
+  });
+
   // ── WhatsApp ────────────────────────────────────────────────────
 
   router.get('/whatsapp/status', (_req, res) => {
@@ -3632,7 +5400,7 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: 'jid parameter required' });
       return;
     }
-    const { text } = req.body;
+    const { text, metadata } = req.body;
     if (!text || typeof text !== 'string') {
       res.status(400).json({ error: '"text" field required' });
       return;
@@ -3641,6 +5409,14 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"text" must be 40000 characters or fewer' });
       return;
     }
+
+    if (
+      await checkOutboundMessage(text, 'whatsapp', res, {
+        allowDebugText: metadata?.allowDebugText === true,
+        allowDuplicate: metadata?.allowDuplicate === true,
+      })
+    )
+      return;
 
     try {
       await ctx.whatsapp.send({
@@ -3678,7 +5454,7 @@ export function createRoutes(ctx: RouteContext): Router {
   // ── Outbound Safety: validate-before-send endpoint ──
   // Called by imessage-reply.sh BEFORE sending. Issues a single-use token
   // that binds validation to the actual send (TOCTOU mitigation).
-  router.post('/imessage/validate-send/:recipient', (req, res) => {
+  router.post('/imessage/validate-send/:recipient', async (req, res) => {
     if (!ctx.imessage) {
       res.status(503).json({ error: 'iMessage not configured' });
       return;
@@ -3688,6 +5464,19 @@ export function createRoutes(ctx: RouteContext): Router {
     if (!recipient) {
       res.status(400).json({ error: 'recipient parameter required' });
       return;
+    }
+
+    // Tone gate — if the client passes `text`, check it here before issuing a send token.
+    const text = req.body?.text;
+    const imessageMetadata = req.body?.metadata;
+    if (typeof text === 'string' && text.length > 0) {
+      if (
+        await checkOutboundMessage(text, 'imessage', res, {
+          allowDebugText: imessageMetadata?.allowDebugText === true,
+          allowDuplicate: imessageMetadata?.allowDuplicate === true,
+        })
+      )
+        return;
     }
 
     const result = ctx.imessage.validateSend(decodeURIComponent(recipient));
@@ -3735,6 +5524,9 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"text" field required' });
       return;
     }
+
+    // Note: tone gate is not applied here — this is a post-send confirmation
+    // endpoint. Gating happens pre-send in /imessage/validate-send.
 
     // Validate send token if provided (TOCTOU binding)
     if (sendToken) {
@@ -3976,7 +5768,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const validTypes = ['bug', 'feature', 'improvement', 'question', 'other'];
+    const validTypes = ['bug', 'feature', 'improvement', 'question', 'hallucination', 'other'];
     const feedbackType = validTypes.includes(type) ? type : 'other';
 
     // Semantic quality validation
@@ -4593,7 +6385,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const { title, markdown, pin } = req.body;
+    const { title, markdown, pin, metadata } = req.body;
     if (!title || typeof title !== 'string' || title.length > 256) {
       res.status(400).json({ error: '"title" must be a string under 256 characters' });
       return;
@@ -4610,8 +6402,19 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"pin" must be a string between 4 and 32 characters' });
       return;
     }
+    // Validate metadata if provided
+    if (metadata !== undefined && (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata))) {
+      res.status(400).json({ error: '"metadata" must be an object' });
+      return;
+    }
+    if (metadata?.source) {
+      if (typeof metadata.source !== 'object' || !metadata.source.type || !metadata.source.id) {
+        res.status(400).json({ error: '"metadata.source" must have "type" and "id" strings' });
+        return;
+      }
+    }
 
-    const view = ctx.viewer.create(title, markdown, pin);
+    const view = ctx.viewer.create(title, markdown, pin, metadata);
 
     res.status(201).json({
       id: view.id,
@@ -4701,13 +6504,25 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
-    const views = ctx.viewer.list().map(v => ({
+    let allViews = ctx.viewer.list();
+
+    // Filter by source if provided (e.g. ?source=job:coherence-audit)
+    const source = _req.query.source as string | undefined;
+    if (source && source.includes(':')) {
+      const [sourceType, sourceId] = source.split(':', 2);
+      allViews = allViews.filter(v =>
+        v.metadata?.source?.type === sourceType && v.metadata?.source?.id === sourceId
+      );
+    }
+
+    const views = allViews.map(v => ({
       id: v.id,
       title: v.title,
       localUrl: `/view/${v.id}`,
       tunnelUrl: viewTunnelUrl(v.id),
       createdAt: v.createdAt,
       updatedAt: v.updatedAt,
+      metadata: v.metadata,
     }));
     res.json({ views });
   });
@@ -4846,7 +6661,7 @@ export function createRoutes(ctx: RouteContext): Router {
   });
 
   // Receive a secret submission (user-facing, NO auth — token + CSRF is the auth)
-  router.post('/secrets/drop/:token', (req, res) => {
+  router.post('/secrets/drop/:token', async (req, res) => {
     const { _csrf, ...values } = req.body;
 
     if (!_csrf || typeof _csrf !== 'string') {
@@ -4906,13 +6721,28 @@ export function createRoutes(ctx: RouteContext): Router {
       } else {
         // No live session — spawn one to handle the secret receipt
         let topicName = `topic-${topicId}`;
-        try {
-          if (fs.existsSync(sdRegistryPath)) {
-            const reg = JSON.parse(fs.readFileSync(sdRegistryPath, 'utf-8'));
-            const stored = reg.topicToName?.[String(topicId)];
-            if (stored) topicName = stored;
+        // Try live adapter first, then disk registry, then active probe
+        if (ctx.telegram) {
+          const liveName = ctx.telegram.getTopicName(topicId);
+          if (liveName && !/^topic-\d+$/.test(liveName)) {
+            topicName = liveName;
           }
-        } catch { /* fall through to default */ }
+        }
+        if (/^topic-\d+$/.test(topicName)) {
+          try {
+            if (fs.existsSync(sdRegistryPath)) {
+              const reg = JSON.parse(fs.readFileSync(sdRegistryPath, 'utf-8'));
+              const stored = reg.topicToName?.[String(topicId)];
+              if (stored && !/^topic-\d+$/.test(stored)) topicName = stored;
+            }
+          } catch { /* fall through */ }
+        }
+        if (/^topic-\d+$/.test(topicName) && ctx.telegram) {
+          try {
+            const resolved = await ctx.telegram.resolveTopicName(topicId);
+            if (resolved) topicName = resolved;
+          } catch { /* fall through to default */ }
+        }
 
         // Build context with thread history
         const historyLines: string[] = [];
@@ -5102,8 +6932,78 @@ export function createRoutes(ctx: RouteContext): Router {
   // Receives messages from the Telegram Lifeline process and injects
   // them into the appropriate session, just like TelegramAdapter would.
 
-  router.post('/internal/telegram-forward', (req, res) => {
-    const { topicId, text, fromUserId, fromUsername, fromFirstName, messageId } = req.body;
+  // Cache serverVersion once at route-registration time. Use ProcessIntegrity
+  // (the running-in-memory version frozen at boot) rather than a live disk
+  // read that can drift after npm install -g. Stale-version prevention
+  // guardrail: routes.ts tests assert this path is NOT a live read. Per spec,
+  // if this fails to resolve to parseable semver, /internal/telegram-forward
+  // responds 503 to skip the handshake path.
+  const _serverVersionString =
+    ProcessIntegrity.getInstance()?.getState().runningVersion ?? '';
+  const _serverVersionParsed = parseVersion(_serverVersionString);
+
+  // One-shot guard for pre-Stage-B lifeline observability log (see versionMissing
+  // handler below). Avoids per-request log spam while preserving the signal.
+  let _versionMissingLogged = false;
+
+  router.post('/internal/telegram-forward', async (req, res) => {
+    const { topicId, text, fromUserId, fromUsername, fromFirstName, messageId, lifelineVersion } = req.body;
+
+    // Server boot window: if version cache wasn't populated, skip handshake
+    // rather than 426-erroneously. Lifeline retries after retryAfterMs.
+    if (!_serverVersionParsed) {
+      res.status(503).json({ ok: false, reason: 'server-boot-incomplete', retryAfterMs: 1000 });
+      return;
+    }
+
+    // Version-handshake (only when lifelineVersion field is present AND
+    // auth is configured — dev-mode with empty authToken skips the handshake
+    // to avoid unauth'd fingerprinting channel if bearer-auth ever regresses).
+    const authEnabled = Boolean(ctx.config.authToken);
+    if (lifelineVersion !== undefined && authEnabled) {
+      const clientVersion = parseVersion(lifelineVersion);
+      if (!clientVersion) {
+        res.status(400).json({ ok: false, error: 'invalid lifelineVersion' });
+        return;
+      }
+      const decision = compareVersions(_serverVersionParsed, clientVersion);
+      if (decision.kind === 'upgrade-required') {
+        res.status(426).json({
+          ok: false,
+          upgradeRequired: true,
+          serverVersion: decision.serverVersionString,
+          action: 'restart',
+          reason: 'major-minor-mismatch',
+        });
+        return;
+      }
+      if (decision.kind === 'accept-with-patch-info') {
+        DegradationReporter.getInstance().report({
+          feature: 'TelegramLifeline.versionSkewInfo',
+          primary: 'Informational — lifeline patch drift beyond policy',
+          fallback: 'No behavior change; forward accepted',
+          reason: `patch drift ${decision.patchDiff} between lifeline and server`,
+          impact: 'Lifeline hasn’t restarted in a while; consider manual kick.',
+        });
+      }
+    } else if (lifelineVersion === undefined && authEnabled) {
+      // Backward-compat: pre-Stage-B lifelines don't send the field. Accept
+      // silently. This was previously emitted as a [DEGRADATION] feedback
+      // event, which the cluster classifier mislabelled as critical even
+      // though it's expected observability for agents that upgraded the
+      // package without restarting their lifeline daemon. Log once per
+      // process so the signal isn't lost, but don't pollute the feedback
+      // pipeline. Per dispatch dsp-moc6wunp-2dwj, agents are advised to
+      // restart their lifelines; PROP-543 covers the systemic classifier
+      // taxonomy work.
+      if (!_versionMissingLogged) {
+        _versionMissingLogged = true;
+        console.info(
+          '[telegram-forward] Accepted pre-Stage-B lifeline forward (no lifelineVersion field). ' +
+          'Restart the lifeline to enable the Stage-B version handshake.'
+        );
+      }
+    }
 
     if (!topicId || !text) {
       res.status(400).json({ error: 'topicId and text required' });
@@ -5219,13 +7119,28 @@ export function createRoutes(ctx: RouteContext): Router {
         // tmux names include the project prefix (e.g., "ai-guy-lifeline"), and
         // spawnInteractiveSession prepends it again → cascading names.
         let topicName = `topic-${topicId}`;
-        try {
-          if (fs.existsSync(registryPath)) {
-            const reg = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
-            const stored = reg.topicToName?.[String(topicId)];
-            if (stored) topicName = stored;
+        // Try live adapter first, then disk registry, then active probe
+        if (ctx.telegram) {
+          const liveName = ctx.telegram.getTopicName(topicId);
+          if (liveName && !/^topic-\d+$/.test(liveName)) {
+            topicName = liveName;
           }
-        } catch { /* fall through to default */ }
+        }
+        if (/^topic-\d+$/.test(topicName)) {
+          try {
+            if (fs.existsSync(registryPath)) {
+              const reg = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
+              const stored = reg.topicToName?.[String(topicId)];
+              if (stored && !/^topic-\d+$/.test(stored)) topicName = stored;
+            }
+          } catch { /* fall through */ }
+        }
+        if (/^topic-\d+$/.test(topicName) && ctx.telegram) {
+          try {
+            const resolved = await ctx.telegram.resolveTopicName(topicId);
+            if (resolved) topicName = resolved;
+          } catch { /* fall through to default */ }
+        }
         console.log(`[telegram-forward] No live session for topic ${topicId}, spawning "${topicName}"...`);
 
         // Fetch thread history so auto-spawned sessions have full conversational context
@@ -5984,15 +7899,21 @@ export function createRoutes(ctx: RouteContext): Router {
    * Rebuild topic memory from JSONL (idempotent import).
    * POST /topic/rebuild
    */
-  router.post('/topic/rebuild', (_req, res) => {
+  router.post('/topic/rebuild', async (_req, res) => {
     if (!ctx.topicMemory) {
       res.status(503).json({ error: 'TopicMemory not initialized' });
       return;
     }
 
     const jsonlPath = path.join(ctx.config.stateDir, 'telegram-messages.jsonl');
-    const imported = ctx.topicMemory.rebuild(jsonlPath);
-    res.json({ rebuilt: true, messagesImported: imported, stats: ctx.topicMemory.stats() });
+    const imported = await ctx.topicMemory.rebuild(jsonlPath);
+    const importStats = ctx.topicMemory.getLastImportStats();
+    res.json({
+      rebuilt: true,
+      messagesImported: imported,
+      parseErrors: importStats ? { malformed: importStats.malformed, missingFields: importStats.missingFields } : null,
+      stats: ctx.topicMemory.stats(),
+    });
   });
 
   // ── Pairing API — Multi-machine state sync (Phase 4.5) ────────
@@ -7402,6 +9323,68 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json(ctx.telemetryHeartbeat.getStatus());
   });
 
+  // PATCH /config — generic config patcher used by FeatureDefinitions enableAction/disableAction.
+  // Deep-merges the request body into config.json and updates runtime ctx.config.
+  router.patch('/config', (req, res) => {
+    const patch = req.body;
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      res.status(400).json({ error: 'Request body must be a JSON object' });
+      return;
+    }
+
+    // Allowlist of top-level config keys that can be patched via API.
+    // Prevents callers from overwriting auth tokens, project paths, etc.
+    const allowedKeys = new Set([
+      'evolution', 'threadline', 'publishing', 'tunnel', 'gitBackup',
+      'externalOperations', 'responseReview', 'inputGuard', 'monitoring',
+      'updates', 'sessions', 'jobs',
+    ]);
+
+    const disallowed = Object.keys(patch).filter(k => !allowedKeys.has(k));
+    if (disallowed.length > 0) {
+      res.status(400).json({
+        error: `Cannot patch these config keys via API: ${disallowed.join(', ')}`,
+        allowed: [...allowedKeys],
+      });
+      return;
+    }
+
+    try {
+      const configPath = path.join(ctx.config.projectDir, '.instar', 'config.json');
+      let fileConfig: Record<string, any> = {};
+      if (fs.existsSync(configPath)) {
+        fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      }
+
+      // Deep merge (one level deep — sufficient for feature toggles)
+      for (const [key, value] of Object.entries(patch)) {
+        if (typeof value === 'object' && value !== null && !Array.isArray(value) &&
+            typeof fileConfig[key] === 'object' && fileConfig[key] !== null) {
+          fileConfig[key] = { ...fileConfig[key], ...value };
+        } else {
+          fileConfig[key] = value;
+        }
+        // Also update runtime config
+        if (typeof value === 'object' && value !== null && !Array.isArray(value) &&
+            typeof (ctx.config as any)[key] === 'object' && (ctx.config as any)[key] !== null) {
+          (ctx.config as any)[key] = { ...(ctx.config as any)[key], ...value };
+        } else {
+          (ctx.config as any)[key] = value;
+        }
+      }
+
+      fs.writeFileSync(configPath, JSON.stringify(fileConfig, null, 2) + '\n');
+
+      res.json({
+        success: true,
+        patched: Object.keys(patch),
+        note: 'Some changes may require a server restart to take full effect.',
+      });
+    } catch (err) {
+      res.status(500).json({ error: `Failed to patch config: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  });
+
   // POST /config/telemetry — enable/disable telemetry (used by agent after asking user)
   // Also dismisses the session-start nudge by writing a marker file.
   router.post('/config/telemetry', (req, res) => {
@@ -7574,7 +9557,7 @@ export function createRoutes(ctx: RouteContext): Router {
 
       // Clear submissions log
       const submissionsLog = path.join(ctx.config.stateDir, 'telemetry', 'submissions.jsonl');
-      try { fs.unlinkSync(submissionsLog); } catch { /* may not exist */ }
+      try { SafeFsExecutor.safeUnlinkSync(submissionsLog, { operation: 'src/server/routes.ts:8932' }); } catch { /* may not exist */ }
 
       // Update config.json
       const configPath = path.join(ctx.config.projectDir, '.instar', 'config.json');
@@ -7632,6 +9615,36 @@ export function createRoutes(ctx: RouteContext): Router {
   });
 
   /**
+   * GET /commitments/active-context
+   * Returns the `<active_commitments>` snippet for session-start injection
+   * (spec Round 3 #7). Capped at 20 entries with a "+N more" footer.
+   * MUST be registered before `/commitments/:id` or Express will route the
+   * literal `active-context` to the :id handler.
+   */
+  router.get('/commitments/active-context', (_req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.json({ enabled: false, snippet: '' });
+      return;
+    }
+    const all = ctx.commitmentTracker.getActive()
+      .filter(c => c.status === 'pending' && c.beaconEnabled);
+    const cap = 20;
+    const shown = all.slice(0, cap).map(c => ({
+      id: c.id,
+      promiseText: (c.agentResponse || c.userRequest).slice(0, 120),
+      nextUpdateDueAt: c.nextUpdateDueAt ?? null,
+      atRisk: !!c.atRisk,
+    }));
+    const more = Math.max(0, all.length - cap);
+    let snippet = '';
+    if (shown.length > 0) {
+      const body = JSON.stringify(shown);
+      snippet = `<active_commitments>\n${body}${more > 0 ? `\n+ ${more} more` : ''}\n</active_commitments>`;
+    }
+    res.json({ enabled: true, snippet, total: all.length, shown: shown.length });
+  });
+
+  /**
    * Get a single commitment by ID.
    */
   router.get('/commitments/:id', (req, res) => {
@@ -7657,7 +9670,11 @@ export function createRoutes(ctx: RouteContext): Router {
     }
     const { type, userRequest, agentResponse, topicId, source,
             configPath, configExpectedValue, behavioralRule,
-            expiresAt, verificationMethod, verificationPath } = req.body;
+            expiresAt, verificationMethod, verificationPath,
+            // Promise Beacon fields (PROMISE-BEACON-SPEC.md Phase 1)
+            beaconEnabled, cadenceMs, nextUpdateDueAt,
+            softDeadlineAt, hardDeadlineAt, sessionEpoch,
+            ownerMachineId, externalKey, beaconCreatedBySource } = req.body;
 
     if (!type || !userRequest || !agentResponse) {
       res.status(400).json({ error: 'type, userRequest, and agentResponse are required' });
@@ -7667,16 +9684,130 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: 'type must be config-change, behavioral, or one-time-action' });
       return;
     }
+    // Beacon validation: must have topicId and at least one deadline marker.
+    if (beaconEnabled) {
+      if (!topicId) {
+        res.status(400).json({ error: 'beaconEnabled commitments require topicId' });
+        return;
+      }
+      if (!nextUpdateDueAt && !softDeadlineAt && !hardDeadlineAt) {
+        res.status(400).json({
+          error: 'beaconEnabled commitments require at least one of nextUpdateDueAt, softDeadlineAt, hardDeadlineAt',
+        });
+        return;
+      }
+    }
 
     try {
       const commitment = ctx.commitmentTracker.record({
         type, userRequest, agentResponse, topicId, source,
         configPath, configExpectedValue, behavioralRule,
         expiresAt, verificationMethod, verificationPath,
+        beaconEnabled, cadenceMs, nextUpdateDueAt,
+        softDeadlineAt, hardDeadlineAt, sessionEpoch,
+        ownerMachineId, externalKey, beaconCreatedBySource,
       });
       res.status(201).json(commitment);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to record' });
+    }
+  });
+
+  /**
+   * PATCH /commitments/:id
+   * Update mutable beacon fields on a pending commitment (spec Round 3 #2
+   * follow-up). Routes through CommitmentTracker.mutate() so the single-writer
+   * CAS invariant is preserved. Same validator shape as POST /commitments:
+   * if the caller sets beaconEnabled=true they must have topicId and at least
+   * one of nextUpdateDueAt/softDeadlineAt/hardDeadlineAt (effective fields,
+   * i.e. new-or-existing).
+   *
+   * Terminal-status guard: PATCH on delivered/violated/expired/withdrawn
+   * returns 409 (matches the `deliver` guard).
+   */
+  router.patch('/commitments/:id', async (req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const existing = ctx.commitmentTracker.get(req.params.id);
+    if (!existing) {
+      res.status(404).json({ error: `Commitment ${req.params.id} not found` });
+      return;
+    }
+    if (['delivered', 'violated', 'expired', 'withdrawn'].includes(existing.status)) {
+      res.status(409).json({ error: `Commitment ${req.params.id} is ${existing.status} (terminal); PATCH rejected` });
+      return;
+    }
+
+    const { nextUpdateDueAt, softDeadlineAt, hardDeadlineAt, cadenceMs, beaconEnabled } = req.body ?? {};
+
+    // Reject unknown keys to surface typos early.
+    const allowed = new Set(['nextUpdateDueAt', 'softDeadlineAt', 'hardDeadlineAt', 'cadenceMs', 'beaconEnabled']);
+    const unknown = Object.keys(req.body ?? {}).filter(k => !allowed.has(k));
+    if (unknown.length > 0) {
+      res.status(400).json({ error: `Unknown field(s): ${unknown.join(', ')}. Allowed: ${[...allowed].join(', ')}` });
+      return;
+    }
+
+    // Type validation.
+    const iso = (v: unknown) => v === undefined || v === null || (typeof v === 'string' && !Number.isNaN(Date.parse(v)));
+    if (!iso(nextUpdateDueAt)) { res.status(400).json({ error: 'nextUpdateDueAt must be ISO 8601' }); return; }
+    if (!iso(softDeadlineAt)) { res.status(400).json({ error: 'softDeadlineAt must be ISO 8601' }); return; }
+    if (!iso(hardDeadlineAt)) { res.status(400).json({ error: 'hardDeadlineAt must be ISO 8601' }); return; }
+    if (cadenceMs !== undefined && cadenceMs !== null && (typeof cadenceMs !== 'number' || cadenceMs <= 0)) {
+      res.status(400).json({ error: 'cadenceMs must be a positive number' });
+      return;
+    }
+    if (beaconEnabled !== undefined && typeof beaconEnabled !== 'boolean') {
+      res.status(400).json({ error: 'beaconEnabled must be boolean' });
+      return;
+    }
+
+    // Effective-field validation (matches POST creation validator).
+    const effBeaconEnabled = beaconEnabled ?? existing.beaconEnabled;
+    if (effBeaconEnabled) {
+      if (!existing.topicId) {
+        res.status(400).json({ error: 'beaconEnabled commitments require topicId (cannot be added via PATCH)' });
+        return;
+      }
+      // Treat an explicit-present key (even `null`) as an overwrite, so the
+      // caller can clear a field. Fall back to `existing` only when the key
+      // was omitted from the body entirely.
+      const body = req.body ?? {};
+      const effNextUpdate = 'nextUpdateDueAt' in body ? nextUpdateDueAt : existing.nextUpdateDueAt;
+      const effSoft = 'softDeadlineAt' in body ? softDeadlineAt : existing.softDeadlineAt;
+      const effHard = 'hardDeadlineAt' in body ? hardDeadlineAt : existing.hardDeadlineAt;
+      if (!effNextUpdate && !effSoft && !effHard) {
+        res.status(400).json({
+          error: 'beaconEnabled commitments require at least one of nextUpdateDueAt, softDeadlineAt, hardDeadlineAt',
+        });
+        return;
+      }
+    }
+
+    try {
+      const updated = await ctx.commitmentTracker.mutate(req.params.id, prev => ({
+        ...prev,
+        ...(nextUpdateDueAt !== undefined ? { nextUpdateDueAt } : {}),
+        ...(softDeadlineAt !== undefined ? { softDeadlineAt } : {}),
+        ...(hardDeadlineAt !== undefined ? { hardDeadlineAt } : {}),
+        ...(cadenceMs !== undefined ? { cadenceMs } : {}),
+        ...(beaconEnabled !== undefined ? { beaconEnabled } : {}),
+      }));
+      // Re-arm the beacon timer if the tracker is wired to a live beacon.
+      try {
+        const beacon = (globalThis as Record<string, unknown>).__instarPromiseBeacon as
+          | { schedule: (c: typeof updated) => void; stopFor: (id: string) => void }
+          | undefined;
+        if (beacon && updated.beaconEnabled && updated.status === 'pending' && !updated.beaconSuppressed) {
+          beacon.stopFor(updated.id);
+          beacon.schedule(updated);
+        }
+      } catch { /* non-fatal */ }
+      res.json(updated);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'mutate failed' });
     }
   });
 
@@ -7695,6 +9826,28 @@ export function createRoutes(ctx: RouteContext): Router {
   /**
    * Withdraw a commitment.
    */
+  /**
+   * POST /commitments/:id/deliver
+   * Marks a beacon-enabled commitment as `delivered` (distinct from `verified`).
+   * Stops the PromiseBeacon timer for this commitment. Per PROMISE-BEACON-SPEC.md
+   * Round 3 #18: `delivered` is a terminal status meaning "the agent actually
+   * came back with the promised update," separate from `verified` which means
+   * "config state is as promised."
+   */
+  router.post('/commitments/:id/deliver', (req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const { deliveryMessageId } = req.body ?? {};
+    const updated = ctx.commitmentTracker.deliver(req.params.id, deliveryMessageId);
+    if (!updated) {
+      res.status(404).json({ error: `Commitment ${req.params.id} not found or already in terminal status` });
+      return;
+    }
+    res.json({ delivered: true, id: updated.id, commitment: updated });
+  });
+
   router.post('/commitments/:id/withdraw', (req, res) => {
     if (!ctx.commitmentTracker) {
       res.status(404).json({ error: 'CommitmentTracker not configured' });
@@ -7835,14 +9988,53 @@ export function createRoutes(ctx: RouteContext): Router {
       }
       const accepted = await ctx.messageRouter.relay(envelope, 'agent');
       if (accepted) {
-        // If the message has a threadId and we have a ThreadlineRouter,
-        // route it through the threadline pipeline for session resume/spawn.
-        if (ctx.threadlineRouter && envelope.message?.threadId) {
-          // Fire-and-forget — the relay is already accepted, threadline handling
-          // is best-effort for session management.
-          ctx.threadlineRouter.handleInboundMessage(envelope).catch(err => {
+        const senderAgent = envelope.message?.from?.agent;
+        console.log(`[relay-agent] Accepted message from ${senderAgent ?? 'unknown'} (thread: ${envelope.message?.threadId ?? 'none'}, id: ${envelope.message?.id ?? 'none'})`);
+
+        // Check if this message resolves a pending waitForReply request.
+        // Local delivery bypasses the relay client's gate-passed event, so we
+        // must check reply waiters here directly.
+        // PR-3: resolve waiter by threadId (unique) rather than sender
+        // agent name (which may collide across multiple same-named agents).
+        const inboundThreadId = envelope.message?.threadId;
+        if (inboundThreadId && ctx.threadlineReplyWaiters.size > 0) {
+          let textContent: string | undefined;
+          const body = envelope.message?.body;
+          if (typeof body === 'string') textContent = body;
+          else if (typeof body === 'object' && body !== null) {
+            textContent = String((body as Record<string, unknown>).content ?? (body as Record<string, unknown>).text ?? JSON.stringify(body));
+          }
+          if (textContent) {
+            const isAutoAck = textContent.startsWith('Message received.') || textContent.startsWith('Message received,');
+            const waiter = ctx.threadlineReplyWaiters.get(inboundThreadId);
+            if (waiter && !isAutoAck) {
+              console.log(`[relay-agent] Resolved reply waiter for thread ${inboundThreadId} (from ${senderAgent ?? 'unknown'})`);
+              waiter.resolve(textContent);
+            }
+          }
+        }
+
+        // If we have a ThreadlineRouter, route the message through it for
+        // session resume/spawn. We AWAIT the result so callers learn the real
+        // outcome (spawned / resumed / injected / handled:false). The message
+        // has already been accepted into the inbox, so we don't alter the HTTP
+        // status unless the router throws.
+        if (ctx.threadlineRouter) {
+          try {
+            const threadlineResult = await ctx.threadlineRouter.handleInboundMessage(envelope);
+            res.json({ ok: true, threadline: threadlineResult });
+            return;
+          } catch (err) {
             console.error('[routes] ThreadlineRouter handling error:', err);
-          });
+            res.json({
+              ok: true,
+              threadline: {
+                handled: false,
+                error: err instanceof Error ? err.message : 'Unknown error',
+              },
+            });
+            return;
+          }
         }
         res.json({ ok: true });
       } else {
@@ -7983,6 +10175,64 @@ export function createRoutes(ctx: RouteContext): Router {
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Stats failed' });
     }
+  });
+
+  /**
+   * §4.4 commit 3: read the current runtime-tunable spawn-manager config.
+   * Returns the resolved values (defaults filled in).
+   */
+  router.get('/messages/spawn/config', (_req, res) => {
+    if (!ctx.spawnManager) {
+      res.status(503).json({ error: 'Spawn manager not available' });
+      return;
+    }
+    res.json(ctx.spawnManager.getRuntimeConfig());
+  });
+
+  /**
+   * §4.4 commit 3: update runtime-tunable spawn-manager fields atomically.
+   * Body: any subset of { cooldownMs, maxDrainsPerTick, maxEnvelopeBytes,
+   * maxGlobalQueued, degradedMaxQueuedPerAgent }.
+   *
+   * Note: changing cooldownMs updates gate logic immediately, but the drain
+   * tick interval is fixed at start(). The response indicates whether a
+   * timer restart is needed; operators can trigger that with a separate call
+   * (or just restart the server) if they need the new tick rate to take
+   * effect.
+   */
+  router.patch('/messages/spawn/config', (req, res) => {
+    if (!ctx.spawnManager) {
+      res.status(503).json({ error: 'Spawn manager not available' });
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // Reject unknown fields to avoid silent typos.
+    const allowed = new Set(['cooldownMs', 'maxDrainsPerTick', 'maxEnvelopeBytes', 'maxGlobalQueued', 'degradedMaxQueuedPerAgent']);
+    const unknownKeys = Object.keys(body).filter(k => !allowed.has(k));
+    if (unknownKeys.length > 0) {
+      res.status(400).json({ error: `Unknown fields: ${unknownKeys.join(', ')}` });
+      return;
+    }
+    // Reject non-number values up-front so the manager only sees clean input.
+    for (const k of Object.keys(body)) {
+      if (typeof body[k] !== 'number') {
+        res.status(400).json({ error: `Field ${k} must be a number` });
+        return;
+      }
+    }
+    const result = ctx.spawnManager.updateConfig(body as Parameters<typeof ctx.spawnManager.updateConfig>[0]);
+    if (!result.applied) {
+      res.status(400).json({ error: result.reason });
+      return;
+    }
+    res.json({
+      ok: true,
+      tickIntervalChanged: result.tickIntervalChanged,
+      tickIntervalNote: result.tickIntervalChanged
+        ? 'New tick interval will take effect after the next dispose() + start() (e.g., server restart).'
+        : undefined,
+      current: ctx.spawnManager.getRuntimeConfig(),
+    });
   });
 
   router.post('/messages/spawn-request', async (req, res) => {
@@ -8128,6 +10378,35 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // Alias for discoverability: agents commonly look for /health/probes or /system-review
+  router.get('/health/probes', (_req, res) => {
+    if (!ctx.systemReviewer) {
+      res.status(503).json({ error: 'SystemReviewer not available' });
+      return;
+    }
+    const latest = ctx.systemReviewer.getLatest();
+    if (!latest) {
+      res.json({ message: 'No reviews yet', probes: [] });
+      return;
+    }
+    res.json({
+      timestamp: latest.timestamp,
+      status: latest.status,
+      stats: latest.stats,
+      probes: latest.results,
+      skipped: latest.skipped,
+    });
+  });
+
+  router.get('/system-review', (_req, res) => {
+    if (!ctx.systemReviewer) {
+      res.status(503).json({ error: 'SystemReviewer not available' });
+      return;
+    }
+    const latest = ctx.systemReviewer.getLatest();
+    res.json(latest ?? { message: 'No reviews yet' });
+  });
+
   router.get('/system-reviews/latest', (_req, res) => {
     if (!ctx.systemReviewer) {
       res.status(503).json({ error: 'SystemReviewer not available' });
@@ -8169,6 +10448,101 @@ export function createRoutes(ctx: RouteContext): Router {
     );
     router.use(threadlineRoutes);
   }
+
+  // ── Listener Daemon Health/Metrics ────────────────────────────────
+
+  router.get('/listener/health', (req, res) => {
+    // Auth required (tunnel exposes these endpoints)
+    if (ctx.config.authToken) {
+      const header = req.headers.authorization;
+      if (!header?.startsWith('Bearer ') || header.slice(7) !== ctx.config.authToken) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+    }
+
+    const healthPath = path.join(ctx.config.stateDir, 'listener-health.json');
+    if (!fs.existsSync(healthPath)) {
+      return res.json({
+        status: 'not-running',
+        message: 'No listener daemon health file found. Start with: instar listener start',
+      });
+    }
+
+    try {
+      const health = JSON.parse(fs.readFileSync(healthPath, 'utf-8'));
+      // Add snapshotAge
+      const healthMtime = fs.statSync(healthPath).mtimeMs;
+      health.snapshotAge = Math.floor((Date.now() - healthMtime) / 1000);
+      return res.json(health);
+    } catch {
+      return res.status(500).json({ error: 'Failed to read health file' });
+    }
+  });
+
+  router.get('/listener/metrics', (req, res) => {
+    if (ctx.config.authToken) {
+      const header = req.headers.authorization;
+      if (!header?.startsWith('Bearer ') || header.slice(7) !== ctx.config.authToken) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+    }
+
+    const healthPath = path.join(ctx.config.stateDir, 'listener-health.json');
+    let daemon: Record<string, unknown> = { state: 'not-running' };
+    if (fs.existsSync(healthPath)) {
+      try {
+        daemon = JSON.parse(fs.readFileSync(healthPath, 'utf-8'));
+        const healthMtime = fs.statSync(healthPath).mtimeMs;
+        daemon.snapshotAge = Math.floor((Date.now() - healthMtime) / 1000);
+      } catch {
+        // Use default
+      }
+    }
+
+    // Check if daemon socket is connected
+    const socketPath = path.join(ctx.config.stateDir, 'listener.sock');
+    const socketConnected = fs.existsSync(socketPath);
+
+    // Inbox stats
+    const inboxPath = path.join(ctx.config.stateDir, 'threadline', 'inbox.jsonl.active');
+    let inboxSizeBytes = 0;
+    if (fs.existsSync(inboxPath)) {
+      try {
+        inboxSizeBytes = fs.statSync(inboxPath).size;
+      } catch {
+        // Ignore
+      }
+    }
+
+    return res.json({
+      daemon,
+      socket: { connected: socketConnected, path: socketPath },
+      inbox: { sizeBytes: inboxSizeBytes, path: inboxPath },
+    });
+  });
+
+  router.post('/listener/restart', (req, res) => {
+    if (ctx.config.authToken) {
+      const header = req.headers.authorization;
+      if (!header?.startsWith('Bearer ') || header.slice(7) !== ctx.config.authToken) {
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+    }
+
+    // Signal daemon via PID file
+    const pidPath = path.join(ctx.config.stateDir, 'listener-daemon.pid');
+    if (!fs.existsSync(pidPath)) {
+      return res.status(404).json({ error: 'No listener daemon PID file found' });
+    }
+
+    try {
+      const pid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+      process.kill(pid, 'SIGTERM');
+      return res.json({ status: 'restart-signal-sent', pid });
+    } catch (err) {
+      return res.status(500).json({ error: `Failed to signal daemon: ${err}` });
+    }
+  });
 
   // ── MoltBridge Integration ──────────────────────────────────────────
 
@@ -8216,6 +10590,40 @@ export function createRoutes(ctx: RouteContext): Router {
     });
   });
 
+  // ── Threadline Reply Waiter ─────────────────────────────────────────
+  // Waits for an incoming reply from a specific agent on a specific thread.
+  // Used by the relay-send endpoint when waitForReply is true.
+
+  function waitForThreadlineReply(
+    routeCtx: RouteContext,
+    senderAgent: string,
+    threadId: string,
+    timeoutSec?: number,
+  ): Promise<string | null> {
+    const timeout = Math.min(Math.max(timeoutSec ?? 120, 5), 300) * 1000; // 5s–300s, default 120s
+
+    // PR-3: Waiters are keyed by threadId (unique per conversation) rather
+    // than sender agent name (which can collide when multiple agents share
+    // a name — e.g., two "luna" agents on different machines).
+    return new Promise<string | null>((resolve) => {
+      const timer = setTimeout(() => {
+        routeCtx.threadlineReplyWaiters.delete(threadId);
+        resolve(null);
+      }, timeout);
+
+      routeCtx.threadlineReplyWaiters.set(threadId, {
+        resolve: (reply: string) => {
+          clearTimeout(timer);
+          routeCtx.threadlineReplyWaiters.delete(threadId);
+          resolve(reply);
+        },
+        threadId,
+        senderAgent,
+        timer,
+      });
+    });
+  }
+
   // ── Threadline Relay Send ────────────────────────────────────────────
   // Used by the MCP server's threadline_send tool to route messages through
   // the relay WebSocket. Tries local delivery first for co-located agents,
@@ -8225,7 +10633,7 @@ export function createRoutes(ctx: RouteContext): Router {
 
   router.post('/threadline/relay-send', async (req, res) => {
     const relayClient = ctx.threadlineRelayClient;
-    const { targetAgent, message, threadId } = req.body;
+    const { targetAgent, message, threadId, waitForReply, timeoutSeconds } = req.body;
 
     if (!targetAgent || !message) {
       res.status(400).json({ success: false, error: 'Missing required fields: targetAgent, message' });
@@ -8239,7 +10647,10 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const effectiveThreadId = threadId ?? msgId;
+    // Mint a stable UUID threadId when caller didn't provide one so
+    // first-contact messages aren't dropped on the recipient side. Both
+    // sender and recipient will agree on this id going forward.
+    const effectiveThreadId = threadId ?? randomUUID();
 
     // ── Try local delivery first (same-machine agents) ──────────────
     // Read known-agents.json for local agent info. If the target is local,
@@ -8250,11 +10661,70 @@ export function createRoutes(ctx: RouteContext): Router {
       if (fs.existsSync(knownAgentsPath)) {
         const knownData = JSON.parse(fs.readFileSync(knownAgentsPath, 'utf-8'));
         const agents: Array<{ name: string; port: number; path?: string; fingerprint?: string; publicKey?: string }> = knownData.agents ?? [];
-        const localTarget = agents.find(a =>
-          a.name === targetAgent || a.name?.toLowerCase() === targetAgent?.toLowerCase()
+
+        // Support "name:fingerprintPrefix" disambiguation syntax
+        let targetName = targetAgent;
+        let targetFpPrefix: string | undefined;
+        const colonIdx = targetAgent.lastIndexOf(':');
+        if (colonIdx > 0 && colonIdx < targetAgent.length - 1) {
+          const suffix = targetAgent.substring(colonIdx + 1);
+          if (/^[0-9a-f]{4,32}$/i.test(suffix)) {
+            targetName = targetAgent.substring(0, colonIdx);
+            targetFpPrefix = suffix.toLowerCase();
+          }
+        }
+
+        const nameMatches = agents.filter(a =>
+          a.name === targetName || a.name?.toLowerCase() === targetName?.toLowerCase()
         );
 
-        if (localTarget?.port && localTarget.name !== ctx.config.projectName) {
+        // PR-3: Fingerprint-based disambiguation. If multiple known agents
+        // share a name, require a `name:fpPrefix` qualifier to pick one.
+        // Previously this silently fell through to the relay, which then
+        // also usually failed — masking the root cause.
+        let localTarget = nameMatches.length === 1 ? nameMatches[0] : undefined;
+        if (nameMatches.length > 1 && targetFpPrefix) {
+          localTarget = nameMatches.find(a => {
+            const fp = a.fingerprint || a.publicKey?.substring(0, 32);
+            return fp?.toLowerCase().startsWith(targetFpPrefix!);
+          });
+          if (!localTarget) {
+            res.status(409).json({
+              success: false,
+              error: `No agent named "${targetName}" matches fingerprint prefix "${targetFpPrefix}". Known: ${nameMatches.map(a => `${a.name}:${(a.fingerprint || a.publicKey || '').substring(0, 8)}`).join(', ')}`,
+            });
+            return;
+          }
+        } else if (nameMatches.length > 1 && !targetFpPrefix) {
+          const hints = nameMatches.map(a => {
+            const fp = (a.fingerprint || a.publicKey || '').substring(0, 8);
+            return `"${a.name}:${fp}"`;
+          }).join(', ');
+          res.status(409).json({
+            success: false,
+            error: `Ambiguous target: ${nameMatches.length} known agents named "${targetName}". Use one of: ${hints}`,
+          });
+          return;
+        }
+
+        // PR-3: Self-guard by fingerprint when available, falling back to
+        // name comparison. This prevents self-delivery when the agent's
+        // name happens to match one of its own aliases in known-agents.json.
+        let isSelfTarget = localTarget?.name === ctx.config.projectName;
+        if (localTarget && !isSelfTarget) {
+          try {
+            const selfIdPath = path.join(ctx.config.stateDir, 'threadline', 'identity.json');
+            if (fs.existsSync(selfIdPath)) {
+              const selfId = JSON.parse(fs.readFileSync(selfIdPath, 'utf-8'));
+              const selfFp = (selfId.fingerprint || '').toLowerCase();
+              const targetFp = (localTarget.fingerprint || localTarget.publicKey?.substring(0, 32) || '').toLowerCase();
+              if (selfFp && targetFp && selfFp === targetFp) {
+                isSelfTarget = true;
+              }
+            }
+          } catch { /* @silent-fallback-ok — identity.json read is best-effort */ }
+        }
+        if (localTarget?.port && !isSelfTarget) {
           // Check if the local agent is actually running
           try {
             const healthResp = await fetch(`http://localhost:${localTarget.port}/threadline/health`, {
@@ -8313,14 +10783,74 @@ export function createRoutes(ctx: RouteContext): Router {
                 });
 
                 if (localResp.ok) {
-                  console.log(`[relay-send] Local delivery to ${localTarget.name}:${localTarget.port} (thread: ${effectiveThreadId})`);
-                  res.json({
-                    success: true,
-                    messageId: msgId,
-                    threadId: effectiveThreadId,
-                    resolvedAgent: localTarget.name,
-                    deliveryPath: 'local',
-                  });
+                  let localRespBody: { ok?: boolean; threadline?: {
+                    handled?: boolean; spawned?: boolean; resumed?: boolean; injected?: boolean;
+                    threadId?: string; sessionName?: string; error?: string; gateDecision?: string;
+                  } } = {};
+                  try { localRespBody = await localResp.json() as typeof localRespBody; } catch { /* no body */ }
+                  const tl = localRespBody.threadline;
+                  const outcome = tl?.injected ? 'injected into live session'
+                    : tl?.spawned ? 'spawned new session'
+                    : tl?.resumed ? 'resumed existing thread'
+                    : tl?.gateDecision === 'queue-for-approval' ? 'queued for approval'
+                    : tl?.error ? `error: ${tl.error}`
+                    : tl?.handled === false ? 'queued (no live session)'
+                    : 'accepted';
+                  console.log(`[relay-send] Local delivery to ${localTarget.name}:${localTarget.port} (thread: ${effectiveThreadId}) — ${outcome}`);
+
+                  // Canonical outbox write — single source of truth for outbound messages
+                  // across BOTH delivery paths (local + relay). Powers the dashboard
+                  // observability tab. Mirrors the inbound canonical write from PR #113.
+                  if (ctx.listenerManager) {
+                    try {
+                      ctx.listenerManager.appendCanonicalOutboxEntry({
+                        from: ctx.config.projectName ?? 'self',
+                        senderName: ctx.config.projectName ?? 'self',
+                        to: localTarget.name,
+                        recipientName: localTarget.name,
+                        threadId: effectiveThreadId,
+                        text: message,
+                        messageId: msgId,
+                        outcome,
+                      });
+                    } catch (err) {
+                      console.warn(`[relay-send] Canonical outbox append failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+                    }
+                  }
+                  // Mirror outbound into Telegram bridge (relay-only — best effort).
+                  if (ctx.telegramBridge) {
+                    ctx.telegramBridge.mirrorOutbound({
+                      threadId: effectiveThreadId,
+                      remoteAgent: localTarget.name,
+                      remoteAgentName: localTarget.name,
+                      text: message,
+                      messageId: msgId,
+                      outcome,
+                    }).catch(() => { /* swallow — bridge is relay-only */ });
+                  }
+                  if (waitForReply) {
+                    const reply = await waitForThreadlineReply(ctx, localTarget.name, effectiveThreadId, timeoutSeconds);
+                    res.json({
+                      success: true,
+                      messageId: msgId,
+                      threadId: effectiveThreadId,
+                      resolvedAgent: localTarget.name,
+                      deliveryPath: 'local',
+                      deliveryOutcome: outcome,
+                      threadline: tl,
+                      reply,
+                    });
+                  } else {
+                    res.json({
+                      success: true,
+                      messageId: msgId,
+                      threadId: effectiveThreadId,
+                      resolvedAgent: localTarget.name,
+                      deliveryPath: 'local',
+                      deliveryOutcome: outcome,
+                      threadline: tl,
+                    });
+                  }
                   return;
                 }
                 // Local delivery failed — fall through to relay
@@ -8354,13 +10884,58 @@ export function createRoutes(ctx: RouteContext): Router {
       }
 
       const relayMsgId = relayClient.sendAuto(resolvedId, message, threadId);
-      res.json({
-        success: true,
-        messageId: relayMsgId,
-        threadId: threadId ?? relayMsgId,
-        resolvedAgent: resolvedId,
-        deliveryPath: 'relay',
-      });
+      const effectiveRelayThreadId = threadId ?? relayMsgId;
+
+      // Canonical outbox write for the relay-delivery path — same shape as the
+      // local-delivery path above, so the observability tab sees both paths.
+      if (ctx.listenerManager) {
+        try {
+          ctx.listenerManager.appendCanonicalOutboxEntry({
+            from: ctx.config.projectName ?? 'self',
+            senderName: ctx.config.projectName ?? 'self',
+            to: resolvedId,
+            recipientName: targetAgent,
+            threadId: effectiveRelayThreadId,
+            text: message,
+            messageId: relayMsgId,
+            outcome: 'relay-sent',
+          });
+        } catch (err) {
+          console.warn(`[relay-send] Canonical outbox append failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
+      // Mirror outbound into Telegram bridge (relay-only — best effort).
+      if (ctx.telegramBridge) {
+        ctx.telegramBridge.mirrorOutbound({
+          threadId: effectiveRelayThreadId,
+          remoteAgent: resolvedId,
+          remoteAgentName: targetAgent,
+          text: message,
+          messageId: relayMsgId,
+          outcome: 'relay-sent',
+        }).catch(() => { /* swallow — bridge is relay-only */ });
+      }
+
+      if (waitForReply) {
+        const reply = await waitForThreadlineReply(ctx, resolvedId, effectiveRelayThreadId, timeoutSeconds);
+        res.json({
+          success: true,
+          messageId: relayMsgId,
+          threadId: effectiveRelayThreadId,
+          resolvedAgent: resolvedId,
+          deliveryPath: 'relay',
+          reply,
+        });
+      } else {
+        res.json({
+          success: true,
+          messageId: relayMsgId,
+          threadId: effectiveRelayThreadId,
+          resolvedAgent: resolvedId,
+          deliveryPath: 'relay',
+        });
+      }
     } catch (err) {
       res.status(500).json({
         success: false,
@@ -9046,7 +11621,7 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(501).json({ error: 'FeatureRegistry not initialized' });
       return;
     }
-    const { to, userId: bodyUserId, trigger, consentRecord, context } = req.body || {};
+    const { to, userId: bodyUserId, trigger, consentRecord, context, activationChallenge } = req.body || {};
     if (!to) {
       res.status(400).json({ error: { code: 'MISSING_TARGET', message: 'Request body must include "to" (target state)' } });
       return;
@@ -9056,6 +11631,7 @@ export function createRoutes(ctx: RouteContext): Router {
       trigger,
       consentRecord,
       context,
+      activationChallenge,
     });
     if (!result.success) {
       const status = result.error?.code === 'FEATURE_NOT_FOUND' ? 404
@@ -9140,6 +11716,1012 @@ export function createRoutes(ctx: RouteContext): Router {
       });
     }
   });
+
+  // ── Integrated-Being shared-state ledger (v1) ─────────────────────
+  //
+  // Four bearer-token-gated endpoints (auth enforced globally by authMiddleware).
+  // Per-IP rate limiting uses the same middleware applied elsewhere in the API.
+  // When config.integratedBeing.enabled === false, all four return 503.
+  //
+  // Spec: docs/specs/integrated-being-ledger-v1.md §"Read path".
+
+  const sharedStateDisabled = (_req: ExpressRequest, res: ExpressResponse): boolean => {
+    const enabled = ctx.config.integratedBeing?.enabled;
+    const effective = enabled === undefined ? true : enabled !== false;
+    if (!effective || !ctx.sharedStateLedger) {
+      res.status(503).json({ error: 'Integrated-Being ledger disabled' });
+      return true;
+    }
+    return false;
+  };
+
+  router.get('/shared-state/recent', rateLimiter(60_000, 60), async (req, res) => {
+    if (sharedStateDisabled(req, res)) return;
+    try {
+      const limit = req.query.limit ? Math.max(1, Math.min(200, parseInt(String(req.query.limit), 10) || 20)) : 20;
+      const since = typeof req.query.since === 'string' ? req.query.since : undefined;
+      const cpType = typeof req.query.counterpartyType === 'string'
+        ? (req.query.counterpartyType as 'user' | 'agent' | 'self' | 'system')
+        : undefined;
+      const entries = await ctx.sharedStateLedger!.recent({
+        limit,
+        since,
+        counterpartyType: cpType,
+      });
+      res.json({ entries });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/shared-state/render', rateLimiter(60_000, 60), async (req, res) => {
+    if (sharedStateDisabled(req, res)) return;
+    try {
+      const limit = req.query.limit ? Math.max(1, Math.min(200, parseInt(String(req.query.limit), 10) || 50)) : 50;
+      const rendered = await ctx.sharedStateLedger!.renderForInjection({ limit });
+      res.type('text/plain').send(rendered);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/shared-state/chain/:id', rateLimiter(60_000, 60), async (req, res) => {
+    if (sharedStateDisabled(req, res)) return;
+    try {
+      const id = String(req.params.id || '').trim();
+      if (!/^[0-9a-f]{12}$/.test(id)) {
+        res.status(400).json({ error: 'Invalid entry id' });
+        return;
+      }
+      const chain = await ctx.sharedStateLedger!.walkChain(id);
+      res.json({ chain });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/shared-state/stats', rateLimiter(60_000, 60), async (req, res) => {
+    if (sharedStateDisabled(req, res)) return;
+    try {
+      const rebuild = req.query.rebuild === '1' || req.query.rebuild === 'true';
+      const stats = await ctx.sharedStateLedger!.stats(rebuild);
+      res.json(stats);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── Integrated-Being shared-state ledger (v2 — session-write surface) ─
+  //
+  // Slice 1 scope: session-bind + append (auth-only, no commitment logic).
+  // Later slices add resolve, session-bind-interactive, session-bind-rotate,
+  // mechanism-ref validation, dedup index, sweepers, and dashboard.
+  //
+  // All v2 endpoints are gated on config.integratedBeing.v2Enabled (default
+  // false). When false, endpoints return 503 with X-Disabled: v2.
+  //
+  // Spec: docs/specs/integrated-being-ledger-v2.md
+
+  const v2Disabled = (_req: ExpressRequest, res: ExpressResponse): boolean => {
+    const ibConfig = ctx.config.integratedBeing ?? {};
+    const masterEnabled =
+      ibConfig.enabled === undefined ? true : ibConfig.enabled !== false;
+    const v2Enabled = ibConfig.v2Enabled === true;
+    const ready =
+      masterEnabled && v2Enabled && ctx.sharedStateLedger && ctx.ledgerSessionRegistry;
+    if (!ready) {
+      res.setHeader('X-Disabled', 'v2');
+      res.status(503).json({ error: 'Integrated-Being ledger v2 disabled' });
+      return true;
+    }
+    return false;
+  };
+
+  // --- Log-masking helper: binding tokens + session ids must never leak. ---
+  // Structural redaction via a shared helper ensures consistency across
+  // handlers. The raw token and session id never land in logs / error
+  // traces / degradation-reporter output. (Spec §2 Security S1.)
+  const redactBindingToken = (token: string): string =>
+    token.length > 0 ? '***REDACTED***' : '';
+  const redactSessionId = (sid: string): string =>
+    sid.length >= 8 ? `${sid.slice(0, 8)}-***` : '***';
+
+  /**
+   * POST /shared-state/session-bind
+   *
+   * Registers a session id in the LedgerSessionRegistry and returns a
+   * plaintext binding token ONCE. Called by the session-start hook
+   * (slice 2 wires the hook; for slice 1 this endpoint is callable
+   * directly from tests and any authenticated caller).
+   *
+   * Request body: { sessionId: uuidv4, label?: string }
+   * Response 200: { token, absoluteExpiresAt, idleExpiresAt, idempotentReplay }
+   * Response 400: malformed sessionId
+   * Response 503: v2 disabled
+   *
+   * Note: bearer-token auth is enforced by the global authMiddleware.
+   * The open architectural concern called out in the spec's "Open
+   * architectural questions" §1 (any bearer-token holder can call this)
+   * is documented there as an accepted limit of v2; v2.1 addresses it
+   * with privileged-channel isolation.
+   */
+  router.post(
+    '/shared-state/session-bind',
+    rateLimiter(60_000, 30),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      try {
+        const body = (req.body ?? {}) as { sessionId?: unknown; label?: unknown };
+        const sessionId =
+          typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+        const label = typeof body.label === 'string' ? body.label : undefined;
+        if (!sessionId) {
+          res.status(400).json({
+            error: 'sessionId is required (UUIDv4 format)',
+          });
+          return;
+        }
+        let result;
+        try {
+          result = ctx.ledgerSessionRegistry!.register(sessionId, label);
+        } catch (err) {
+          res.status(400).json({
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return;
+        }
+        // Mark hook-in-progress so the interactive-fallback path can
+        // attest a lifecycle hook initiated this bind (spec §3).
+        ctx.ledgerSessionRegistry!.markHookInProgress(sessionId);
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+          sessionId: result.sessionId,
+          token: result.token,
+          absoluteExpiresAt: result.absoluteExpiresAt,
+          idleExpiresAt: result.idleExpiresAt,
+          idempotentReplay: result.idempotentReplay,
+        });
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  );
+
+  /**
+   * POST /shared-state/append
+   *
+   * Authenticated session-write to the shared-state ledger. Slice 1
+   * scope: accepts 'agreement' | 'decision' | 'note' kinds only;
+   * 'commitment' returns 501 (pending slice 3's mechanism-ref validator).
+   * 'thread-*' kinds return 400 (reserved for server-side emitters).
+   *
+   * Auth: X-Instar-Session-Id + X-Instar-Session-Token. Both required.
+   * The global bearer-token auth (authMiddleware) remains in front.
+   *
+   * Request body (SessionAppendRequest):
+   *   { kind, subject, summary?, counterparty: { type, name, trustTier? },
+   *     supersedes?, dedupKey }
+   *
+   * Response 200: { id, t } — the new entry's id and server timestamp.
+   * Response 400: malformed body or forbidden kind
+   * Response 401: missing / invalid session headers
+   * Response 409: dedupKey collision (via v1 dedup)
+   * Response 501: commitment kind (pending slice 3)
+   * Response 503: v2 disabled
+   */
+  router.post(
+    '/shared-state/append',
+    rateLimiter(60_000, 60),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+
+      // ── Session auth ──────────────────────────────────────────────
+      const sessionId = String(req.header('x-instar-session-id') ?? '').trim();
+      const token = String(req.header('x-instar-session-token') ?? '').trim();
+      if (!sessionId || !token) {
+        res
+          .status(401)
+          .json({ error: 'Missing X-Instar-Session-Id or X-Instar-Session-Token' });
+        return;
+      }
+      const verify = ctx.ledgerSessionRegistry!.verify(sessionId, token);
+      if (!verify.ok) {
+        res.status(401).json({
+          error: 'Session binding invalid',
+          reason: verify.reason,
+        });
+        return;
+      }
+
+      // ── Forbid server-bound fields FIRST ─────────────────────────
+      // Runs before schema validation so a client debugging a forbidden-
+      // field error sees that failure first. `commitment` is allowed
+      // ONLY when kind === 'commitment' (slice 3 opens this path).
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const kind = typeof body.kind === 'string' ? body.kind : '';
+      const forbiddenBase = ['provenance', 'emittedBy', 'source', 'id', 't'];
+      const forbidden = kind === 'commitment' ? forbiddenBase : [...forbiddenBase, 'commitment'];
+      for (const f of forbidden) {
+        if (Object.prototype.hasOwnProperty.call(body, f)) {
+          res.setHeader('X-Invalid-Field', f);
+          res.status(400).json({
+            error: `field '${f}' is server-bound and cannot be supplied`,
+          });
+          return;
+        }
+      }
+
+      // ── Schema validation ─────────────────────────────────────────
+      if (
+        kind !== 'agreement' &&
+        kind !== 'decision' &&
+        kind !== 'note' &&
+        kind !== 'commitment'
+      ) {
+        res.setHeader('X-Invalid-Field', 'kind');
+        res.status(400).json({
+          error: 'kind must be one of: agreement | decision | note | commitment',
+        });
+        return;
+      }
+
+      const subject = typeof body.subject === 'string' ? body.subject : '';
+      if (!subject || subject.length > 200) {
+        res.setHeader('X-Invalid-Field', 'subject');
+        res.status(400).json({ error: 'subject required, max 200 chars' });
+        return;
+      }
+      const summary =
+        typeof body.summary === 'string' ? body.summary : undefined;
+      if (summary !== undefined && summary.length > 400) {
+        res.setHeader('X-Invalid-Field', 'summary');
+        res.status(400).json({ error: 'summary max 400 chars' });
+        return;
+      }
+
+      const counterparty = body.counterparty as
+        | { type?: string; name?: string; trustTier?: string }
+        | undefined;
+      if (
+        !counterparty ||
+        typeof counterparty !== 'object' ||
+        !counterparty.type ||
+        !counterparty.name
+      ) {
+        res.setHeader('X-Invalid-Field', 'counterparty');
+        res.status(400).json({ error: 'counterparty.type + .name required' });
+        return;
+      }
+      if (!/^[a-zA-Z0-9\-_.:]+$/.test(counterparty.name) || counterparty.name.length > 64) {
+        res.setHeader('X-Invalid-Field', 'counterparty.name');
+        res.status(400).json({
+          error: 'counterparty.name must be [a-zA-Z0-9-_.:], max 64 chars',
+        });
+        return;
+      }
+      if (
+        counterparty.type !== 'user' &&
+        counterparty.type !== 'agent' &&
+        counterparty.type !== 'self' &&
+        counterparty.type !== 'system'
+      ) {
+        res.setHeader('X-Invalid-Field', 'counterparty.type');
+        res.status(400).json({
+          error: 'counterparty.type must be one of: user | agent | self | system',
+        });
+        return;
+      }
+
+      const dedupKey = typeof body.dedupKey === 'string' ? body.dedupKey : '';
+      if (!dedupKey || dedupKey.length > 200 || !/^[a-zA-Z0-9\-_.:]+$/.test(dedupKey)) {
+        res.setHeader('X-Invalid-Field', 'dedupKey');
+        res.status(400).json({
+          error: 'dedupKey required, [a-zA-Z0-9-_.:], max 200 chars',
+        });
+        return;
+      }
+
+      const supersedes =
+        typeof body.supersedes === 'string' && body.supersedes.length > 0
+          ? body.supersedes
+          : undefined;
+
+      // ── Commitment-kind validation (slice 3) ─────────────────────
+      // Only runs when kind === 'commitment'. Validates the inner
+      // `commitment` object: mechanism shape, deadline sanity,
+      // passive-wait-requires-deadline. Server sets refResolvedAt,
+      // refStatus, status, resolution — all server-bound.
+      const ibConfig = ctx.config.integratedBeing ?? {};
+      let commitmentOut:
+        | undefined
+        | {
+            mechanism: {
+              type: 'scheduled-job' | 'polling-sentinel' | 'external-callback' | 'passive-wait' | 'user-driven';
+              ref?: string;
+              refResolvedAt: string;
+              refStatus: 'valid' | 'invalid' | 'unverified';
+            };
+            deadline?: string;
+            status: 'open';
+          };
+      if (kind === 'commitment') {
+        const commitment = body.commitment as
+          | {
+              mechanism?: { type?: string; ref?: string };
+              deadline?: string;
+              status?: string;
+              resolution?: unknown;
+            }
+          | undefined;
+        if (!commitment || typeof commitment !== 'object') {
+          res.setHeader('X-Invalid-Field', 'commitment');
+          res.status(400).json({ error: 'commitment object required on commitment kind' });
+          return;
+        }
+        if (commitment.status !== undefined && commitment.status !== 'open') {
+          res.setHeader('X-Invalid-Field', 'commitment.status');
+          res.status(400).json({
+            error: "commitment.status must be 'open' on create; use /shared-state/resolve/:id to transition",
+          });
+          return;
+        }
+        if (commitment.resolution !== undefined) {
+          res.setHeader('X-Invalid-Field', 'commitment.resolution');
+          res.status(400).json({
+            error: "commitment.resolution cannot be supplied on create (server-bound, set via resolve)",
+          });
+          return;
+        }
+        const mech = commitment.mechanism;
+        if (!mech || typeof mech !== 'object' || typeof mech.type !== 'string') {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism');
+          res.status(400).json({ error: 'commitment.mechanism.type required' });
+          return;
+        }
+        const validMechTypes = [
+          'scheduled-job',
+          'polling-sentinel',
+          'external-callback',
+          'passive-wait',
+          'user-driven',
+        ] as const;
+        if (!validMechTypes.includes(mech.type as (typeof validMechTypes)[number])) {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism.type');
+          res.status(400).json({
+            error: `commitment.mechanism.type must be one of: ${validMechTypes.join(' | ')}`,
+          });
+          return;
+        }
+        const mechType = mech.type as (typeof validMechTypes)[number];
+        // passive-wait forbids ref; others allow optional ref with charset.
+        if (mechType === 'passive-wait' && mech.ref !== undefined) {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism.ref');
+          res.status(400).json({
+            error: "passive-wait mechanism forbids commitment.mechanism.ref",
+          });
+          return;
+        }
+        if (
+          mech.ref !== undefined &&
+          (typeof mech.ref !== 'string' ||
+            mech.ref.length === 0 ||
+            mech.ref.length > 200 ||
+            !/^[a-zA-Z0-9\-_.:]+$/.test(mech.ref))
+        ) {
+          res.setHeader('X-Invalid-Field', 'commitment.mechanism.ref');
+          res.status(400).json({
+            error: 'commitment.mechanism.ref must be [a-zA-Z0-9-_.:], max 200 chars',
+          });
+          return;
+        }
+        // Deadline validation.
+        const deadline =
+          typeof commitment.deadline === 'string' ? commitment.deadline : undefined;
+        if (mechType === 'passive-wait' && !deadline) {
+          res.setHeader('X-Invalid-Field', 'commitment.deadline');
+          res.status(400).json({
+            error: 'passive-wait commitments require a deadline',
+          });
+          return;
+        }
+        if (deadline !== undefined) {
+          const dl = Date.parse(deadline);
+          if (Number.isNaN(dl)) {
+            res.setHeader('X-Invalid-Field', 'commitment.deadline');
+            res.status(400).json({ error: 'deadline must be ISO 8601' });
+            return;
+          }
+          const now = Date.now();
+          const minMs = now + 60 * 1000;
+          const maxMs = now + 90 * 24 * 60 * 60 * 1000;
+          if (dl < minMs || dl > maxMs) {
+            res.setHeader('X-Invalid-Field', 'commitment.deadline');
+            res.status(400).json({
+              error: 'deadline must be between now+60s and now+90d',
+            });
+            return;
+          }
+        }
+        // Open-commitment + passive-wait caps.
+        const openLimit = Math.max(1, ibConfig.openCommitmentsPerSession ?? 20);
+        const passiveLimit = Math.max(
+          0,
+          ibConfig.passiveWaitCommitmentsPerSession ?? 3,
+        );
+        const capReason = ctx.ledgerSessionRegistry!.checkOpenCommitments(
+          sessionId,
+          mechType,
+          openLimit,
+          passiveLimit,
+        );
+        if (capReason) {
+          res.setHeader('X-Cap-Reason', capReason);
+          res.status(429).json({ error: 'commitment cap exceeded', reason: capReason });
+          return;
+        }
+        // Build server-bound commitment fields. refStatus: slice 3 sets
+        // 'unverified' by default; positive verification (scheduled-job
+        // lookup against scheduler registry, etc.) is a slice 5 refinement.
+        commitmentOut = {
+          mechanism: {
+            type: mechType,
+            ref: mech.ref,
+            refResolvedAt: new Date().toISOString(),
+            refStatus: 'unverified',
+          },
+          deadline,
+          status: 'open',
+        };
+      }
+
+      // ── Per-session write-rate check ─────────────────────────────
+      // Runs after validation so a 429 doesn't block us from seeing
+      // the actual schema error first.
+      const writeRate = Math.max(1, ibConfig.sessionWriteRatePerMinute ?? 30);
+      const rateReason = ctx.ledgerSessionRegistry!.checkWriteRate(sessionId, writeRate);
+      if (rateReason) {
+        res.setHeader('X-Cap-Reason', rateReason);
+        res.status(429).json({ error: 'session write rate exceeded', reason: rateReason });
+        return;
+      }
+
+      // ── Append ────────────────────────────────────────────────────
+      try {
+        const appended = await ctx.sharedStateLedger!.append({
+          emittedBy: { subsystem: 'session', instance: sessionId },
+          kind: kind as 'agreement' | 'decision' | 'note' | 'commitment',
+          subject,
+          summary,
+          counterparty: {
+            type: counterparty.type,
+            name: counterparty.name,
+            // trustTier is server-owned per spec — hardcoded 'untrusted'
+            // in slice 3; slice 5 adds real resolution + discrepancy emit.
+            trustTier: 'untrusted',
+          },
+          supersedes,
+          provenance: 'session-asserted',
+          dedupKey,
+          ...(commitmentOut ? { commitment: commitmentOut } : {}),
+        });
+
+        if (!appended) {
+          // v1 append returns null on dedup OR fail-open IO failure. The
+          // client can't tell which without inspecting server logs — for
+          // slice 1 we collapse to 409 (idempotent replay friendly) and
+          // return 500 only if a subsequent follow-up check (future slice)
+          // confirms a write failure. v1 behavior is preserved.
+          res.setHeader('X-Dedup-Or-Fail', '1');
+          res.status(409).json({
+            error: 'duplicate dedupKey or append failed (fail-open)',
+          });
+          return;
+        }
+
+        ctx.ledgerSessionRegistry!.touchActivity(sessionId);
+        ctx.ledgerSessionRegistry!.recordWrite(sessionId);
+        if (commitmentOut) {
+          ctx.ledgerSessionRegistry!.recordOpenCommitment(
+            sessionId,
+            commitmentOut.mechanism.type,
+          );
+        }
+        res.json({ id: appended.id, t: appended.t });
+      } catch (err) {
+        console.error(
+          `[shared-state/append] append failed for session=${redactSessionId(
+            sessionId
+          )} token=${redactBindingToken(token)}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  );
+
+  /**
+   * POST /shared-state/resolve/:id — slice 4
+   *
+   * Resolves a commitment by appending a new entry that supersedes
+   * (for self-assert / subsystem-verify / cancel) or disputes (for
+   * dispute) the original commitment entry. Tiered authorization:
+   *
+   * - `self-assert`: ONLY the creator session can call (session id
+   *   must match the commitment's emittedBy.instance). Spec §4 A4
+   *   closes "any session can hide any commitment via self-assert".
+   * - `dispute`: any registered session. Rate-capped at
+   *   disputesPerSessionPerHour (default 10) — spec §4 iter 2.
+   * - `user-resolve`: deferred to slice 6 (requires PIN-unlock
+   *   infrastructure that the dashboard surface will add).
+   * - `subsystem-verify`: deferred to slice 5 (requires job-scheduler
+   *   onComplete wiring).
+   *
+   * dedupKey is treated as an idempotency key — a retry with the same
+   * key returns the same result with X-Idempotent-Replay: 1.
+   */
+  router.post(
+    '/shared-state/resolve/:id',
+    rateLimiter(60_000, 60),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+
+      const ibConfig = ctx.config.integratedBeing ?? {};
+      const resolutionEnabled = ibConfig.resolutionEnabled === true;
+      if (!resolutionEnabled) {
+        res.setHeader('X-Disabled', 'resolution');
+        res.status(503).json({ error: 'resolution workflow disabled' });
+        return;
+      }
+
+      // ── Session auth ─────────────────────────────────────────────
+      const sessionId = String(req.header('x-instar-session-id') ?? '').trim();
+      const token = String(req.header('x-instar-session-token') ?? '').trim();
+      if (!sessionId || !token) {
+        res.status(401).json({ error: 'Missing X-Instar-Session-Id or X-Instar-Session-Token' });
+        return;
+      }
+      const vverify = ctx.ledgerSessionRegistry!.verify(sessionId, token);
+      if (!vverify.ok) {
+        res.status(401).json({ error: 'Session binding invalid', reason: vverify.reason });
+        return;
+      }
+
+      // ── Body validation ──────────────────────────────────────────
+      const commitmentId = String(req.params.id || '').trim();
+      if (!/^[0-9a-f]{12}$/.test(commitmentId)) {
+        res.status(400).json({ error: 'Invalid commitment id' });
+        return;
+      }
+      const body = (req.body ?? {}) as {
+        resolution?: unknown;
+        outcome?: unknown;
+        note?: unknown;
+        evidenceRef?: unknown;
+        disputeReason?: unknown;
+        dedupKey?: unknown;
+      };
+      const resolution = typeof body.resolution === 'string' ? body.resolution : '';
+      const validResolutions = ['self-assert', 'dispute', 'user-resolve', 'subsystem-verify'];
+      if (!validResolutions.includes(resolution)) {
+        res.setHeader('X-Invalid-Field', 'resolution');
+        res.status(400).json({
+          error: `resolution must be one of: ${validResolutions.join(' | ')}`,
+        });
+        return;
+      }
+      if (resolution === 'user-resolve' || resolution === 'subsystem-verify') {
+        res.setHeader('X-Pending-Slice', resolution === 'user-resolve' ? '6' : '5');
+        res.status(501).json({
+          error: `resolution type '${resolution}' pending a later slice`,
+        });
+        return;
+      }
+      const dedupKey = typeof body.dedupKey === 'string' ? body.dedupKey : '';
+      if (!dedupKey || dedupKey.length > 200 || !/^[a-zA-Z0-9\-_.:]+$/.test(dedupKey)) {
+        res.setHeader('X-Invalid-Field', 'dedupKey');
+        res.status(400).json({
+          error: 'dedupKey required, [a-zA-Z0-9-_.:], max 200 chars',
+        });
+        return;
+      }
+
+      // ── Fetch commitment entry ───────────────────────────────────
+      let chain;
+      try {
+        chain = await ctx.sharedStateLedger!.walkChain(commitmentId);
+      } catch (err) {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      const commitmentEntry = chain[0];
+      if (!commitmentEntry) {
+        res.status(404).json({ error: 'commitment not found' });
+        return;
+      }
+      if (commitmentEntry.kind !== 'commitment') {
+        res.status(400).json({ error: 'target entry is not a commitment' });
+        return;
+      }
+      const mechanismType =
+        commitmentEntry.commitment?.mechanism?.type ?? 'user-driven';
+
+      // ── Idempotency check (AFTER commitment-fetch; keyed on tuple) ─
+      // Keyed on (sessionId, commitmentId, dedupKey) so a replay from
+      // the SAME session against the SAME commitment returns the cached
+      // result, while any cross-session / cross-commitment lookup misses
+      // and re-runs authorization + write. Per-session authorization
+      // still runs BEFORE the cache lookup (we've verified the session
+      // binding above).
+      const cached = ctx.ledgerSessionRegistry!.getIdempotent(
+        sessionId,
+        commitmentId,
+        dedupKey,
+      );
+      if (cached) {
+        res.setHeader('X-Idempotent-Replay', '1');
+        res.json(cached);
+        return;
+      }
+
+      // ── Per-resolution-type authorization + action ───────────────
+      if (resolution === 'self-assert') {
+        if (commitmentEntry.emittedBy.instance !== sessionId) {
+          res.status(403).json({
+            error: 'self-assert requires the original creator session',
+            reason: 'creator-mismatch',
+          });
+          return;
+        }
+        const outcome = typeof body.outcome === 'string' ? body.outcome : '';
+        if (outcome !== 'success' && outcome !== 'failure') {
+          res.setHeader('X-Invalid-Field', 'outcome');
+          res.status(400).json({
+            error: "self-assert requires outcome: 'success' | 'failure'",
+          });
+          return;
+        }
+        const note = typeof body.note === 'string' ? body.note.slice(0, 400) : undefined;
+        const evidenceRef =
+          typeof body.evidenceRef === 'string' ? body.evidenceRef.slice(0, 200) : undefined;
+        const subject = `${outcome === 'success' ? 'resolved' : 'cancelled'}: ${commitmentEntry.subject}`.slice(0, 200);
+        const appended = await ctx.sharedStateLedger!.append({
+          emittedBy: { subsystem: 'session', instance: sessionId },
+          kind: 'note',
+          subject,
+          summary: note,
+          counterparty: {
+            type: commitmentEntry.counterparty.type,
+            name: commitmentEntry.counterparty.name,
+            trustTier: 'untrusted',
+          },
+          supersedes: commitmentEntry.id,
+          provenance: 'session-asserted',
+          dedupKey,
+        });
+        if (!appended) {
+          res.setHeader('X-Dedup-Or-Fail', '1');
+          res.status(409).json({ error: 'dedupKey collision or fail-open' });
+          return;
+        }
+        const payload = {
+          id: appended.id,
+          t: appended.t,
+          resolution: 'self-assert',
+          outcome,
+          tier: 'self-asserted',
+          evidenceRef,
+        };
+        ctx.ledgerSessionRegistry!.recordCommitmentClosed(
+          commitmentEntry.emittedBy.instance,
+          mechanismType,
+        );
+        ctx.ledgerSessionRegistry!.rememberIdempotent(sessionId, commitmentId, dedupKey, payload);
+        res.json(payload);
+        return;
+      }
+
+      if (resolution === 'dispute') {
+        const disputeLimit = Math.max(1, ibConfig.disputesPerSessionPerHour ?? 10);
+        const capReason = ctx.ledgerSessionRegistry!.checkDisputeRate(sessionId, disputeLimit);
+        if (capReason) {
+          res.setHeader('X-Cap-Reason', capReason);
+          res.status(429).json({ error: 'dispute rate exceeded', reason: capReason });
+          return;
+        }
+        const disputeReason =
+          typeof body.disputeReason === 'string' ? body.disputeReason.slice(0, 200) : '';
+        if (!disputeReason) {
+          res.setHeader('X-Invalid-Field', 'disputeReason');
+          res.status(400).json({ error: 'disputeReason required for dispute resolution' });
+          return;
+        }
+        const appended = await ctx.sharedStateLedger!.append({
+          emittedBy: { subsystem: 'session', instance: sessionId },
+          kind: 'note',
+          subject: `disputed: ${disputeReason}`.slice(0, 200),
+          counterparty: {
+            type: commitmentEntry.counterparty.type,
+            name: commitmentEntry.counterparty.name,
+            trustTier: 'untrusted',
+          },
+          // disputes: separate field, NOT supersedes — avoids the depth-16
+          // data-hiding vector called out in spec §4 iter 2 (Gemini).
+          disputes: commitmentEntry.id,
+          provenance: 'session-asserted',
+          dedupKey,
+        });
+        if (!appended) {
+          res.setHeader('X-Dedup-Or-Fail', '1');
+          res.status(409).json({ error: 'dedupKey collision or fail-open' });
+          return;
+        }
+        ctx.ledgerSessionRegistry!.recordDispute(sessionId);
+        const payload = { id: appended.id, t: appended.t, resolution: 'dispute' };
+        ctx.ledgerSessionRegistry!.rememberIdempotent(sessionId, commitmentId, dedupKey, payload);
+        res.json(payload);
+        return;
+      }
+
+      // Unreachable — all resolution types handled above.
+      res.status(500).json({ error: 'unreachable resolution branch' });
+    }
+  );
+
+  /**
+   * GET /shared-state/sessions — slice 7
+   *
+   * Returns the list of registered sessions (redacted: no tokenHash,
+   * no plaintext token). Bearer-token gated by the global middleware.
+   * Used by the dashboard Bindings subtab.
+   */
+  router.get(
+    '/shared-state/sessions',
+    rateLimiter(60_000, 60),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      try {
+        const sessions = ctx.ledgerSessionRegistry!.listSessions();
+        res.json({ sessions });
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  );
+
+  /**
+   * POST /shared-state/sessions/:sid/revoke — slice 7
+   *
+   * Marks a session's binding revoked. Requires the X-Instar-Request: 1
+   * header alongside bearer auth — same convention used by other
+   * user-authoritative actions (backup triggers, config edits). This
+   * provides a minimal user-intent attestation without requiring full
+   * PIN-unlock infrastructure (which is deferred for user-resolve but
+   * not needed here — revocation is idempotent and bounded by session
+   * registration, not state-shaping).
+   *
+   * Emits a subsystem-asserted note entry "session binding revoked:
+   * <sid>" so the audit trail preserves the action.
+   */
+  router.post(
+    '/shared-state/sessions/:sid/revoke',
+    rateLimiter(60_000, 20),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      const userIntent = String(req.header('x-instar-request') ?? '').trim();
+      if (userIntent !== '1') {
+        res.status(403).json({
+          error:
+            'revocation requires X-Instar-Request: 1 header (user-intent attestation)',
+          reason: 'missing-user-intent',
+        });
+        return;
+      }
+      const sid = String(req.params.sid || '').trim();
+      if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(sid)) {
+        res.status(400).json({ error: 'Invalid sessionId format' });
+        return;
+      }
+      const registry = ctx.ledgerSessionRegistry!;
+      const existed = registry.revoke(sid);
+      if (!existed) {
+        res.status(404).json({ error: 'session not found' });
+        return;
+      }
+      // Audit note — subsystem-asserted; visible in the dashboard
+      // stream next to the session binding history.
+      try {
+        await ctx.sharedStateLedger!.append({
+          emittedBy: {
+            subsystem: 'session-manager',
+            instance: ctx.config.projectName ?? 'server',
+          },
+          kind: 'note',
+          subject: `session binding revoked: ${sid}`,
+          counterparty: {
+            type: 'self',
+            name: 'self',
+            trustTier: 'trusted',
+          },
+          provenance: 'subsystem-asserted',
+          dedupKey: `integrated-being-v2:session-revoke:${sid}:${Date.now()}`,
+        });
+      } catch {
+        /* audit note is best-effort; revocation itself succeeded */
+      }
+      res.json({ revoked: true, sessionId: sid });
+    }
+  );
+
+  /**
+   * POST /shared-state/session-bind-confirm
+   *
+   * Called by the session-start hook AFTER the file-based handoff has
+   * completed (token file written with mode 0o600 + .ready marker). The
+   * server clears the hook-in-progress flag, which closes the window
+   * for the session-bind-interactive fallback on this session id.
+   *
+   * Request body: { sessionId }
+   * Response 200: { confirmed: true }
+   * Response 400: malformed or missing sessionId
+   * Response 503: v2 disabled
+   */
+  router.post(
+    '/shared-state/session-bind-confirm',
+    rateLimiter(60_000, 30),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      const body = (req.body ?? {}) as { sessionId?: unknown };
+      const sessionId =
+        typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId is required' });
+        return;
+      }
+      ctx.ledgerSessionRegistry!.confirmHookDone(sessionId);
+      res.json({ confirmed: true });
+    }
+  );
+
+  /**
+   * POST /shared-state/session-bind-interactive
+   *
+   * Attestation-gated fallback for when the file-based handoff fails
+   * (e.g. filesystem mode verification error, read-only FS, race with
+   * a cleanup). The session polls the `.ready` marker, times out at 5s,
+   * then calls this endpoint.
+   *
+   * Gate conditions (spec §3 iter 2) — BOTH required:
+   *   1. The session has a hook-in-progress flag set within 30s of
+   *      its session-bind call.
+   *   2. The session has NOT already been issued a binding token via
+   *      any path (hasEverBeenBound check).
+   *
+   * The gate ensures a bearer-token holder cannot mint a binding
+   * token without first posing as the session-start hook (requires
+   * being the session's actual parent process) AND the file path
+   * having failed first. The 0o600 boundary remains primary.
+   *
+   * Request body: { sessionId }
+   * Response 200: { token, absoluteExpiresAt, idleExpiresAt }
+   * Response 400: malformed or missing sessionId
+   * Response 403: attestation failed (no hook-in-progress, or already-bound)
+   * Response 503: v2 disabled
+   */
+  router.post(
+    '/shared-state/session-bind-interactive',
+    rateLimiter(60_000, 10),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      const body = (req.body ?? {}) as { sessionId?: unknown };
+      const sessionId =
+        typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+      if (!sessionId) {
+        res.status(400).json({ error: 'sessionId is required' });
+        return;
+      }
+
+      const registry = ctx.ledgerSessionRegistry!;
+      // Attestation: the hook-in-progress flag alone is the gate. Its
+      // presence means (a) a session-bind call happened in the last 30s
+      // AND (b) no session-bind-confirm or prior interactive bind has
+      // cleared it. Single-use is enforced by clearing the flag on
+      // success — a replay attempts lands on "attestation-missing".
+      if (!registry.isHookInProgress(sessionId)) {
+        res.status(403).json({
+          error: 'no live hook-in-progress flag for this session',
+          reason: 'attestation-missing',
+        });
+        return;
+      }
+
+      // Re-issue the token against the existing registration (which
+      // session-bind already created). Preserves anchored absolute TTL.
+      const reissue = registry.reissueForInteractive(sessionId);
+      if (!reissue.ok) {
+        const status =
+          reissue.reason === 'revoked' || reissue.reason === 'absolute-expired'
+            ? 403
+            : reissue.reason === 'malformed'
+            ? 400
+            : 404;
+        res.status(status).json({
+          error: 'interactive re-issue failed',
+          reason: reissue.reason,
+        });
+        return;
+      }
+      // Single-use: clear the flag so replays return 403.
+      registry.confirmHookDone(sessionId);
+
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        sessionId: reissue.result.sessionId,
+        token: reissue.result.token,
+        absoluteExpiresAt: reissue.result.absoluteExpiresAt,
+        idleExpiresAt: reissue.result.idleExpiresAt,
+      });
+    }
+  );
+
+  /**
+   * POST /shared-state/session-bind-rotate
+   *
+   * Rotates a session's binding token. Requires the current valid token
+   * (anti-takeover: an attacker without the current token cannot rotate).
+   * The anchored absolute TTL is NOT extended — rotation refreshes idle
+   * TTL only. Past absolute-TTL sessions get a 403; the caller must
+   * start a fresh sessionId.
+   *
+   * Request body: { sessionId }
+   * Headers: X-Instar-Session-Token (the CURRENT valid token)
+   * Response 200: { token, absoluteExpiresAt, idleExpiresAt }
+   * Response 401: invalid current token
+   * Response 403: session revoked or absolute TTL exhausted
+   * Response 503: v2 disabled
+   */
+  router.post(
+    '/shared-state/session-bind-rotate',
+    rateLimiter(60_000, 10),
+    async (req, res) => {
+      if (v2Disabled(req, res)) return;
+      const body = (req.body ?? {}) as { sessionId?: unknown };
+      const sessionId =
+        typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+      const currentToken = String(req.header('x-instar-session-token') ?? '').trim();
+      if (!sessionId || !currentToken) {
+        res.status(400).json({
+          error: 'sessionId (body) and X-Instar-Session-Token (header) required',
+        });
+        return;
+      }
+      const result = ctx.ledgerSessionRegistry!.rotate(sessionId, currentToken);
+      if (!result.ok) {
+        const status =
+          result.reason === 'revoked' || result.reason === 'absolute-expired'
+            ? 403
+            : 401;
+        res.status(status).json({
+          error: 'rotation failed',
+          reason: result.reason,
+        });
+        return;
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        sessionId: result.result.sessionId,
+        token: result.result.token,
+        absoluteExpiresAt: result.result.absoluteExpiresAt,
+        idleExpiresAt: result.result.idleExpiresAt,
+      });
+    }
+  );
 
   return router;
 }

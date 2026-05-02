@@ -22,6 +22,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { detectTmuxPath } from '../core/Config.js';
 import { SleepWakeDetector } from '../core/SleepWakeDetector.js';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
+import { SafeGitExecutor } from '../core/SafeGitExecutor.js';
 
 /** Execute a shell command safely, returning stdout. */
 function shellExec(cmd: string, timeout = 5000): string {
@@ -61,6 +63,14 @@ export class ServerSupervisor extends EventEmitter {
   private maxRetriesExhaustedAt = 0;
   private consecutiveFailures = 0; // Hysteresis: require 2 consecutive failures before marking unhealthy
   private readonly unhealthyThreshold = 2;
+  // Bind-failure escalation — incremented when a spawn produces a server that
+  // never reaches a healthy /health response before crashing. After 2+ in a
+  // row, the next preflight forces an aggressive better-sqlite3 rebuild
+  // regardless of what the require-load probe reports. Reset on any healthy
+  // tick. See preflightSelfHeal native-module branch.
+  private consecutiveBindFailures = 0;
+  private readonly bindFailureEscalationThreshold = 2;
+  private readonly processAliveThreshold = 6; // When process is alive but unresponsive (e.g., high CPU load), require 6 failures (~60s) before restarting
   private stateDir: string | null;
 
   // Planned restart / maintenance wait — suppress alerts during expected downtime
@@ -360,7 +370,7 @@ export class ServerSupervisor extends EventEmitter {
         const nodePath = this.findNodePath();
         if (nodePath) {
           fs.mkdirSync(path.dirname(nodeSymlink), { recursive: true });
-          try { fs.unlinkSync(nodeSymlink); } catch { /* may not exist */ }
+          try { SafeFsExecutor.safeUnlinkSync(nodeSymlink, { operation: 'src/lifeline/ServerSupervisor.ts:365' }); } catch { /* may not exist */ }
           fs.symlinkSync(nodePath, nodeSymlink);
           healed.push('node symlink repaired');
           console.log(`[Supervisor] Preflight: node symlink → ${nodePath}`);
@@ -372,24 +382,26 @@ export class ServerSupervisor extends EventEmitter {
 
     // 3. Stuck git rebase — prevents git-sync from working, blocks updates
     try {
-      const gitStatus = spawnSync('git', ['status'], {
+      const statusText = SafeGitExecutor.readSync(['status'], {
         encoding: 'utf-8',
         timeout: 5000,
         cwd: this.projectDir,
+        operation: 'src/lifeline/ServerSupervisor.ts:378',
       });
-      const statusText = gitStatus.stdout || '';
       if (statusText.includes('rebase in progress') || statusText.includes('interactive rebase in progress')) {
         console.log('[Supervisor] Preflight: stuck git rebase detected — aborting');
-        const abortResult = spawnSync('git', ['rebase', '--abort'], {
-          encoding: 'utf-8',
-          timeout: 10_000,
-          cwd: this.projectDir,
-        });
-        if (abortResult.status === 0) {
+        try {
+          SafeGitExecutor.execSync(['rebase', '--abort'], {
+            encoding: 'utf-8',
+            timeout: 10_000,
+            cwd: this.projectDir,
+            operation: 'src/lifeline/ServerSupervisor.ts:387',
+          });
           healed.push('stuck git rebase aborted');
           console.log('[Supervisor] Preflight: git rebase aborted successfully');
-        } else {
-          console.error(`[Supervisor] Preflight: git rebase --abort failed: ${abortResult.stderr}`);
+        } catch (abortErr) {
+          const message = abortErr instanceof Error ? abortErr.message : String(abortErr);
+          console.error(`[Supervisor] Preflight: git rebase --abort failed: ${message}`);
         }
       }
     } catch (err) {
@@ -398,35 +410,71 @@ export class ServerSupervisor extends EventEmitter {
 
     // 4. Native module mismatch — better-sqlite3 compiled for wrong Node version.
     //    This is the #1 cause of server crash-loops after a Node upgrade.
+    //
+    //    IMPORTANT: Test with the node binary the SERVER will use (.instar/bin/node),
+    //    not process.execPath (the lifeline's node), since these may differ.
+    //
+    //    IMPORTANT: Scan ALL nested copies under shadow-install/node_modules.
+    //    A previous version checked only the top-level hoisted path
+    //    `shadow-install/node_modules/better-sqlite3/...`, but npm does not
+    //    always hoist; the actually-loaded copy can live at the nested path
+    //    `shadow-install/node_modules/instar/node_modules/better-sqlite3/...`.
+    //    This was the root cause of the Inspec 2026-04-29 silent crash-loop.
     if (this.stateDir) {
-      const sqliteNode = path.join(this.stateDir, 'shadow-install', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
-      if (fs.existsSync(sqliteNode)) {
+      const serverNode = path.join(this.stateDir, 'bin', 'node');
+      const checkNode = (fs.existsSync(serverNode)) ? serverNode : process.execPath;
+      const shadowNodeModules = path.join(this.stateDir, 'shadow-install', 'node_modules');
+      const sqliteCopies = findBetterSqlite3Copies(shadowNodeModules);
+      const force = this.consecutiveBindFailures >= 2;
+      if (force) {
+        console.log(`[Supervisor] Preflight: ${this.consecutiveBindFailures} consecutive bind failures — forcing aggressive better-sqlite3 rebuild`);
+      }
+      for (const copy of sqliteCopies) {
         try {
-          // Try loading the native module with the current Node — if it fails, rebuild
-          const result = spawnSync(process.execPath, ['-e', `require('${sqliteNode.replace(/'/g, "\\'")}')`], {
+          // Try loading the native module with the SERVER's Node — if it fails, rebuild.
+          // When we're escalating after consecutive bind failures, force the rebuild
+          // even if the require-load succeeds (the load may pass for one copy while
+          // a different cached copy is what actually got resolved at runtime).
+          const result = spawnSync(checkNode, ['-e', `require('${copy.binaryPath.replace(/'/g, "\\'")}')`], {
             encoding: 'utf-8',
             timeout: 10_000,
             cwd: this.projectDir,
           });
-          if (result.status !== 0 && result.stderr?.includes('NODE_MODULE_VERSION')) {
-            console.log('[Supervisor] Preflight: better-sqlite3 native module version mismatch — rebuilding');
-            const npmPath = this.findNpmPath();
-            if (npmPath) {
-              const rebuildResult = spawnSync(npmPath, ['rebuild', 'better-sqlite3', '--prefix', path.join(this.stateDir, 'shadow-install')], {
-                encoding: 'utf-8',
-                timeout: 60_000,
-                cwd: this.projectDir,
-              });
-              if (rebuildResult.status === 0) {
-                healed.push('better-sqlite3 rebuilt for current Node');
-                console.log('[Supervisor] Preflight: better-sqlite3 rebuilt successfully');
-              } else {
-                console.error(`[Supervisor] Preflight: better-sqlite3 rebuild failed: ${(rebuildResult.stderr || '').slice(-200)}`);
-              }
-            }
+          const needsRebuild = force || (result.status !== 0 && result.stderr?.includes('NODE_MODULE_VERSION'));
+          if (!needsRebuild) continue;
+          console.log(`[Supervisor] Preflight: better-sqlite3 ${force ? 'force-rebuild' : 'version mismatch'} at ${copy.packageDir} — rebuilding (server node: ${checkNode})`);
+          const npmPath = this.findNpmPath();
+          if (!npmPath) {
+            console.error('[Supervisor] Preflight: no npm binary found — cannot rebuild better-sqlite3');
+            continue;
+          }
+          const rebuildEnv: Record<string, string | undefined> = { ...process.env, npm_config_node_gyp: undefined };
+          if (checkNode !== process.execPath) {
+            rebuildEnv.npm_node_execpath = checkNode;
+          }
+          const rebuildArgs = ['rebuild', 'better-sqlite3', '--prefix', copy.prefixDir];
+          if (force) rebuildArgs.push('--force');
+          const rebuildResult = spawnSync(checkNode, [npmPath, ...rebuildArgs], {
+            encoding: 'utf-8',
+            timeout: 120_000,
+            cwd: this.projectDir,
+            env: rebuildEnv,
+          });
+          if (rebuildResult.status !== 0) {
+            console.error(`[Supervisor] Preflight: better-sqlite3 rebuild failed at ${copy.packageDir}: ${(rebuildResult.stderr || '').slice(-200)}`);
+            continue;
+          }
+          const verifyResult = spawnSync(checkNode, ['-e', `require('${copy.binaryPath.replace(/'/g, "\\'")}')`], {
+            encoding: 'utf-8', timeout: 10_000, cwd: this.projectDir,
+          });
+          if (verifyResult.status === 0) {
+            healed.push(`better-sqlite3 rebuilt at ${path.relative(this.stateDir, copy.packageDir)}`);
+            console.log(`[Supervisor] Preflight: better-sqlite3 rebuilt and verified at ${copy.packageDir}`);
+          } else {
+            console.error(`[Supervisor] Preflight: better-sqlite3 rebuild succeeded but module still fails to load at ${copy.packageDir}: ${(verifyResult.stderr || '').slice(-200)}`);
           }
         } catch (err) {
-          console.error(`[Supervisor] Preflight: native module check failed: ${err}`);
+          console.error(`[Supervisor] Preflight: native module check failed at ${copy.packageDir}: ${err}`);
         }
       }
     }
@@ -437,12 +485,41 @@ export class ServerSupervisor extends EventEmitter {
       if (fs.existsSync(lockFile)) {
         const lockAge = Date.now() - fs.statSync(lockFile).mtimeMs;
         if (lockAge > 10 * 60_000) { // 10 minutes
-          fs.unlinkSync(lockFile);
+          SafeFsExecutor.safeUnlinkSync(lockFile, { operation: 'src/lifeline/ServerSupervisor.ts:463' });
           healed.push('stale lifeline lock removed');
           console.log(`[Supervisor] Preflight: removed stale lifeline lock (${Math.round(lockAge / 60_000)}m old)`);
         }
       }
     } catch { /* ignore */ }
+
+    // 6. Corrupted .claude/settings.json — unresolved merge conflicts crash every
+    // Claude Code session silently. The server stays healthy but no session responds.
+    const settingsPath = path.join(this.projectDir, '.claude', 'settings.json');
+    try {
+      if (fs.existsSync(settingsPath)) {
+        const raw = fs.readFileSync(settingsPath, 'utf-8');
+        if (raw.includes('<<<<<<<') || raw.includes('>>>>>>>')) {
+          console.warn('[Supervisor] Preflight: .claude/settings.json has merge conflicts — repairing');
+          const repaired = raw
+            .replace(/^<<<<<<< .*\n/gm, '')
+            .replace(/^=======\n/gm, '')
+            .replace(/^>>>>>>> .*\n/gm, '');
+          try {
+            JSON.parse(repaired);
+            fs.copyFileSync(settingsPath, `${settingsPath}.merge-conflict-backup`);
+            fs.writeFileSync(settingsPath, repaired);
+            healed.push('settings.json merge conflicts resolved');
+            console.log('[Supervisor] Preflight: settings.json repaired');
+          } catch {
+            console.error('[Supervisor] Preflight: settings.json auto-repair failed — manual fix needed');
+          }
+        } else {
+          JSON.parse(raw); // Validate JSON
+        }
+      }
+    } catch (err) {
+      console.error(`[Supervisor] Preflight: .claude/settings.json is invalid JSON: ${err}`);
+    }
 
     if (healed.length > 0) {
       const summary = healed.join(', ');
@@ -525,8 +602,16 @@ export class ServerSupervisor extends EventEmitter {
       const crashLogPath = path.join(crashLogDir, 'server-stderr.log');
 
       // --no-telegram: lifeline owns the Telegram connection, server should not poll
+      // Use the agent's node symlink (.instar/bin/node) instead of bare `node` so the
+      // server runs the same Node version the native modules were compiled against.
+      // Bare `node` resolves to whatever is on PATH in the tmux session, which may be
+      // a different major version (e.g. v25 via Homebrew when shadow-install was built
+      // with v22), causing better-sqlite3 ABI mismatches and event loop deadlocks.
+      const nodeSymlink = this.stateDir ? path.join(this.stateDir, 'bin', 'node') : null;
+      const nodeExe = (nodeSymlink && fs.existsSync(nodeSymlink)) ? nodeSymlink : 'node';
+      const quotedNode = nodeExe.replace(/'/g, "'\\''");
       const quotedCli = cliPath.replace(/'/g, "'\\''");
-      const nodeCmd = `'node' '${quotedCli}' 'server' 'start' '--foreground' '--no-telegram' 2> >(tee '${crashLogPath}' >&2)`;
+      const nodeCmd = `'${quotedNode}' '${quotedCli}' 'server' 'start' '--foreground' '--no-telegram' 2> >(tee '${crashLogPath}' >&2)`;
 
       execFileSync(this.tmuxPath, [
         'new-session', '-d',
@@ -649,6 +734,7 @@ export class ServerSupervisor extends EventEmitter {
           this.lastHealthy = Date.now();
           this.restartAttempts = 0;
           this.consecutiveFailures = 0;
+          this.consecutiveBindFailures = 0;
 
           // If circuit breaker was tripped and we recovered, reset it
           if (this.circuitBroken) {
@@ -658,12 +744,26 @@ export class ServerSupervisor extends EventEmitter {
         } else {
           this.consecutiveFailures++;
           if (this.consecutiveFailures >= this.unhealthyThreshold) {
-            // During wake transitions, don't kill a server that's still alive — it's
-            // likely just slow to respond while the system recovers (disk I/O, network
-            // reconfig, SQLite WAL replay). Only act if the server process is actually dead.
-            if (Date.now() < this.wakeTransitionUntil && this.isServerSessionAlive()) {
-              console.log(`[Supervisor] Health check failed during wake transition but server session is alive — waiting (${Math.round((this.wakeTransitionUntil - Date.now()) / 1000)}s remaining)`);
-              this.consecutiveFailures = 0; // Reset so we don't immediately re-trigger
+            const processAlive = this.isServerSessionAlive();
+            if (processAlive) {
+              // Server process exists but isn't responding to health checks.
+              // Under high CPU load (or during wake transitions), this is normal —
+              // the event loop is stalled, not the process dead. Use a much higher
+              // threshold to avoid killing a server that would recover on its own.
+              const effectiveThreshold = Date.now() < this.wakeTransitionUntil
+                ? this.unhealthyThreshold  // During wake transition: already lenient via counter reset
+                : this.processAliveThreshold;
+              if (this.consecutiveFailures < effectiveThreshold) {
+                if (this.consecutiveFailures === this.unhealthyThreshold) {
+                  console.log(`[Supervisor] Health check failed but server process is alive — waiting for ${effectiveThreshold} consecutive failures before restart (${this.consecutiveFailures}/${effectiveThreshold})`);
+                }
+              } else {
+                console.log(`[Supervisor] Server process alive but unresponsive for ${this.consecutiveFailures} checks (~${this.consecutiveFailures * 10}s) — restarting`);
+                this.handleUnhealthy();
+              }
+              if (Date.now() < this.wakeTransitionUntil) {
+                this.consecutiveFailures = 0; // Reset during wake transition as before
+              }
             } else {
               this.handleUnhealthy();
             }
@@ -672,9 +772,22 @@ export class ServerSupervisor extends EventEmitter {
       } catch {
         this.consecutiveFailures++;
         if (this.consecutiveFailures >= this.unhealthyThreshold) {
-          if (Date.now() < this.wakeTransitionUntil && this.isServerSessionAlive()) {
-            console.log(`[Supervisor] Health check failed during wake transition but server session is alive — waiting (${Math.round((this.wakeTransitionUntil - Date.now()) / 1000)}s remaining)`);
-            this.consecutiveFailures = 0;
+          const processAlive = this.isServerSessionAlive();
+          if (processAlive) {
+            const effectiveThreshold = Date.now() < this.wakeTransitionUntil
+              ? this.unhealthyThreshold
+              : this.processAliveThreshold;
+            if (this.consecutiveFailures < effectiveThreshold) {
+              if (this.consecutiveFailures === this.unhealthyThreshold) {
+                console.log(`[Supervisor] Health check failed but server process is alive — waiting for ${effectiveThreshold} consecutive failures before restart (${this.consecutiveFailures}/${effectiveThreshold})`);
+              }
+            } else {
+              console.log(`[Supervisor] Server process alive but unresponsive for ${this.consecutiveFailures} checks (~${this.consecutiveFailures * 10}s) — restarting`);
+              this.handleUnhealthy();
+            }
+            if (Date.now() < this.wakeTransitionUntil) {
+              this.consecutiveFailures = 0;
+            }
           } else {
             this.handleUnhealthy();
           }
@@ -702,7 +815,10 @@ export class ServerSupervisor extends EventEmitter {
   private async checkHealth(): Promise<boolean> {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
+      // Use 8s timeout — 5s is too aggressive under high CPU load where even localhost
+      // HTTP can be delayed by event loop stalls. The health check interval is 10s so
+      // 8s still leaves a gap between checks.
+      const timer = setTimeout(() => controller.abort(), 8000);
       try {
         const response = await fetch(`http://127.0.0.1:${this.port}/health`, {
           signal: controller.signal,
@@ -733,7 +849,7 @@ export class ServerSupervisor extends EventEmitter {
 
       // Check TTL
       if (data.expiresAt && new Date(data.expiresAt).getTime() < Date.now()) {
-        try { fs.unlinkSync(flagPath); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeUnlinkSync(flagPath, { operation: 'src/lifeline/ServerSupervisor.ts:827' }); } catch { /* ignore */ }
         console.log('[Supervisor] Expired restart request — ignoring');
         return;
       }
@@ -755,9 +871,9 @@ export class ServerSupervisor extends EventEmitter {
 
       if (restartCount >= 2) {
         console.log(`[Supervisor] Restart loop detected — already restarted ${restartCount}x for v${data.targetVersion}. Skipping.`);
-        try { fs.unlinkSync(flagPath); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeUnlinkSync(flagPath, { operation: 'src/lifeline/ServerSupervisor.ts:850' }); } catch { /* ignore */ }
         // Clean up the count file so it doesn't block future real updates
-        try { fs.unlinkSync(restartCountFile); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeUnlinkSync(restartCountFile, { operation: 'src/lifeline/ServerSupervisor.ts:853' }); } catch { /* ignore */ }
         return;
       }
 
@@ -780,7 +896,7 @@ export class ServerSupervisor extends EventEmitter {
       }
 
       // Clear the flag BEFORE restarting to prevent re-triggering
-      try { fs.unlinkSync(flagPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(flagPath, { operation: 'src/lifeline/ServerSupervisor.ts:877' }); } catch { /* ignore */ }
 
       // Also clean up legacy flag if present
       this.clearLegacyRestartFlag();
@@ -792,7 +908,7 @@ export class ServerSupervisor extends EventEmitter {
       this.performGracefulRestart(`update to v${data.targetVersion}`);
     } catch {
       // Malformed flag — clean up
-      try { fs.unlinkSync(flagPath); } catch { /* ignore */ }
+      try { SafeFsExecutor.safeUnlinkSync(flagPath, { operation: 'src/lifeline/ServerSupervisor.ts:890' }); } catch { /* ignore */ }
     }
   }
 
@@ -810,7 +926,7 @@ export class ServerSupervisor extends EventEmitter {
       if (!fs.existsSync(requestPath)) return;
 
       const raw = fs.readFileSync(requestPath, 'utf-8');
-      fs.unlinkSync(requestPath); // consume the request immediately
+      SafeFsExecutor.safeUnlinkSync(requestPath, { operation: 'src/lifeline/ServerSupervisor.ts:909' }); // consume the request immediately
 
       const request = JSON.parse(raw);
 
@@ -969,6 +1085,18 @@ export class ServerSupervisor extends EventEmitter {
     }
     this.consecutiveFailures = 0; // Reset after triggering action
 
+    // Bind-failure tracking — if the server never reached a healthy /health
+    // tick during this spawn cycle (lastHealthy is older than spawnedAt),
+    // the spawn produced a process that crashed before binding. After 2+ in
+    // a row, preflightSelfHeal will force an aggressive better-sqlite3
+    // rebuild on the next attempt.
+    if (this.spawnedAt > 0 && this.lastHealthy < this.spawnedAt) {
+      this.consecutiveBindFailures++;
+      if (this.consecutiveBindFailures >= this.bindFailureEscalationThreshold) {
+        console.log(`[Supervisor] Bind-failure escalation armed: ${this.consecutiveBindFailures} consecutive spawns failed before binding. Next preflight will force-rebuild native modules.`);
+      }
+    }
+
     // After max retries exhausted, wait for cooldown before trying again.
     // IMPORTANT: Check cooldown BEFORE incrementing totalFailures. Otherwise, passive health check
     // failures during cooldown accumulate and trip the circuit breaker, escalating a recoverable
@@ -1117,7 +1245,7 @@ export class ServerSupervisor extends EventEmitter {
       if (!fs.existsSync(flagPath)) return false;
       const data = JSON.parse(fs.readFileSync(flagPath, 'utf-8'));
       if (data.expiresAt && new Date(data.expiresAt).getTime() < Date.now()) {
-        try { fs.unlinkSync(flagPath); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeUnlinkSync(flagPath, { operation: 'src/lifeline/ServerSupervisor.ts:1217' }); } catch { /* ignore */ }
         return false;
       }
       return true;
@@ -1131,7 +1259,7 @@ export class ServerSupervisor extends EventEmitter {
     const flagPath = path.join(this.stateDir, 'state', 'update-restart.json');
     try {
       if (fs.existsSync(flagPath)) {
-        fs.unlinkSync(flagPath);
+        SafeFsExecutor.safeUnlinkSync(flagPath, { operation: 'src/lifeline/ServerSupervisor.ts:1232' });
         console.log('[Supervisor] Cleared legacy update-restart flag');
       }
     } catch { /* ignore */ }
@@ -1176,7 +1304,7 @@ export class ServerSupervisor extends EventEmitter {
       const markerTtlMs = 10 * 60_000; // 10 minutes
       if (markerAge > markerTtlMs) {
         console.warn(`[Supervisor] Planned-exit marker expired (${Math.round(markerAge / 60_000)}m old) — clearing and falling back to normal alerting`);
-        try { fs.unlinkSync(markerPath); } catch { /* ignore */ }
+        try { SafeFsExecutor.safeUnlinkSync(markerPath, { operation: 'src/lifeline/ServerSupervisor.ts:1278' }); } catch { /* ignore */ }
         return false;
       }
 
@@ -1198,8 +1326,89 @@ export class ServerSupervisor extends EventEmitter {
     const markerPath = path.join(this.stateDir, 'state', 'planned-exit-marker.json');
     try {
       if (fs.existsSync(markerPath)) {
-        fs.unlinkSync(markerPath);
+        SafeFsExecutor.safeUnlinkSync(markerPath, { operation: 'src/lifeline/ServerSupervisor.ts:1301' });
       }
     } catch { /* ignore */ }
   }
+}
+
+/**
+ * Information about a discovered better-sqlite3 install copy.
+ */
+export interface BetterSqlite3Copy {
+  /** Absolute path to the package directory (contains package.json). */
+  packageDir: string;
+  /** Absolute path to the compiled .node binary. */
+  binaryPath: string;
+  /** Absolute path to use as `--prefix` when invoking npm rebuild. */
+  prefixDir: string;
+}
+
+/**
+ * Scan a node_modules tree for every copy of better-sqlite3 that has a
+ * compiled binary. Bounded depth (5) and bounded count (5) to guarantee
+ * termination on pathological trees.
+ *
+ * Why this exists: npm does not always hoist `better-sqlite3` to the top of
+ * `shadow-install/node_modules/`. A common shape is the package nested under
+ * `instar/node_modules/better-sqlite3/...`. The previous preflight only
+ * checked the hoisted path and silently missed the nested copy that was
+ * actually being loaded — root cause of the Inspec 2026-04-29 silent
+ * crash-loop.
+ *
+ * Exported for testing.
+ */
+export function findBetterSqlite3Copies(nodeModulesRoot: string): BetterSqlite3Copy[] {
+  const found: BetterSqlite3Copy[] = [];
+  const MAX_DEPTH = 5;
+  const MAX_COPIES = 5;
+
+  if (!fs.existsSync(nodeModulesRoot)) return found;
+
+  let capHit = false;
+  const visit = (dir: string, depth: number): void => {
+    if (depth > MAX_DEPTH) return;
+    if (found.length >= MAX_COPIES) {
+      capHit = true;
+      return;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (found.length >= MAX_COPIES) return;
+      if (!entry.isDirectory()) continue;
+      const childPath = path.join(dir, entry.name);
+      if (entry.name === 'better-sqlite3') {
+        const binaryPath = path.join(childPath, 'build', 'Release', 'better_sqlite3.node');
+        if (fs.existsSync(binaryPath)) {
+          // The prefix for `npm rebuild` is the parent of the package's
+          // node_modules dir — i.e., the package whose deps contain the copy.
+          // For a top-level copy (`shadow-install/node_modules/better-sqlite3`),
+          // prefix = shadow-install. For a nested copy
+          // (`shadow-install/node_modules/instar/node_modules/better-sqlite3`),
+          // prefix = shadow-install/node_modules/instar.
+          const prefixDir = path.dirname(path.dirname(childPath));
+          found.push({ packageDir: childPath, binaryPath, prefixDir });
+        }
+        // Don't descend into better-sqlite3's own node_modules; deps of
+        // better-sqlite3 itself are not better-sqlite3.
+        continue;
+      }
+      // Descend into nested node_modules trees only.
+      const nestedNodeModules = path.join(childPath, 'node_modules');
+      if (fs.existsSync(nestedNodeModules)) {
+        visit(nestedNodeModules, depth + 1);
+      }
+    }
+  };
+
+  visit(nodeModulesRoot, 0);
+  if (capHit) {
+    console.warn(`[Supervisor] findBetterSqlite3Copies: hit MAX_COPIES=${MAX_COPIES} cap under ${nodeModulesRoot} — additional copies will not be checked. If this is a real install layout (not pathological), raise the cap.`);
+  }
+  return found;
 }

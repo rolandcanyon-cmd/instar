@@ -8,6 +8,7 @@ import { MessagingEventBus } from '../../src/messaging/shared/MessagingEventBus.
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 // ── Test helpers ──────────────────────────────────────────
 
@@ -47,7 +48,7 @@ describe('MessageBridge', () => {
 
   afterEach(() => {
     if (tmpDir && fs.existsSync(tmpDir)) {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+      SafeFsExecutor.safeRmSync(tmpDir, { recursive: true, force: true, operation: 'tests/unit/MessageBridge.test.ts:51' });
     }
   });
 

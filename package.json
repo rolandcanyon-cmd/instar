@@ -1,6 +1,6 @@
 {
   "name": "instar",
-  "version": "0.27.2",
+  "version": "0.28.78",
   "description": "Persistent autonomy infrastructure for AI agents",
   "type": "module",
   "main": "dist/index.js",
@@ -20,6 +20,7 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:push": "vitest run --config vitest.push.config.ts",
+    "test:smoke": "vitest run --config vitest.push.config.ts --changed origin/main",
     "test:flaky": "vitest run tests/unit/relationship-routes.test.ts tests/integration/messaging-routes.test.ts tests/integration/whatsapp-routes.test.ts tests/unit/server.test.ts tests/e2e/semantic-memory-lifecycle.test.ts tests/e2e/system-reviewer-e2e.test.ts tests/e2e/working-memory-lifecycle.test.ts tests/e2e/messaging-multi-agent.test.ts",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
@@ -27,7 +28,9 @@
     "test:contract": "node scripts/run-contract-tests.js",
     "test:contract:raw": "vitest run --config vitest.contract.config.ts",
     "test:all": "vitest run && vitest run --config vitest.integration.config.ts && vitest run --config vitest.e2e.config.ts",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && node scripts/lint-no-direct-destructive.js",
+    "lint:destructive": "node scripts/lint-no-direct-destructive.js",
+    "lint:destructive:staged": "node scripts/lint-no-direct-destructive.js --staged",
     "clean": "rm -rf dist",
     "check:upgrade-guide": "node scripts/check-upgrade-guide.js",
     "check:pre-push-gate": "node scripts/pre-push-gate.js",
@@ -73,8 +76,8 @@
     ".claude/skills/setup-wizard",
     ".claude/skills/secret-setup",
     ".claude/skills/autonomous",
-    ".claude/hooks",
-    ".claude/settings.json"
+    ".claude/skills/build",
+    ".claude/hooks"
   ],
   "license": "MIT",
   "engines": {

@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -248,7 +249,7 @@ export class PasteManager {
     const file = this.findFileByPasteId(pasteId);
     if (!file) return false;
     try {
-      fs.unlinkSync(file);
+      SafeFsExecutor.safeUnlinkSync(file, { operation: 'src/paste/PasteManager.ts:252' });
       this.removePendingEntry(pasteId);
       this.logAudit('paste_deleted', { pasteId });
       return true;
@@ -350,12 +351,12 @@ export class PasteManager {
         const meta = this.readPasteMeta(filePath);
         if (!meta) {
           // Corrupt file — remove
-          try { fs.unlinkSync(filePath); cleaned++; } catch {}
+          try { SafeFsExecutor.safeUnlinkSync(filePath, { operation: 'src/paste/PasteManager.ts:355' }); cleaned++; } catch {}
           continue;
         }
 
         if (new Date(meta.expiresAt) < new Date()) {
-          try { fs.unlinkSync(filePath); cleaned++; } catch {}
+          try { SafeFsExecutor.safeUnlinkSync(filePath, { operation: 'src/paste/PasteManager.ts:361' }); cleaned++; } catch {}
         }
       }
 
@@ -366,7 +367,7 @@ export class PasteManager {
         try {
           const stat = fs.statSync(tmpPath);
           if (Date.now() - stat.mtimeMs > 60 * 60 * 1000) {
-            fs.unlinkSync(tmpPath);
+            SafeFsExecutor.safeUnlinkSync(tmpPath, { operation: 'src/paste/PasteManager.ts:373' });
             cleaned++;
           }
         } catch {}
