@@ -250,3 +250,135 @@ Both should return healthy responses. The iMessage status should show `"state":"
 Send a test iMessage to the agent's authorized number. You should see:
 1. An ack message back within ~2 seconds (if `immediateAck` is configured)
 2. A real reply from a Claude session within 30–90 seconds
+
+## Happy Path: What Success Looks Like
+
+When everything is working, this is what you should see on each reboot:
+
+**1. Check the LaunchAgent is registered and running:**
+```bash
+launchctl list | grep instar
+# Expected output (one line per service):
+# PID    LastExit  Label
+# 12345  0         ai.instar.Roland
+# 11234  0         ai.instar.AttachmentsWatcher
+```
+
+A non-zero PID means the process is running. `LastExit` of `0` means the previous restart was clean. A missing PID means the service crashed and `KeepAlive` hasn't restarted it yet (or it's stuck in crash-loop backoff).
+
+**2. Check server health:**
+```bash
+curl -s http://localhost:4040/health
+# Expected: {"status":"ok","uptime":...}
+```
+
+**3. Check iMessage is polling:**
+```bash
+AUTH=$(python3 -c "import json; print(json.load(open('~/.instar/agents/AGENT/.instar/config.json'))['authToken'])")
+curl -s -H "Authorization: Bearer $AUTH" http://localhost:4040/imessage/status
+# Expected: {"state":"connected","dbPath":"...imessage/chat.db",...}
+```
+
+**4. Send a test message** from an authorized number. Within ~2 seconds you should get a `...` ack, and within 30–90 seconds a full Claude reply.
+
+That's the happy path. If any step fails, use the troubleshooting section below.
+
+---
+
+## Troubleshooting Auto-Start
+
+### The LaunchAgent is installed but Instar didn't start after reboot
+
+**Check:** `launchctl list | grep instar`
+
+If the line for your agent shows a `-` instead of a PID, it's not running. Check the error log:
+```bash
+tail -50 ~/.instar/agents/AGENT/.instar/logs/server-launchd.err
+```
+
+**Common causes:**
+
+**Port already in use** — If you see `Error: Port 4040 is already in use`, a previous instance is still running (or another process owns the port). The LaunchAgent will crash-loop with exponential backoff. Kill the orphan and it will recover:
+```bash
+lsof -ti tcp:4040 | xargs kill -9
+# launchd will restart your agent within ~10 seconds
+```
+
+**LaunchAgent not loaded** — After creating or editing a `.plist`, it must be explicitly loaded:
+```bash
+launchctl load ~/Library/LaunchAgents/ai.instar.AGENT.plist
+# Or for modern macOS:
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.instar.AGENT.plist
+```
+Verify it was picked up: `launchctl list | grep instar`
+
+**Node binary path changed** — If Homebrew was updated, the node symlink in `.instar/bin/node` may be stale. Repoint it:
+```bash
+ln -sf $(which node) ~/.instar/agents/AGENT/.instar/bin/node
+# Then reload the LaunchAgent:
+launchctl kickstart -k gui/$(id -u)/ai.instar.AGENT
+```
+
+---
+
+### iMessage messages aren't being picked up
+
+**Step 1 — Check the hardlinks are in place:**
+```bash
+ls -la ~/.instar/agents/AGENT/.instar/imessage/
+# Expected: chat.db, chat.db-wal, chat.db-shm (all showing inode links > 1)
+```
+
+If the directory is empty or the files are missing, the hardlinks need to be recreated. Start instar once from a terminal that has Full Disk Access:
+```bash
+instar server start --dir ~/.instar/agents/AGENT
+# Watch for: "[iMessage] Hardlinks created at .instar/imessage/"
+# Then stop (Ctrl-C) and let launchd take over
+```
+
+**Step 2 — Check Messages.app is actually writing to chat.db:**
+```bash
+stat ~/.instar/agents/AGENT/.instar/imessage/chat.db
+# The modification time should be recent (within the last few minutes if messages are flowing)
+```
+
+If `mtime` is frozen at an old timestamp, Messages.app has lost sync with iCloud. **Do NOT delete chat.db** — this breaks iCloud sync and can cause data loss. Instead, zero the file in-place to force a re-sync while preserving the inode:
+```bash
+# Zero the three chat.db files in-place (preserves inodes, forces iCloud re-sync)
+cat /dev/null > ~/Library/Messages/chat.db
+cat /dev/null > ~/Library/Messages/chat.db-wal
+cat /dev/null > ~/Library/Messages/chat.db-shm
+# Then reboot — Messages.app will re-sync from iCloud on startup
+```
+
+> **Why zeroing is safe but deleting is not:** Hardlinks track inodes. Deleting `chat.db` creates a new inode when Messages.app recreates it, which means all your hardlinks go stale silently. Zeroing the file keeps the same inode — the hardlinks remain valid and your sync history stays intact.
+
+**Step 3 — Verify polling is running:**
+```bash
+tail -f ~/.instar/agents/AGENT/.instar/logs/server-launchd.log | grep -i imessage
+# You should see periodic "[iMessage] polled N new messages" lines
+```
+
+---
+
+### Welcome message not sent on startup
+
+On first start after install (or after a clean reset), the agent should send a welcome message to configured contacts. If you got a `...` ack but no welcome message:
+
+1. The session that sends the welcome may have failed — check the session logs:
+   ```bash
+   ls ~/.instar/agents/AGENT/.instar/logs/sessions/
+   ```
+2. If no session started at all, check that `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN`) is configured in `.instar/config.json` under `sessions.anthropicApiKey`.
+3. A `...` sent immediately on server start (before any message from you) indicates the server-side ack script ran at startup — this is normal and not a welcome message.
+
+---
+
+### Crash-loop detection
+
+If the server exits repeatedly, `instar-boot.js` enters crash-loop backoff (default: 4 crashes in 120s → 40s backoff). You'll see in the error log:
+```
+[instar-boot] Crash loop detected (4 crashes in 120s). Backing off 40s...
+```
+
+This is designed to prevent runaway restarts from burning API quota. To diagnose: read the error above the crash-loop message — it will tell you the real cause. Fix it, then the backoff will clear on the next restart cycle.

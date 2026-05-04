@@ -213,7 +213,29 @@ iMessage support lets your agent send and receive iMessages on macOS. Messages a
 
 > **Photo attachments:** If you want your agent to process images and files sent via iMessage, the `instar-attachments-sync` binary must also be running with Full Disk Access granted to it. It mirrors attachments from the Messages sandbox to a readable location. See [docs/LAUNCHDAEMON-SETUP.md#3-imessage-photo-attachments-optional](docs/LAUNCHDAEMON-SETUP.md#3-imessage-photo-attachments-optional) for setup.
 
-For running as a LaunchDaemon (always-on, survives reboots), see [docs/LAUNCHDAEMON-SETUP.md](docs/LAUNCHDAEMON-SETUP.md).
+For running as a LaunchDaemon (always-on, survives reboots) — including the happy path verification checklist and troubleshooting for common failure modes (port conflicts, frozen chat.db, welcome message not sent) — see [docs/LAUNCHDAEMON-SETUP.md](docs/LAUNCHDAEMON-SETUP.md).
+
+### Quick health check
+
+After setup, confirm everything is running:
+
+```bash
+# 1. LaunchAgent registered and process alive
+launchctl list | grep instar
+# Expected: a line with a non-zero PID for ai.instar.AGENT
+
+# 2. Server responding
+curl -s http://localhost:4040/health
+# Expected: {"status":"ok",...}
+
+# 3. iMessage connected
+AUTH=$(python3 -c "import json; print(json.load(open('.instar/config.json'))['authToken'])")
+curl -s -H "Authorization: Bearer $AUTH" http://localhost:4040/imessage/status | python3 -m json.tool | grep state
+# Expected: "state": "connected"
+```
+
+If any step fails, see [Troubleshooting Auto-Start](docs/LAUNCHDAEMON-SETUP.md#troubleshooting-auto-start) in the full setup guide.
+
 ### Configuration
 
 Add to your `.instar/config.json`:
