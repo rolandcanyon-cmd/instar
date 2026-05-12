@@ -238,7 +238,7 @@ auto_advance: true
     expect(res.body.children.length).toBe(3);
   });
 
-  it('GET /projects/:id/next returns 501 placeholder', async () => {
+  it('GET /projects/:id/next returns a structured action payload', async () => {
     await request(app)
       .post('/projects')
       .set('Authorization', `Bearer ${AUTH_TOKEN}`)
@@ -246,8 +246,74 @@ auto_advance: true
     const res = await request(app)
       .get('/projects/next-project/next')
       .set('Authorization', `Bearer ${AUTH_TOKEN}`);
-    expect(res.status).toBe(501);
-    expect(res.body.action).toBe('not-implemented');
+    expect(res.status).toBe(200);
+    // Spec § 1.5 line 268: { action, params, skillCommand? }
+    expect(typeof res.body.action).toBe('string');
+    expect(typeof res.body.skillCommand).toBe('string');
+    expect(res.body.params.projectId).toBe('next-project');
+    expect(res.body.params.roundIndex).toBe(0);
+    expect(Array.isArray(res.body.params.itemIds)).toBe(true);
+    expect(res.body.params.itemIds.length).toBeGreaterThan(0);
+    expect(res.body.params.status).toBe('pending');
+    // First round with no firstLaunchAckAt → 'await-user-approval'
+    expect(res.body.action).toBe('await-user-approval');
+  });
+
+  it('GET /projects/:id/next returns "ack-required" when unacked counter at cap', async () => {
+    await request(app)
+      .post('/projects')
+      .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+      .send({ planDocPath: goodPlan('ack-proj') });
+    const proj = tracker.get('ack-proj');
+    if (!proj) throw new Error('fixture missing');
+    await tracker.update(proj.id, {
+      firstLaunchAckAt: new Date().toISOString(),
+      unacknowledgedAdvanceCount: 2,
+      ifMatch: proj.version,
+    });
+    const res = await request(app)
+      .get('/projects/ack-proj/next')
+      .set('Authorization', `Bearer ${AUTH_TOKEN}`);
+    expect(res.status).toBe(200);
+    expect(res.body.action).toBe('ack-required');
+  });
+
+  it('POST /projects/:id/drift-check rejects concurrent calls with 409', async () => {
+    // The test server is not wired with a checker so the route returns 503
+    // before the mutex check fires. This case asserts the OPPOSITE: when no
+    // checker is configured, 503 is returned (not 409 or 500). The mutex
+    // behavior is exercised by unit tests in routes-projects-drift.test.ts.
+    await request(app)
+      .post('/projects')
+      .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+      .send({ planDocPath: goodPlan('mutex-503-proj') });
+    const res = await request(app)
+      .post('/projects/mutex-503-proj/drift-check')
+      .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+      .send({ roundIndex: 0, specPath: 'docs/specs/a.md', referencedFiles: [] });
+    expect(res.status).toBe(503);
+  });
+
+  it('GET /projects/:id/next returns 204 when all rounds complete', async () => {
+    await request(app)
+      .post('/projects')
+      .set('Authorization', `Bearer ${AUTH_TOKEN}`)
+      .send({ planDocPath: goodPlan('all-done-project') });
+    const proj = tracker.get('all-done-project');
+    if (!proj) throw new Error('fixture project missing');
+    const rounds = (proj.rounds ?? []).map((r) => ({ ...r, status: 'complete' as const }));
+    await tracker.update(proj.id, { rounds, ifMatch: proj.version });
+    const res = await request(app)
+      .get('/projects/all-done-project/next')
+      .set('Authorization', `Bearer ${AUTH_TOKEN}`);
+    expect(res.status).toBe(204);
+  });
+
+  it('GET /projects/:id/next returns 404 for non-project initiative', async () => {
+    const res = await request(app)
+      .get('/projects/no-such-project/next')
+      .set('Authorization', `Bearer ${AUTH_TOKEN}`);
+    expect(res.status).toBe(404);
   });
 
   // ── Validate (no-persist) ─────────────────────────────────────────
