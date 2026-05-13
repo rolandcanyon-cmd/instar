@@ -714,7 +714,7 @@ function loadAgentMdBody(
   try {
     parsed = yaml.load(frontmatterText, {
       schema: yaml.FAILSAFE_SCHEMA,
-      listener: (_kind, state) => {
+      listener: (_kind: yaml.EventType, state: yaml.State) => {
         // state.anchor is set per-event when the parser encounters an
         // anchor or alias on the parsed-tree node. Legitimate `&` or `*`
         // characters inside quoted string values do NOT set this field.
