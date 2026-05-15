@@ -197,9 +197,11 @@ Scope-coherence review against the locked Rule 3 spec surfaced three pieces of d
 
 ---
 
-### 2026-05-15 — Phase 4: OpenAI Codex adapter
+### 2026-05-15 — Phase 4: OpenAI Codex adapter — CODE COMPLETE, REAL-API VERIFICATION PENDING
 
-First non-Anthropic adapter landed at `src/providers/adapters/openai-codex/`. Confirms the substrate abstracts cleanly across providers from different vendors — the Phase 4 acceptance test passing is the definitive evidence that Phase 2's interfaces aren't accidentally Anthropic-shaped.
+**Status correction (2026-05-15, same day):** I initially recorded this as "Phase 4 complete" but Justin caught that the acceptance evidence was structural-only — TypeScript compile clean, 7/7 structural parity scenarios pass, 11 unit tests pass — with zero successful real-API calls against Codex. Per the new [phase-acceptance discipline](#2026-05-15--phase-acceptance-gate-machine-checkable-verification-manifest) (see entry below), a phase is not complete until every real-API gate in its acceptance manifest has been observed passing. Phase 4 is in `CODE COMPLETE` state — the substrate proves it CAN abstract Codex on paper, but the empirical proof that it DOES abstract Codex correctly awaits a real-API smoke pass.
+
+First non-Anthropic adapter landed at `src/providers/adapters/openai-codex/`. Once the acceptance gate clears, this will be the definitive evidence that Phase 2's interfaces aren't accidentally Anthropic-shaped.
 
 - **40 files, ~2,200 lines.** Mirrors the anthropic-headless adapter's directory layout (transport/capability/observability/control/integration/canary). Compiles clean under the existing `tsconfig.json` without any substrate code changes — the Phase 4 acceptance test is that a new provider plugs in by writing only adapter code, and that test passes.
 - **30 of 36 universal primitives implemented.** Transport (3: oneShotCompletion via `codex exec --output-last-message`, structuredOneShot via `--output-schema` with caller-side validate, agenticSessionHeadless via `codex exec --json` in tmux). Capability (6: toolAccess/Allowlist, fileSystemAccess with all 3 sandbox tiers native, pathAllowlist with deny-rule support, bashExecution with sandboxModes=true, webAccess). Observability (9: liveOutputStream, conversationLogReader+Tailer reading rollout JSONL from $CODEX_HOME/sessions/YYYY/MM/DD/, hookEventReceiver for 5 Codex-supported event kinds, subagentLifecycleObserver synthesized from app-server notifications, sessionId binding UUIDv7 threads, usageMeterProvider with local accounting since Codex has no public usage endpoint, processLifecycle, interactivePromptObserver with source='structured'). Control (10). Integration (4).

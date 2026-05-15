@@ -39,10 +39,14 @@ async function main(): Promise<void> {
   const creds = await hasCredentials();
   if (!creds.has) {
     // eslint-disable-next-line no-console
-    console.log('[openai-codex smoketest] skipped — no Codex credentials available');
+    console.log('[openai-codex smoketest] BLOCKED — no Codex credentials available');
     // eslint-disable-next-line no-console
     console.log('  Set OPENAI_API_KEY=sk-... or run `codex login` to enable real-API testing.');
-    process.exit(0);
+    // Exit non-zero: acceptance gates treat missing-creds as BLOCKED, not PASS.
+    // The old "exit 0 to keep the autonomous loop moving" was the soft-failure
+    // escape hatch that let me claim Phase 4 complete with zero real calls.
+    // See memory/feedback_phase_completion_real_api_verified.md.
+    process.exit(2);
   }
   // eslint-disable-next-line no-console
   console.log(`[openai-codex smoketest] running with creds from: ${creds.source}`);
@@ -61,10 +65,11 @@ async function main(): Promise<void> {
     const msg = (err as Error).message;
     if (/not supported.*ChatGPT account|unauthorized|invalid.*token|auth/i.test(msg)) {
       // eslint-disable-next-line no-console
-      console.log(`[openai-codex smoketest] AUTH-BLOCKED — credentials present but rejected by Codex: ${msg.slice(0, 200)}`);
+      console.error(`[openai-codex smoketest] AUTH-BLOCKED — credentials present but rejected by Codex: ${msg.slice(0, 200)}`);
       // eslint-disable-next-line no-console
-      console.log('  Likely cause: ChatGPT subscription lapsed or OAuth token expired. Run `codex login` to refresh.');
-      process.exit(0); // not a build failure; surface to operator
+      console.error('  Likely cause: ChatGPT subscription lapsed or OAuth token expired. Run `codex login` to refresh.');
+      // Exit non-zero: acceptance gates treat auth-blocked as BLOCKED, not PASS.
+      process.exit(3);
     }
     // eslint-disable-next-line no-console
     console.error('[openai-codex smoketest] FAILED:', msg);
@@ -82,10 +87,11 @@ async function main(): Promise<void> {
   const ok = result.text.length > 0;
   if (!ok) {
     // eslint-disable-next-line no-console
-    console.log('[openai-codex smoketest] AUTH-BLOCKED — empty response (Codex CLI rejected creds silently, hit timeout)');
+    console.error('[openai-codex smoketest] AUTH-BLOCKED — empty response (Codex CLI rejected creds silently, hit timeout)');
     // eslint-disable-next-line no-console
-    console.log('  Likely cause: subscription lapsed. Re-run `codex login` to refresh OAuth.');
-    process.exit(0); // not a build failure
+    console.error('  Likely cause: subscription lapsed. Re-run `codex login` to refresh OAuth.');
+    // Exit non-zero: empty response is failure, not a pass.
+    process.exit(3);
   }
   // eslint-disable-next-line no-console
   console.log('[openai-codex smoketest] PASSED');
