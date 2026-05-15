@@ -16,7 +16,6 @@ import { ExecutionJournal } from '../core/ExecutionJournal.js';
 import { JobReflector } from '../core/JobReflector.js';
 import { PatternAnalyzer } from '../core/PatternAnalyzer.js';
 import { ReflectionConsolidator } from '../core/ReflectionConsolidator.js';
-import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
 import type { IntelligenceProvider } from '../core/types.js';
 import type { DetectedPattern, PatternReport } from '../core/PatternAnalyzer.js';
@@ -342,16 +341,10 @@ interface ReflectRunOptions {
 
 /**
  * Resolve an IntelligenceProvider from the environment.
- * Prefers Anthropic API (faster) → Claude CLI fallback.
+ * Subscription path only — Rule 2 forbids direct Anthropic API.
  */
 function resolveIntelligence(claudePath?: string): IntelligenceProvider | null {
-  // Try Anthropic API first (explicit opt-in via env)
-  const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-  if (apiProvider) return apiProvider;
-
-  // Fall back to Claude CLI
   if (claudePath) return new ClaudeCliIntelligenceProvider(claudePath);
-
   return null;
 }
 
@@ -363,7 +356,7 @@ export async function runReflection(slug: string | undefined, opts: ReflectRunOp
   if (!intelligence) {
     console.log();
     console.log(pc.red('No LLM provider available for reflection.'));
-    console.log(pc.dim('  Set ANTHROPIC_API_KEY or ensure Claude CLI is installed.'));
+    console.log(pc.dim('  Ensure the Claude CLI is installed and the path is set in config.sessions.claudePath.'));
     return;
   }
 

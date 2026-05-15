@@ -23,7 +23,6 @@ import { AgentServer } from '../server/AgentServer.js';
 import { TelegramAdapter, TOPIC_STYLE, selectTopicEmoji } from '../messaging/TelegramAdapter.js';
 import { RelationshipManager } from '../core/RelationshipManager.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
-import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
 import { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 import { DispatchManager } from '../core/DispatchManager.js';
@@ -2016,54 +2015,36 @@ export async function startServer(options: StartOptions): Promise<void> {
     _projectDir = config.sessions.projectDir;
 
     // Shared intelligence provider — lightweight LLM for internal classification tasks.
-    // Priority: Claude CLI subscription (zero extra cost, default) → Anthropic API (explicit opt-in)
-    // Components that need LLM intelligence (Sentinel, TelegramAdapter, etc.) share this.
+    // Subscription path only: routes through the Claude CLI (`claude -p`), which bills against
+    // the Agent SDK credit pot and falls back to the Max subscription. Components that need
+    // LLM intelligence (Sentinel, TelegramAdapter, etc.) share this single provider instance.
     //
-    // Rationale: Instar must not depend on an API key. The subscription path is the default so
-    // every agent gets LLM-gated features out of the box. Users who prefer direct API access can
-    // set `intelligenceProvider: "anthropic-api"` in config.json.
+    // Direct calls to the Anthropic Messages API are forbidden per Rule 2 of the path
+    // constraints (specs/provider-portability/04-anthropic-path-constraints.md). The old
+    // `intelligenceProvider: "anthropic-api"` config field is no longer honored; if a stale
+    // agent config has it set, we warn loudly and proceed with the subscription path.
     let sharedIntelligence: IntelligenceProvider | undefined;
-    const explicitIntelligenceProvider =
-      (config as unknown as { intelligenceProvider?: string }).intelligenceProvider;
+    const staleApiProvider =
+      (config as unknown as { intelligenceProvider?: string }).intelligenceProvider === 'anthropic-api';
     let intelligenceSource = 'none';
 
-    if (explicitIntelligenceProvider === 'anthropic-api') {
-      try {
-        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-        if (apiProvider) {
-          sharedIntelligence = apiProvider;
-          intelligenceSource = 'Anthropic API (explicit opt-in)';
-        } else {
-          console.log(pc.yellow('  intelligenceProvider: "anthropic-api" set but ANTHROPIC_API_KEY not found — falling back to Claude CLI'));
-        }
-      } catch { /* no API key available */ }
+    if (staleApiProvider) {
+      console.log(pc.yellow(
+        '  intelligenceProvider: "anthropic-api" is no longer supported — using Claude CLI subscription instead.\n'
+        + '  Remove the field from config.json. See specs/provider-portability/04-anthropic-path-constraints.md.'
+      ));
     }
 
-    if (!sharedIntelligence) {
-      try {
-        sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
-        intelligenceSource = 'Claude CLI subscription';
-      } catch { /* CLI not available */ }
-    }
-
-    if (!sharedIntelligence && explicitIntelligenceProvider !== 'anthropic-api') {
-      // Last resort: if user has API key but didn't explicitly opt in, use it rather than
-      // leaving the agent flying blind. We prefer subscription, but degrading to heuristics
-      // is worse than using whatever LLM is available.
-      try {
-        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-        if (apiProvider) {
-          sharedIntelligence = apiProvider;
-          intelligenceSource = 'Anthropic API (CLI unavailable — last resort)';
-        }
-      } catch { /* no API key available */ }
-    }
+    try {
+      sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+      intelligenceSource = 'Claude CLI subscription';
+    } catch { /* CLI not available */ }
 
     _sharedIntelligence = sharedIntelligence ?? null;
     if (sharedIntelligence) {
       console.log(pc.gray(`  Intelligence: ${intelligenceSource}`));
     } else {
-      console.log(pc.yellow('  Intelligence: none (no Claude CLI, no API key) — LLM-gated features degraded'));
+      console.log(pc.yellow('  Intelligence: none (no Claude CLI available) — LLM-gated features degraded'));
       // Visible degradation — every downstream LLM-gated feature depends on this.
       // The DegradationReporter routes to console, disk, Telegram alert, and feedback.
       // Keep the externally-rendered impact string generic; the detailed
@@ -2074,9 +2055,9 @@ export async function startServer(options: StartOptions): Promise<void> {
       const { DegradationReporter } = await import('../monitoring/DegradationReporter.js');
       DegradationReporter.getInstance().report({
         feature: 'SharedIntelligenceProvider',
-        primary: 'Shared LLM provider (Claude CLI subscription by default, Anthropic API opt-in)',
+        primary: 'Shared LLM provider (Claude CLI subscription path)',
         fallback: 'Heuristic-only operation for LLM-gated features',
-        reason: 'No LLM transport configured on this machine (see local startup logs for detail).',
+        reason: 'Claude CLI not available on this machine (see local startup logs for detail).',
         impact: 'LLM-gated features degraded; defense-in-depth reduced. See local logs for the affected feature list.',
       });
     }
@@ -2117,26 +2098,20 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     let relationships: RelationshipManager | undefined;
     if (config.relationships) {
-      // Wire LLM intelligence for identity resolution.
-      // Priority: Claude CLI (subscription, zero extra cost) > Anthropic API (explicit opt-in only)
+      // Wire LLM intelligence for identity resolution. Subscription path only —
+      // direct Anthropic API is forbidden per Rule 2 of the path constraints.
       const claudePath = config.sessions.claudePath;
       let intelligenceMode = 'heuristic-only';
 
-      // Check if user explicitly opted into API-based intelligence
-      // (intelligenceProvider is a config-file-only field, not in the TypeScript type)
-      const explicitProvider = (config.relationships as unknown as { intelligenceProvider?: string }).intelligenceProvider;
+      const staleRelApi = (config.relationships as unknown as { intelligenceProvider?: string }).intelligenceProvider === 'anthropic-api';
+      if (staleRelApi) {
+        console.log(pc.yellow(
+          '  relationships.intelligenceProvider: "anthropic-api" is no longer supported — using Claude CLI subscription instead.\n'
+          + '  Remove the field from config.json.'
+        ));
+      }
 
-      if (explicitProvider === 'anthropic-api') {
-        // User explicitly chose API — respect their decision
-        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-        if (apiProvider) {
-          config.relationships.intelligence = apiProvider;
-          intelligenceMode = 'LLM-supervised (Anthropic API — user choice)';
-        } else {
-          console.log(pc.yellow('  intelligenceProvider: "anthropic-api" set but ANTHROPIC_API_KEY not found'));
-        }
-      } else if (claudePath) {
-        // Default: use Claude CLI via subscription (zero extra cost)
+      if (claudePath) {
         config.relationships.intelligence = new ClaudeCliIntelligenceProvider(claudePath);
         intelligenceMode = 'LLM-supervised (Claude CLI subscription)';
       }

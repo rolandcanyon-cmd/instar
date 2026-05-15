@@ -10,7 +10,6 @@ export type { SessionDiagnostic, SessionDiagnostics, MemoryPressure } from './co
 export { StateManager } from './core/StateManager.js';
 export { RelationshipManager } from './core/RelationshipManager.js';
 export { ClaudeCliIntelligenceProvider } from './core/ClaudeCliIntelligenceProvider.js';
-export { AnthropicIntelligenceProvider } from './core/AnthropicIntelligenceProvider.js';
 export { ANTHROPIC_MODELS, CLI_MODEL_FLAGS, resolveModelId, resolveCliFlag, getValidTiers, isValidTier } from './core/models.js';
 export type { ModelTierName, AnthropicModelId } from './core/models.js';
 export { FeedbackManager } from './core/FeedbackManager.js';
