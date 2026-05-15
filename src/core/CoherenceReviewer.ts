@@ -7,7 +7,6 @@
  */
 
 import crypto from 'node:crypto';
-import { resolveModelId } from './models.js';
 import type { IntelligenceProvider, IntelligenceOptions } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -56,9 +55,11 @@ export interface ReviewerOptions {
   /** Mode: block, warn, or observe */
   mode?: 'block' | 'warn' | 'observe';
   /**
-   * Optional IntelligenceProvider. When provided, reviewers route their LLM calls
-   * through this abstraction (supports Claude CLI subscription, Anthropic API, etc.).
-   * When omitted, reviewers fall back to direct Anthropic API using `apiKey`.
+   * IntelligenceProvider for routing LLM calls. Required as of the path-constraint
+   * lockdown (specs/provider-portability/04-anthropic-path-constraints.md): the
+   * direct-Anthropic-API fallback path that previously activated when this was
+   * omitted has been removed (Rule 2). Constructors of reviewers without an
+   * intelligence provider will throw at first `review()` call.
    */
   intelligence?: IntelligenceProvider;
 }
@@ -75,8 +76,6 @@ export interface ReviewerHealthMetrics {
 // Constants
 // ---------------------------------------------------------------------------
 
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const ANTHROPIC_API_VERSION = '2023-06-01';
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 // ---------------------------------------------------------------------------
@@ -229,73 +228,39 @@ export abstract class CoherenceReviewer {
   }
 
   /**
-   * Run the reviewer's LLM call. Routes through IntelligenceProvider when available
-   * (supports Claude CLI subscription + Anthropic API), else falls back to the
-   * direct Anthropic API path using the constructor apiKey.
+   * Run the reviewer's LLM call. Routes through the IntelligenceProvider, which
+   * itself routes through the Claude CLI (Agent SDK / subscription path) per
+   * Rule 2 of the path constraints. If no IntelligenceProvider is wired,
+   * throws — the previous direct-Anthropic-API fallback path was removed
+   * during the path-constraint lockdown (no raw `api.anthropic.com` calls
+   * may live on routine inference paths).
    *
-   * Uses AbortController to enforce timeoutMs on the direct-API path so the underlying
-   * fetch is cancelled when a Promise.race timeout fires. Without cancellation,
-   * timed-out fetches keep running, pile up, and eventually cause the HTTP request
-   * timeout middleware to return 408 after 30s.
+   * Wraps the provider call in a timeout race so the reviewer can fail
+   * within `timeoutMs` even if the provider's own timeout is longer.
    */
   protected async callApi(prompt: string): Promise<string> {
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-    if (this.intelligence) {
-      const intelOptions: IntelligenceOptions = {
-        model: this.mapModelToTier(this.options.model ?? 'haiku'),
-        maxTokens: 200,
-        temperature: 0,
-      };
-      // IntelligenceProvider implementations set their own timeouts; wrap here too.
-      return await Promise.race([
-        this.intelligence.evaluate(prompt, intelOptions),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Reviewer timeout after ${timeoutMs}ms`)), timeoutMs),
-        ),
-      ]);
+    if (!this.intelligence) {
+      throw new Error(
+        `Reviewer "${this.name}" was constructed without an IntelligenceProvider. `
+        + `Direct Anthropic API path is no longer supported (see specs/provider-portability/04-anthropic-path-constraints.md). `
+        + `Wire an IntelligenceProvider through options.intelligence.`
+      );
     }
 
-    const model = resolveModelId(this.options.model ?? 'haiku');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const response = await fetch(ANTHROPIC_API_URL, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': ANTHROPIC_API_VERSION,
-        },
-        body: JSON.stringify({
-          model,
-          max_tokens: 200,
-          temperature: 0,
-          messages: [{ role: 'user', content: prompt }],
-        }),
-        signal: controller.signal,
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => 'unknown error');
-        throw new Error(`Anthropic API error ${response.status}: ${errorText}`);
-      }
-
-      const data = (await response.json()) as {
-        content: Array<{ type: string; text?: string }>;
-      };
-
-      const textBlock = data.content?.find((block) => block.type === 'text');
-      return textBlock?.text ?? '';
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error(`Request timeout after ${timeoutMs}ms`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
+    const intelOptions: IntelligenceOptions = {
+      model: this.mapModelToTier(this.options.model ?? 'haiku'),
+      maxTokens: 200,
+      temperature: 0,
+    };
+    // IntelligenceProvider implementations set their own timeouts; wrap here too.
+    return await Promise.race([
+      this.intelligence.evaluate(prompt, intelOptions),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Reviewer timeout after ${timeoutMs}ms`)), timeoutMs),
+      ),
+    ]);
   }
 
   /**
