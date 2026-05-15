@@ -155,6 +155,31 @@ Four real correctness bugs found by the pre-Phase-4 audit are fixed. Each had un
 
 ---
 
+### 2026-05-15 — Rule 3 enforcement: canary self-healing + scheduled drift detection + persistence + LLM fallback
+
+Built out the operational infrastructure for Rule 3 (state-detection robustness) on the empty-prompt detector — the most fragile state-check in the substrate. The canary now runs at pool spawn AND on a scheduled interval (default hourly), self-heals signature drift across process restarts via on-disk persistence, and has an optional LLM fallback for unrecoverable structural changes.
+
+- **Persistence** (`canary/emptyPromptSignature.ts`). Canary-derived signatures are written to `~/.instar/providers/anthropic-interactive-pool/empty-prompt-signature.json` (override via `INSTAR_PROVIDER_STATE_DIR`). Schema v1; regex patterns serialized as `.source` strings. Lazy load on first `getSignature()`, fall back to default on any failure (file absent, JSON corrupt, schema mismatch, regex uncompilable). 7 unit tests cover the load/save round-trip and every failure mode.
+- **Scheduled recurring canary** (`pool.ts`). Added `canaryIntervalMs` config (default 1 hour, env override `INTERACTIVE_POOL_CANARY_INTERVAL_MS`, 0 disables). Each tick allocates a ready session, runs the canary, releases. Re-entrancy guarded by `scheduledCanaryInFlight` lock. Timer is `unref()`ed so it doesn't keep the process alive on its own. Cleared on shutdown.
+- **Optional LLM fallback** (`canary/emptyPromptCanary.ts`). When deterministic structural re-derivation can't extract a signature from the canary's after-buffer, an optional `llmFallback` callback can verify whether the pane indicates idle. New result status `'llm-confirmed'` joins `'pass' | 'self-healed' | 'fail'`. The fallback fires only when re-derivation has already exhausted; cost on stable upstream is zero. The application-layer wiring (passing a real `IntelligenceProvider.evaluate()` callback into the pool config) is queued — substrate is ready. 5 unit tests cover all four fallback paths.
+- **State-detector registry** (`specs/provider-portability/06-state-detector-registry.md`). New living document listing every place Instar reads external state, with Rule 3 compliance status flags (✅ Compliant / 🟡 Partial / ❌ Missing / 🔵 Exempt). 16 seed entries; the empty-prompt detector is the only 🟡 (canary present, schedule/persistence/LLM-fallback now landed — re-classifies to ✅ after follow-up #17 wires the LLM). Every new state-detection PR adds a row in the same commits. Phase 4 Codex adapter inherits the structure.
+- **Conformance behavior assertions** (`tests/integration/conformance/oneShotCompletion.conformance.test.ts`). First concrete replacement for the no-op stub assertions in the Phase 2 conformance framework. Parameterizes over both Anthropic adapters; 3 structural assertions always run, 2 behavior assertions gated by `INSTAR_REAL_API=1`. Establishes the pattern for the remaining 50 primitives (queued as follow-up).
+
+### Verification
+
+- `npx tsc --noEmit` clean throughout all commits.
+- 31 new unit tests across the canary infrastructure all pass.
+- Real-API smoke runs three times in a row, all pass: pool ready in ~21s (includes 20s canary), prompt round-trip 7-9s.
+- Conformance template's structural tests pass without real API.
+
+### Follow-ups queued in the task list
+
+- #17: Wire the canary LLM fallback into the pool's spawnOne / runScheduledCanary callers (threads `IntelligenceProvider.evaluate()` through pool config).
+- #18: Populate the remaining 50 conformance suites with real behavior assertions using the template established here.
+- #8: Remove the now-unused `apiKey` parameter from the 12 CoherenceReviewer subclass constructors (mechanical refactor, ~13 files).
+
+---
+
 ## What's next
 
 Per `specs/provider-portability/README.md` the remaining phase sequence is:
