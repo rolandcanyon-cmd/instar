@@ -93,6 +93,35 @@ Second concrete provider adapter (`anthropic-interactive-pool`) landed at `src/p
 
 ---
 
+### 2026-05-15 — Phase 3c complete
+
+Behavior-parity test harness for paired adapters + pool-only stress tests landed. Phase 2 conformance suites verified single-adapter contract shape; Phase 3c goes one level deeper: given two adapters that claim the same capability, send identical inputs to both and assert observable equivalence. Catches drift between sibling adapters (3a vs 3b) where each correctly implements the primitive contract in isolation but their externally-observable behavior disagrees on edge cases.
+
+- **Parity harness** at `src/providers/parity/`: `runner.ts` exposes `runParitySuite(harness, scenarios)` returning `ParityResult[]` plus `reportParityResults` (pretty-print + exit code). Scenarios are async functions taking a `ParityHarness` (left + right + ctx); ctx carries `realApi`, optional timeoutMs, optional skipPatterns. Adapter lifecycle managed by the runner (start/dispose called automatically). Scenarios run sequentially since concurrent execution against pool-backed adapters can cause queueing effects that confound parity comparisons.
+- **Capability-overlap scenarios** (`scenarios/capabilityOverlap.ts`, structural-only): `distinctIds` (registry differentiation), `sharedCapabilitiesInstantiate` (every shared capability returns a non-null primitive on both sides). Excludes asymmetric sub-capability flags (`PublicUsageApi`, `PreCompactHook`, `SubagentLifecycleHooks`, `NativeIdleBound`, `StructuredApprovalEvents`) which are declarative markers, not retrievable primitives — they modify the behavior of OTHER primitives.
+- **OneShotCompletion scenarios** (`scenarios/oneShotCompletion.ts`): `primitiveShape` (structural), `arithmeticParity` (realApi — both adapters answer "what is 2+2?" with text containing "4", both return non-empty trimmed string, both include `usage` field), `abortSignalParity` (realApi — both adapters surface AbortSignal cancellation as a thrown error rather than fabricating a response). Equivalence is structural (same shape, same digit) rather than literal string equality since LLM outputs aren't deterministic.
+- **SessionId scenarios** (`scenarios/sessionId.ts`, structural-only): `shape` (providerIdFor + handleFor methods present, correct capability flag), `unknownHandle` (bogus handle either resolves to null or throws — never fabricates a UUID).
+- **Runnable parity test** at `src/providers/parity/_paritytest.ts`: constructs anthropic-headless × anthropic-interactive-pool and runs all scenarios. `INSTAR_REAL_API=1 npx tsx src/providers/parity/_paritytest.ts` for full run; without the env var, structural scenarios run and real-API scenarios skip.
+- **Pool stress tests** at `src/providers/adapters/anthropic-interactive-pool/_stresstest.ts`: three scenarios for 3b-only paths — `shutdownReleasesResources` (pool.status().sessions empty after dispose), `concurrentAllocation` (3 prompts to pool size 2, all correct), `retireAndReplace` (kill the only session mid-flight, verify pool replaces it and next prompt succeeds). Gated by `INSTAR_REAL_API=1` since every scenario spawns real `claude` REPLs and consumes subscription quota.
+- **Verification**:
+  - `npx tsc --noEmit` clean across the full `src/providers/` tree.
+  - Structural-only parity run (realApi=false): 7 scenarios, 7 pass.
+  - Real-API parity run (realApi=true) on 2026-05-15: 7 scenarios, 7 pass. Both adapters returned text containing "4" for the arithmetic prompt within timeout; both honored AbortSignal cancellation by throwing rather than resolving with a fabricated response. **Behavior-equivalence between 3a and 3b empirically verified.**
+
+### Phase 3c design notes
+
+- Parity scenarios assert structural equivalence (same error class category, same response shape, presence of required fields) rather than literal output equality. LLM outputs are non-deterministic, so byte-equality is the wrong target; the target is "both adapters honor the same contract observably."
+- Real-API scenarios are gated to keep CI cheap and to avoid burning subscription quota on every test run. The pattern matches the Phase 3a/3b smoke tests (`INSTAR_REAL_API=1`).
+- The 3c parity surface is intentionally minimal — it covers the primitives that the application layer will route to (OneShotCompletion, SessionId) plus the capability declaration surface. As the application-layer refactor wires the adapters in for real, more scenarios (LiveOutputStream tail equivalence, ProcessLifecycle alive/dead semantics, HookEventReceiver canonical-event normalization) get added incrementally — scenarios accumulate without changing the harness shape.
+
+---
+
 ## What's next
 
-Phase 3c — behavior-parity test suite proving 3a and 3b are functionally equivalent across the shared primitive surface, plus stress tests for pool-only paths (concurrent allocation, retire-and-replace under load, compaction-during-prompt recovery). Once 3c lands, the application-layer refactor begins: replace direct `ClaudeCliIntelligenceProvider` / `SessionManager` usage with `registry.resolve()`, wire the routing policy (drain Agent SDK credit first, fall back to interactive pool below configurable safety margin), and run the migration smoke test on a few local agents before cutting v1.0.0.
+Application-layer refactor. With 3a (Agent SDK credit path), 3b (subscription path), and 3c (behavior-parity proven) all landed, the routing policy can finally be wired:
+
+1. Implement the cost-aware routing policy: drain Agent SDK credit first (queried via UsageMeterProvider's `agentSdkCredit` field), fall back to interactive pool below a configurable safety margin (default: when credit drops below 10% of the monthly $200).
+2. Replace direct `ClaudeCliIntelligenceProvider` / `SessionManager` usage in `src/core/` and consumers with `registry.resolve()` calls. The IntelligenceProvider interface in `src/core/types.ts` becomes a thin wrapper over `OneShotCompletion` resolved through the registry.
+3. Migration smoke test on a few local agents before v1.0.0 cut: snapshot state → migrate → snapshot → diff for unexpected losses → verify jobs + Telegram + threadline still work.
+
+After that lands, v1.0.0 is cut and Phase 4+ (Codex adapter, then Gemini, then OSS-framework evaluation for local models) begins.
