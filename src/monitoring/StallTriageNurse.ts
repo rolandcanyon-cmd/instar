@@ -48,14 +48,11 @@ const DEFAULT_POST_INTERVENTION_DELAY_MS = 3000;
 
 const DEFAULT_CONFIG: Required<StallTriageConfig> = {
   enabled: true,
-  apiKey: '',
   model: resolveModelId(process.env.STALL_TRIAGE_MODEL || 'sonnet'),
   maxTokens: 2000,
-  apiTimeoutMs: 15000,
   cooldownMs: 180000,
   verifyDelayMs: 10000,
   maxEscalations: 2,
-  useIntelligenceProvider: true,
   postInterventionDelayMs: DEFAULT_POST_INTERVENTION_DELAY_MS,
   restartLoopThreshold: 3,
   restartLoopWindowMs: 600_000, // 10 minutes
@@ -128,7 +125,6 @@ export class StallTriageNurse extends EventEmitter {
     this.config = {
       ...DEFAULT_CONFIG,
       ...opts?.config,
-      apiKey: opts?.config?.apiKey || process.env.ANTHROPIC_API_KEY || '',
       // Resolve tier names in model config (e.g., 'sonnet' → 'claude-sonnet-4-6')
       model: resolveModelId(opts?.config?.model || DEFAULT_CONFIG.model),
     };
@@ -508,16 +504,16 @@ export class StallTriageNurse extends EventEmitter {
       const prompt = this.buildDiagnosisPrompt(context);
       let rawResponse: string;
 
-      if (this.config.useIntelligenceProvider && this.intelligence) {
-        rawResponse = await this.intelligence.evaluate(prompt, {
-          model: 'balanced',
-          maxTokens: this.config.maxTokens,
-        });
-      } else if (this.config.apiKey) {
-        rawResponse = await this.callAnthropicApi(prompt);
-      } else {
-        throw new Error('No intelligence provider or API key configured');
+      if (!this.intelligence) {
+        // Direct Anthropic API path was removed per Rule 2 of the path
+        // constraints (specs/provider-portability/04-anthropic-path-constraints.md).
+        // Triage must route through an IntelligenceProvider.
+        throw new Error('No IntelligenceProvider configured (direct Anthropic API path removed)');
       }
+      rawResponse = await this.intelligence.evaluate(prompt, {
+        model: 'balanced',
+        maxTokens: this.config.maxTokens,
+      });
 
       return this.parseDiagnosis(rawResponse);
     } catch (err) {
@@ -606,40 +602,6 @@ export class StallTriageNurse extends EventEmitter {
       '--- Terminal output (last 50 lines) ---',
       context.tmuxOutput || '(empty — no output captured)',
     ].join('\n');
-  }
-
-  async callAnthropicApi(prompt: string): Promise<string> {
-    if (!this.config.apiKey) {
-      throw new Error('No Anthropic API key configured');
-    }
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.config.model,
-        max_tokens: this.config.maxTokens,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: AbortSignal.timeout(this.config.apiTimeoutMs),
-    });
-
-    if (response.status === 429) {
-      throw new Error('Rate limited (429)');
-    }
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
-    }
-
-    const data = await response.json() as any;
-    const textBlock = data?.content?.find((b: any) => b.type === 'text');
-    return textBlock?.text || '';
   }
 
   parseDiagnosis(rawResponse: string): TriageDiagnosis {

@@ -5,22 +5,16 @@
 export interface StallTriageConfig {
   /** Enable the triage nurse */
   enabled: boolean;
-  /** Anthropic API key (falls back to process.env.ANTHROPIC_API_KEY) */
-  apiKey?: string;
   /** Model to use for diagnosis (default: 'claude-sonnet-4-6') */
   model?: string;
   /** Max tokens for LLM response (default: 1024) */
   maxTokens?: number;
-  /** Timeout for API calls in ms (default: 15000) */
-  apiTimeoutMs?: number;
   /** Cooldown between triages for same topic in ms (default: 180000 = 3min) */
   cooldownMs?: number;
   /** Delay before verifying action worked in ms (default: 10000) */
   verifyDelayMs?: number;
   /** Max escalation attempts before giving up (default: 2) */
   maxEscalations?: number;
-  /** Use IntelligenceProvider instead of direct API (default: true) */
-  useIntelligenceProvider?: boolean;
   /** Delay after intervention before sending follow-up message (default: 3000ms) */
   postInterventionDelayMs?: number;
   /** Number of restarts within the loop window that triggers loop detection (default: 3) */
