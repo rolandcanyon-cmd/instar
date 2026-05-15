@@ -197,6 +197,38 @@ Scope-coherence review against the locked Rule 3 spec surfaced three pieces of d
 
 ---
 
+### 2026-05-15 — Phase 4: OpenAI Codex adapter
+
+First non-Anthropic adapter landed at `src/providers/adapters/openai-codex/`. Confirms the substrate abstracts cleanly across providers from different vendors — the Phase 4 acceptance test passing is the definitive evidence that Phase 2's interfaces aren't accidentally Anthropic-shaped.
+
+- **40 files, ~2,200 lines.** Mirrors the anthropic-headless adapter's directory layout (transport/capability/observability/control/integration/canary). Compiles clean under the existing `tsconfig.json` without any substrate code changes — the Phase 4 acceptance test is that a new provider plugs in by writing only adapter code, and that test passes.
+- **30 of 36 universal primitives implemented.** Transport (3: oneShotCompletion via `codex exec --output-last-message`, structuredOneShot via `--output-schema` with caller-side validate, agenticSessionHeadless via `codex exec --json` in tmux). Capability (6: toolAccess/Allowlist, fileSystemAccess with all 3 sandbox tiers native, pathAllowlist with deny-rule support, bashExecution with sandboxModes=true, webAccess). Observability (9: liveOutputStream, conversationLogReader+Tailer reading rollout JSONL from $CODEX_HOME/sessions/YYYY/MM/DD/, hookEventReceiver for 5 Codex-supported event kinds, subagentLifecycleObserver synthesized from app-server notifications, sessionId binding UUIDv7 threads, usageMeterProvider with local accounting since Codex has no public usage endpoint, processLifecycle, interactivePromptObserver with source='structured'). Control (10). Integration (4).
+- **Honest capability declarations.** `capabilities.ts` declares only what's actually implemented — declared-but-stubbed counts as a lie under Rule 3.2 / the parity harness's stub-vs-real check. Asymmetric flags per the deep-dive: StructuredApprovalEvents=true (Codex's app-server emits structured approval events); PublicUsageApi=false (no documented usage endpoint); PreCompactHook=false (Codex auto-compacts silently — adapter synthesizes a notice at 85% of assumed 200k window); SubagentLifecycleHooks=false (no native subagent events — adapter synthesizes from app-server thread/started|closed); NativeIdleBound=false.
+- **Rule 3 canaries.** `codexEventNormalizerCanary` — critical-severity, asserts the 8 known Codex JSONL event types map to expected CanonicalEvent shapes against fixtures captured 2026-05-15 on Codex CLI 0.130.0, surfaces unknown types via provider-raw escape hatch rather than dropping silently. `codexSessionLayoutCanary` — high-severity, writes synthetic rollout under temp $CODEX_HOME and verifies discovery via findRolloutFile / listAllRollouts. Self-heal is not applicable for enum-shape or layout-shape mismatches; failures surface via DegradationReporter (ECHO-only) and the remediation path is a code fix.
+- **Capability-honesty canary extension.** `src/providers/canary/capabilityHonestyCanary.ts` now covers all three adapter stub factories (anthropic-headless, anthropic-interactive-pool, openai-codex). Adding a fourth adapter in the future will require extending this canary in the same commit per Rule 3 enforcement.
+- **Codex × Anthropic parity test** at `src/providers/parity/_codex_paritytest.ts`. Runs the full Phase 3c scenario set (capabilityOverlap, oneShotCompletion, sessionId) against anthropic-headless × openai-codex. **Structural set: 7 of 7 scenarios pass** (no realApi required). This is the definitive Phase 4 acceptance signal. Real-API scenarios skip without `INSTAR_REAL_API=1` AND working Codex credentials.
+- **Smoke test** at `src/providers/adapters/openai-codex/_smoketest.ts`. Gated on credential availability (OPENAI_API_KEY env or valid OAuth in ~/.codex/auth.json). In dev environments without credentials it prints "skipped"; when credentials are present but rejected by Codex (subscription lapsed, OAuth expired), it prints "AUTH-BLOCKED" rather than failing — distinguishing real adapter failure from dev-environment auth state. Real-API verification awaits a credential refresh.
+- **Registry rows added** for all 8 Codex-side state-detection surfaces in `06-state-detector-registry.md`. Audit-sweep procedure already covers Codex via the commit-time `check-rule3-coverage.cjs` script (no changes needed — same pattern set applies). Phase 4 Codex adapter inherits the structure exactly as `00-phase-2-plan.md` promised.
+
+### Verification
+
+- `npx tsc --noEmit` clean across the new adapter and all callers.
+- 11 new unit tests pass (3 canary tests + 8 normalizer edge-case tests, plus the capability-honesty canary still passes after extension).
+- Structural parity: 7 scenarios, 7 pass.
+- Pre-existing test-pollution bug between `emptyPromptSignaturePersistence.test.ts` and `promptRunner.test.ts` surfaces 4 failures when running the full `tests/unit/providers/` suite (each file passes individually). Confirmed unrelated to this batch by stashing all Phase 4 work and reproducing on HEAD. Filed as a follow-up.
+
+### Optional primitives (deferred)
+
+The deep-dive named 15 Codex-only optional primitives (threadFork, threadRollback, threadGoalSlot, profileSwitcher, customModelProvider, shellEnvironmentPolicy, otelExporter, complianceApi, pluginRegistry, trustedProjectGate, filesystemRpc, processSpawn, capabilityNegotiation, notificationOptOut, codeReviewPreset, csvBatchMode, selfUpdate, requirementsToml). None gate the parity test; they're high-value but Phase 5+ work because the cost-aware routing policy is the next critical-path item.
+
+### Follow-ups queued in the task list
+
+- #24: Fix the test-pollution bug between `emptyPromptSignaturePersistence.test.ts` and `promptRunner.test.ts` — refactor `statusBarHasIdleMarker` to accept the signature as a parameter rather than reading module-level state.
+- #17: Wire canary LLM fallback into the pool application layer (carry-over).
+- #18: Populate remaining 50 conformance suites with real behavior assertions (carry-over).
+
+---
+
 ## What's next
 
 Per `specs/provider-portability/README.md` the remaining phase sequence is:
