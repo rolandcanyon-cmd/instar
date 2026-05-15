@@ -73,6 +73,26 @@ First concrete provider adapter (`anthropic-headless`) landed at `src/providers/
 
 ---
 
+### 2026-05-15 — Phase 3b complete
+
+Second concrete provider adapter (`anthropic-interactive-pool`) landed at `src/providers/adapters/anthropic-interactive-pool/`. Sister to 3a — same contracts, different transport: instead of one `claude -p` subprocess per call, this adapter maintains a pool of long-lived `claude` REPL sessions in tmux and routes work through them via prompt-injection + idle-marker completion detection. Post-2026-06-15 this is the path that bills against Max subscription rather than the Agent SDK credit pot.
+
+- **Pool internals**: `pool.ts` manages N warm `claude` REPL sessions (default 2, `INSTAR_INTERACTIVE_POOL_SIZE`), allocate / release lifecycle, retire-and-replace, hard-kill-and-replace, observe state. `promptRunner.ts` injects a prompt and detects completion via the idle-marker + output-stability signals validated in the Phase 1 feasibility prototype.
+- **Real implementations** for primitives the pool can directly serve: OneShotCompletion (allocate → inject → detect-complete → extract → release), WarmSessionInbox (the primary contract for this adapter — exposes pool sessions to external file-system message-queue callers), HardKill / InputInjection / Interrupt (pool-session control via tmux), LiveOutputStream (tmux capture-pane snapshot + tail), ProcessLifecycle (tmux list-panes for PID/RSS/alive), SessionId (handle ↔ Claude-UUID bridge — distinct from 3a since the UUID comes from REPL startup output rather than `claude -p` exit metadata), TimeoutBound / IdleBound / StopGateInterceptor (in-memory policy), AuthCredentialInjection (env-var routing into pool sessions), ContextScopeControl (--setting-sources flag mapping at session-spawn time), CompactionLifecycle (PreCompact hook with per-pool-session compacting marker).
+- **Stubs** for primitives without active 3b consumers (throw UnsupportedCapabilityError): all capability primitives, StructuredOneShot, AgenticSession* (head/interactive/rpc), the asymmetric observability set (ConversationLogReader/Tailer, HookEventReceiver, SubagentLifecycleObserver, UsageMeterProvider, InteractivePromptObserver — those route to 3a today since they share the same underlying ~/.claude/projects log file), CredentialStorageProvider, IntelligenceCallQueue, all four integration primitives. The capability surface still declares them so the registry can find the adapter; the throw makes any premature use loud.
+- **Smoke test** (`_smoketest.ts`, gated `INSTAR_REAL_API=1`): real-API run on 2026-05-15 passed — pool size 1 warm in 1019ms, "what is 2+2?" returned "4" in 10.7s through the REPL. Subscription billing path confirmed (no Agent SDK credit drawdown observed).
+- **TypeScript verification**: `npx tsc --noEmit` passes across the full `src/providers/` tree (Phase 2 substrate + 3a adapter + 3b adapter) with zero errors.
+
+### Phase 3b design notes
+
+- The adapter is purely additive in Phase 3b — application code still uses `ClaudeCliIntelligenceProvider` and `SessionManager` directly. The refactor that wires both 3a and 3b into the application layer lands after 3c, gated on routing-policy implementation.
+- SessionHandles issued by the adapter are formatted `anthropic-interactive-pool/<poolSessionId>`. The pool owns the underlying tmux session name; the handle is a stable bridge across pool recycling within a session's lifetime.
+- LiveOutputStream reads from `tmux capture-pane` against the pool session's tmux window. The ANSI-strip + output-region extraction matches the 3a path so consumers can switch transparently.
+- The asymmetric observability primitives are stubbed (not implemented in 3b) because the underlying source — `~/.claude/projects/<path>/<uuid>.jsonl` — is the same file that 3a's implementations read. A consumer needing those today gets routed to 3a via the registry. If a future pool-only deployment needs them, the 3a implementations should be hoistable with minor refactoring; deferred until that's a real requirement.
+- The Phase 1 prototype validated up to ~360-byte responses, single-session pool, no tool use mid-response, no compaction. The Phase 3b smoke covers 1 prompt × 1 session. Pool concurrency, longer responses, tool-call mid-response, and compaction recovery are Phase 3c gates (behavior-parity suite).
+
+---
+
 ## What's next
 
-Phase 3b — `anthropic-interactive-pool` adapter (long-lived `claude` REPL pool via tmux, drawing from Max subscription). Phase 3c — behavior-parity test suite proving 3a and 3b are functionally equivalent. Application-layer refactor (replacing direct ClaudeCliIntelligenceProvider/SessionManager usage with `registry.resolve()`) lands after 3b so the routing policy has both adapters available.
+Phase 3c — behavior-parity test suite proving 3a and 3b are functionally equivalent across the shared primitive surface, plus stress tests for pool-only paths (concurrent allocation, retire-and-replace under load, compaction-during-prompt recovery). Once 3c lands, the application-layer refactor begins: replace direct `ClaudeCliIntelligenceProvider` / `SessionManager` usage with `registry.resolve()`, wire the routing policy (drain Agent SDK credit first, fall back to interactive pool below configurable safety margin), and run the migration smoke test on a few local agents before cutting v1.0.0.
