@@ -23,6 +23,49 @@ const execFileAsync = promisify(execFile);
 
 const ANSI_RE = /\[[0-9;?]*[A-Za-z]/g;
 
+const EMPTY_PROMPT_LINE_RE = /^❯\s*$/;
+const PROMPT_LINE_RE = /^❯(\s|$)/;
+
+/**
+ * Test whether the buffer indicates Claude Code is at an idle prompt
+ * (response complete).
+ *
+ * Why this exists: the original detector used `buf.includes(marker)` against
+ * the whole buffer, where `marker` was a static Claude UI string like
+ * `"? for shortcuts"`. Two problems with that:
+ *   1. Those strings live in the status bar at all times (during generation
+ *      AND when idle), so they don't actually distinguish complete from
+ *      generating — every check passes as soon as the REPL is up.
+ *   2. A model response that legitimately contains a marker substring
+ *      (e.g., "Press shift+tab to cycle through panels") matches too, so
+ *      even a brief mid-generation stall can false-trigger completion.
+ *
+ * The structural signal we actually want is Claude Code's MOST RECENT `❯`
+ * line. While the user's prompt is being processed, the most-recent `❯`
+ * line is the echoed prompt itself (`❯ what is 2+2?`). After a response
+ * completes, Claude Code prints a fresh empty `❯` below the response —
+ * the UI's "your turn again" cue. So the test is: walk the buffer from
+ * the bottom up, find the first `❯` line, and check whether it's empty.
+ *
+ * The legacy `idleMarkers` parameter is kept on the signature for backward
+ * compatibility but is no longer consulted — static UI strings can't
+ * distinguish state.
+ */
+export function statusBarHasIdleMarker(
+  buffer: string,
+  _idleMarkers: ReadonlyArray<string>,
+  _zoneLines?: number,
+): boolean {
+  const lines = buffer.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (PROMPT_LINE_RE.test(line)) {
+      return EMPTY_PROMPT_LINE_RE.test(line);
+    }
+  }
+  return false;
+}
+
 export interface RunPromptOptions {
   signal?: AbortSignal;
   /** Override the default max-wait. */
@@ -93,11 +136,12 @@ export async function runPrompt(
     if (size === lastSize) {
       if (stableSince === 0) stableSince = Date.now();
       if (Date.now() - stableSince >= stabilityMs) {
-        for (const marker of config.idleMarkers) {
-          if (buf.includes(marker)) {
-            // Done — extract response
-            return extractResponse(beforeBuffer, beforeLength, buf, startTs);
-          }
+        if (statusBarHasIdleMarker(buf, config.idleMarkers)) {
+          // Done — extract response. Markers are checked only in the
+          // status-bar zone (bottom STATUS_BAR_ZONE_LINES lines), not the
+          // whole buffer, so a response that legitimately mentions the
+          // marker substring does not false-trigger completion.
+          return extractResponse(beforeBuffer, beforeLength, buf, startTs);
         }
         // Stable but no idle marker — reset and wait more
         stableSince = 0;
