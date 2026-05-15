@@ -18,13 +18,11 @@ import { AbortError, TimeoutError, UnexpectedError } from '../../errors.js';
 import { ANTHROPIC_INTERACTIVE_POOL_ID } from './errors.js';
 import type { InteractivePoolConfig } from './config.js';
 import type { InteractivePool, PoolSession } from './pool.js';
+import { getSignature } from './canary/emptyPromptSignature.js';
 
 const execFileAsync = promisify(execFile);
 
 const ANSI_RE = /\[[0-9;?]*[A-Za-z]/g;
-
-const EMPTY_PROMPT_LINE_RE = /^❯\s*$/;
-const PROMPT_LINE_RE = /^❯(\s|$)/;
 
 /**
  * Test whether the buffer indicates Claude Code is at an idle prompt
@@ -40,12 +38,20 @@ const PROMPT_LINE_RE = /^❯(\s|$)/;
  *      (e.g., "Press shift+tab to cycle through panels") matches too, so
  *      even a brief mid-generation stall can false-trigger completion.
  *
- * The structural signal we actually want is Claude Code's MOST RECENT `❯`
- * line. While the user's prompt is being processed, the most-recent `❯`
- * line is the echoed prompt itself (`❯ what is 2+2?`). After a response
- * completes, Claude Code prints a fresh empty `❯` below the response —
- * the UI's "your turn again" cue. So the test is: walk the buffer from
- * the bottom up, find the first `❯` line, and check whether it's empty.
+ * The structural signal we actually want is Claude Code's MOST RECENT
+ * prompt line. While the user's prompt is being processed, the most-
+ * recent prompt line is the echoed prompt itself (`❯ what is 2+2?`).
+ * After a response completes, Claude Code prints a fresh empty prompt
+ * line below the response — the UI's "your turn again" cue. So the test
+ * is: walk the buffer from the bottom up, find the first prompt line,
+ * and check whether it's empty.
+ *
+ * The pattern is read from {@link getSignature} — at startup the canary
+ * (see canary/emptyPromptCanary.ts) verifies the signature is still
+ * valid and re-derives it from a known-good response if Claude Code's
+ * UI has evolved. This is the Rule 3 self-heal path: deterministic
+ * state-detection against an evolving upstream must self-heal rather
+ * than silently fail.
  *
  * The legacy `idleMarkers` parameter is kept on the signature for backward
  * compatibility but is no longer consulted — static UI strings can't
@@ -56,11 +62,12 @@ export function statusBarHasIdleMarker(
   _idleMarkers: ReadonlyArray<string>,
   _zoneLines?: number,
 ): boolean {
+  const sig = getSignature();
   const lines = buffer.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
-    if (PROMPT_LINE_RE.test(line)) {
-      return EMPTY_PROMPT_LINE_RE.test(line);
+    if (sig.anyPromptLinePattern.test(line)) {
+      return sig.emptyPromptPattern.test(line);
     }
   }
   return false;

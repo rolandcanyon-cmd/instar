@@ -80,6 +80,8 @@ export class InteractivePool extends EventEmitter {
   }> = [];
   /** Pending retry timers for replacement spawns. Cleared on shutdown. */
   private readonly pendingRetryTimers = new Set<NodeJS.Timeout>();
+  /** Has the startup empty-prompt canary already run in this process lifetime? */
+  private canaryHasRunInCurrentLifetime = false;
   private shuttingDown = false;
 
   constructor(private readonly config: InteractivePoolConfig) {
@@ -175,6 +177,55 @@ export class InteractivePool extends EventEmitter {
         `Pool session ${id} did not reach ready state in 30s`,
         ANTHROPIC_INTERACTIVE_POOL_ID,
       );
+    }
+
+    // Run the empty-prompt canary on the FIRST session that comes up.
+    // The signature it derives applies to every subsequent session
+    // (signature is process-wide). Skip canary on subsequent sessions
+    // since the signature is already valid and the canary cost (a real
+    // prompt round-trip per session) would otherwise compound at pool
+    // start. Recurring drift detection between restarts is a follow-up.
+    // Per Rule 3 of the path constraints.
+    if (!this.canaryHasRunInCurrentLifetime) {
+      let canaryResult: import('./canary/emptyPromptCanary.js').CanaryResult | null = null;
+      try {
+        const { runEmptyPromptCanary } = await import('./canary/emptyPromptCanary.js');
+        canaryResult = await runEmptyPromptCanary(this, session, this.config);
+        this.canaryHasRunInCurrentLifetime = true;
+      } catch (canaryErr) {
+        // Canary infrastructure (import / promise chain) crashed — distinct
+        // from "canary returned fail status." Log loudly but don't block
+        // pool startup; missing canary is protection-in-depth, not a
+        // primary failure path.
+        console.error('[interactive-pool] canary infrastructure error:', canaryErr);
+      }
+      if (canaryResult?.status === 'fail') {
+        // Canary returned a structured failure — surface and refuse to
+        // bring the session ready. Report to DegradationReporter so the
+        // surface lands in the right place (echo Telegram by default).
+        const { DegradationReporter } = await import('../../../monitoring/DegradationReporter.js');
+        DegradationReporter.getInstance().report({
+          feature: 'anthropic-interactive-pool.empty-prompt-canary',
+          primary: 'Empty-prompt detector verified by startup canary',
+          fallback: 'Pool refuses to start; consumers route to anthropic-headless via registry',
+          reason: canaryResult.message,
+          impact:
+            'Subscription-path pool unavailable — Anthropic work routes through the Agent SDK '
+            + 'credit pot instead. May exhaust credits faster than usual.',
+        });
+        session.state = 'dead';
+        this.sessions.delete(id);
+        this.emit('session:died', session);
+        throw new UnexpectedError(
+          `Pool session ${id} failed empty-prompt canary: ${canaryResult.message}`,
+          ANTHROPIC_INTERACTIVE_POOL_ID,
+        );
+      }
+      if (canaryResult?.status === 'self-healed') {
+        // Self-heal succeeded — log locally, no user-facing alert per
+        // Rule 3.2 ("success path is quietly correct").
+        console.log(`[interactive-pool] canary self-healed: ${canaryResult.message}`);
+      }
     }
 
     session.state = 'ready';
