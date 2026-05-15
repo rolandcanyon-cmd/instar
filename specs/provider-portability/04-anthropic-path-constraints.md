@@ -72,25 +72,17 @@ Justin runs five Max 20x subscriptions specifically to keep Instar's compute ins
 
 ---
 
-## Routing default (downstream of these rules)
+## Routing default (locked 2026-05-15 by Justin)
 
 The cost-aware routing policy in Phase 5 defaults to:
 
-1. **Subscription path (REPL pool) is the floor.** Always available, always works (subject to Max session limits). Used when the SDK credit pot is exhausted, when an option needs guarantees the SDK path can't honor, or when explicit policy says so.
-2. **SDK credit path (`claude -p`) is the prepaid accelerator.** Preferred when credits are available, because it's prepaid as part of your subscription cost. When credits drain, fall back to subscription path automatically.
+1. **SDK credit path (`claude -p`) is preferred when credits are available.** Drain the prepaid $200/month pot first — you've already paid for it as part of the subscription, so wasting it is a real loss. Routine inference work goes here by default.
+2. **Subscription path (REPL pool) is the fundamental floor.** Always available, always works (subject to Max session limits). Activates automatically when SDK credits exhaust, when an option needs guarantees the SDK path can't honor, or when the safety-margin policy diverts work preemptively. Rule 1 guarantees every code path can run on this floor; the routing default is just an optimization on top.
 3. **Raw API is never default.** Not in routing, not in fallback, not in emergency.
 
-A safety margin (default 10% of monthly credit) keeps headroom in the SDK pot for high-priority work even after routine work has consumed most of it. When the pot drops below the margin, the router preemptively switches new work to the subscription path.
+A safety margin (default 10% of monthly credit) keeps headroom in the SDK pot for high-priority work even after routine work has consumed most of it. When the pot drops below the margin, the router preemptively switches NEW work to the subscription path; in-flight SDK calls finish on their original path.
 
----
-
-## Open question (2026-05-15)
-
-Justin's framing in the originating message was: "all OTHER paths must go through the Claude Agent SDK credits, NOT the direct API." This rules raw API out, but it leaves ambiguous whether the default ordering is "drain SDK first, fall back to subscription" (my earlier proposal) or "prefer subscription, use SDK as accelerator when it has clear capacity" (the inverse).
-
-Both are consistent with the two rules. The former gets more total work done per dollar of credit (you've already paid for the $200 either way; might as well use it). The latter inverts the default to match the "subscription is mandatory" framing more literally — SDK as a paid-for bonus rather than the primary path. Tied to whether you think of the $200 pot as "credits I should use up because I paid for them" or "an emergency accelerator I should preserve."
-
-Waiting on Justin's call before locking the routing default. The decision shows up in `RoutingPolicy` defaults and in the cost-aware policy implementation in Phase 5.
+The framing matters: SDK credits are the prepaid accelerator (use them while they last); the subscription path is the bedrock (always there, always sufficient, slower but unbounded). Inverting that — preserving SDK credits and defaulting to subscription — would leave $200/month of prepaid budget unused every month. That's wasteful, not safe.
 
 ---
 
