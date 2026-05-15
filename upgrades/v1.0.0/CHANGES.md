@@ -137,6 +137,24 @@ The 12 reviewer subclasses still take an unused `apiKey` parameter through their
 
 ---
 
+### 2026-05-15 — Substrate correctness fixes (audit Tier 1)
+
+Four real correctness bugs found by the pre-Phase-4 audit are fixed. Each had unit-test coverage added; the existing real-API smoke and parity tests continue to pass.
+
+- **Idle-marker false-positive on response content** (`promptRunner.ts`). The completion detector previously called `buf.includes(marker)` against the whole pane buffer using static UI strings (`"? for shortcuts"`, etc.) as markers. Those strings are in the status bar at all times — they don't distinguish generating from idle, so stability was carrying the whole signal and a brief mid-generation stall could fire completion. Worse, a response that legitimately contained a marker substring (e.g., a model asked to talk about Claude keyboard shortcuts) would also match, returning partial output as success — worst-class silent data corruption. Replaced with a structural detector: walk the buffer from the bottom up, find the most recent `❯` line, return true only if it's empty. The empty `❯` is Claude Code's UI "your turn again" cue and only appears after a response completes. 8 unit tests cover the false-positive case directly, including the audit-cited example.
+- **Pool decays silently on spawn failure** (`pool.ts`). When a session was retired and the replacement spawn failed (claude binary moved, OAuth expired, ENOMEM, weekly limit hit), the previous behavior was `.catch(console.error)` — error logged, dropped. The pool decayed invisibly. Replaced with an observable retry mechanism: emits `pool:degraded` on failure with attempt number, schedules exponential-backoff retries up to MAX_REPLACEMENT_ATTEMPTS = 5, emits `pool:healed` on recovery or `pool:degraded_persistent` after final exhaustion. All pending retry timers cleared on shutdown. Routing policy in Phase 5 can observe pool health and fall back to the SDK-credit path when the pool is degraded. 3 unit tests cover happy retry, exhaustion, and shutdown safety.
+- **Failed prompts return poisoned sessions** (`transport/oneShotCompletion.ts`). When `runPrompt` threw (timeout/abort/exec failure), the surrounding `finally` released the session back to ready. The underlying REPL could be wedged with a partial prompt in the input buffer or still streaming a response from a failed send-keys — the next allocate would hand out a poisoned session that returned residual pane content as if it were the new response. Worst-class silent data corruption: caller sees success, gets garbage. Fixed with a `healthy` flag set true only after `runPrompt` returns. On true → `pool.release(session)`; on false → `pool.retire(session)` (which now also benefits from the retry-with-backoff path from the previous fix). 3 unit tests cover release-on-success, retire-on-throw, and retire-on-abort.
+- **Capability-declaration honesty** (`markers.ts`, both adapter `capabilities.ts` + `index.ts`, `parity/scenarios/capabilityOverlap.ts`). The parity check `sharedCapabilitiesInstantiate` previously treated any non-null primitive as success, so an adapter could claim a capability via `capabilities.ts` while wiring a throwing stub in `index.ts` and the test would silently pass. Introduced `STUB_MARKER` Symbol attached to all stub-factory output and `isStubPrimitive(impl)` helper. Updated the parity check to detect three cases on each shared capability: both-real (proper check), both-stub (acceptable), or mixed (FAIL with adapter-name detail). Then trimmed both adapters' capability declarations to honest sets: pool removes ~17 stub-only declarations, headless removes 6. The registry's `candidates(cap)` now returns the honest set of adapters that can actually serve a capability — Phase 5 routing policy can rely on it without probing for stubs. 6 unit tests cover the marker system; 7/7 parity scenarios pass against real API.
+
+### Verification
+
+- `npx tsc --noEmit` clean across the full src/providers/ tree after each fix.
+- 20 new unit tests across 4 files; all pass.
+- Real-API smoke test re-runs cleanly after each adapter fix.
+- Real-API parity (7 scenarios): all pass, including arithmetic and abort-signal scenarios — behavior equivalence between 3a and 3b unaffected by the substrate hardening.
+
+---
+
 ## What's next
 
 Per `specs/provider-portability/README.md` the remaining phase sequence is:
