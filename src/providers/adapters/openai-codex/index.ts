@@ -1,0 +1,139 @@
+/**
+ * openai-codex adapter — entry point.
+ *
+ * First non-Anthropic adapter. Mirrors the anthropic-headless adapter
+ * shape but uses Codex CLI's surface (`codex exec`, JSONL events, app-
+ * server, `.codex/`, `~/.codex/`). Per the deep-dive, 35 of 36 universal
+ * primitives map cleanly; the asymmetric ones (PreCompactHook,
+ * SubagentLifecycleHooks, PublicUsageApi, NativeIdleBound) are NOT
+ * declared in capabilities.ts so the registry honestly reports them as
+ * unavailable on this adapter. StructuredApprovalEvents IS declared
+ * because the Codex app-server emits structured approval requests.
+ *
+ * Usage:
+ *
+ *   import { createOpenAiCodexAdapter } from
+ *     './providers/adapters/openai-codex/index.js';
+ *   import { registry } from './providers/registry.js';
+ *
+ *   await registry.register(createOpenAiCodexAdapter({ ... }));
+ */
+
+import type { CapabilityFlag } from '../../capabilities.js';
+import type { ProviderAdapter } from '../../registry.js';
+import { UnsupportedCapabilityError } from '../../errors.js';
+import { openAiCodexCapabilities } from './capabilities.js';
+import { OPENAI_CODEX_ID } from './errors.js';
+import { configFromEnv, type OpenAiCodexConfig } from './config.js';
+
+import { createOneShotCompletion } from './transport/oneShotCompletion.js';
+import { createStructuredOneShot } from './transport/structuredOneShot.js';
+import { createAgenticSessionHeadless } from './transport/agenticSessionHeadless.js';
+
+import { createToolAccess } from './capability/toolAccess.js';
+import { createToolAllowlist } from './capability/toolAllowlist.js';
+import { createFileSystemAccess } from './capability/fileSystemAccess.js';
+import { createPathAllowlist } from './capability/pathAllowlist.js';
+import { createBashExecution } from './capability/bashExecution.js';
+import { createWebAccess } from './capability/webAccess.js';
+
+import { createLiveOutputStream } from './observability/liveOutputStream.js';
+import { createConversationLogReader } from './observability/conversationLogReader.js';
+import { createConversationLogTailer } from './observability/conversationLogTailer.js';
+import { createHookEventReceiver } from './observability/hookEventReceiver.js';
+import { createSubagentLifecycleObserver } from './observability/subagentLifecycleObserver.js';
+import { createSessionId } from './observability/sessionId.js';
+import { createUsageMeterProvider } from './observability/usageMeterProvider.js';
+import { createProcessLifecycle } from './observability/processLifecycle.js';
+import { createInteractivePromptObserver } from './observability/interactivePromptObserver.js';
+
+import { createInputInjection } from './control/inputInjection.js';
+import { createHardKill } from './control/hardKill.js';
+import { createInterrupt } from './control/interrupt.js';
+import { createStopGateInterceptor } from './control/stopGateInterceptor.js';
+import { createTimeoutBound } from './control/timeoutBound.js';
+import { createIdleBound } from './control/idleBound.js';
+import { createAuthCredentialInjection } from './control/authCredentialInjection.js';
+import { createCredentialStorageProvider } from './control/credentialStorageProvider.js';
+import { createContextScopeControl } from './control/contextScopeControl.js';
+import { createCompactionLifecycle } from './control/compactionLifecycle.js';
+
+import { createProviderScaffolder } from './integration/providerScaffolder.js';
+import { createMcpToolRegistry } from './integration/mcpToolRegistry.js';
+import { createSessionResumeIndex } from './integration/sessionResumeIndex.js';
+import { createConversationLogProviderImpl } from './integration/conversationLogProvider.js';
+
+import { CapabilityFlag as Cap } from '../../capabilities.js';
+
+/**
+ * Create the openai-codex adapter with the given config (or environment
+ * defaults if omitted).
+ */
+export function createOpenAiCodexAdapter(
+  partialConfig: Partial<OpenAiCodexConfig> = {},
+): ProviderAdapter {
+  const config: OpenAiCodexConfig = {
+    ...configFromEnv(),
+    ...partialConfig,
+  };
+
+  const impls = new Map<CapabilityFlag, unknown>();
+
+  // Transport
+  impls.set(Cap.OneShotCompletion, createOneShotCompletion(config));
+  impls.set(Cap.StructuredOneShot, createStructuredOneShot(config));
+  impls.set(Cap.AgenticSessionHeadless, createAgenticSessionHeadless(config));
+
+  // Capability
+  impls.set(Cap.ToolAccess, createToolAccess());
+  impls.set(Cap.ToolAllowlist, createToolAllowlist());
+  impls.set(Cap.FileSystemAccess, createFileSystemAccess());
+  impls.set(Cap.PathAllowlist, createPathAllowlist());
+  impls.set(Cap.BashExecution, createBashExecution());
+  impls.set(Cap.WebAccess, createWebAccess());
+
+  // Observability
+  impls.set(Cap.LiveOutputStream, createLiveOutputStream(config));
+  impls.set(Cap.ConversationLogReader, createConversationLogReader(config));
+  impls.set(Cap.ConversationLogTailer, createConversationLogTailer(config));
+  impls.set(Cap.HookEventReceiver, createHookEventReceiver());
+  impls.set(Cap.SubagentLifecycleObserver, createSubagentLifecycleObserver());
+  impls.set(Cap.SessionId, createSessionId());
+  impls.set(Cap.UsageMeterProvider, createUsageMeterProvider());
+  impls.set(Cap.ProcessLifecycle, createProcessLifecycle(config));
+  impls.set(Cap.InteractivePromptObserver, createInteractivePromptObserver(config));
+
+  // Control
+  impls.set(Cap.InputInjection, createInputInjection(config));
+  impls.set(Cap.HardKill, createHardKill(config));
+  impls.set(Cap.Interrupt, createInterrupt(config));
+  impls.set(Cap.StopGateInterceptor, createStopGateInterceptor());
+  impls.set(Cap.TimeoutBound, createTimeoutBound());
+  impls.set(Cap.IdleBound, createIdleBound());
+  impls.set(Cap.AuthCredentialInjection, createAuthCredentialInjection());
+  impls.set(Cap.CredentialStorageProvider, createCredentialStorageProvider());
+  impls.set(Cap.ContextScopeControl, createContextScopeControl());
+  impls.set(Cap.CompactionLifecycle, createCompactionLifecycle());
+
+  // Integration
+  impls.set(Cap.ProviderScaffolder, createProviderScaffolder());
+  impls.set(Cap.McpToolRegistry, createMcpToolRegistry());
+  impls.set(Cap.SessionResumeIndex, createSessionResumeIndex(config));
+  impls.set(Cap.ConversationLogProvider, createConversationLogProviderImpl(config));
+
+  return {
+    id: OPENAI_CODEX_ID,
+    capabilities: openAiCodexCapabilities,
+    primitive(capability: CapabilityFlag): unknown {
+      const impl = impls.get(capability);
+      if (impl === undefined) {
+        throw new UnsupportedCapabilityError(capability, OPENAI_CODEX_ID);
+      }
+      return impl;
+    },
+  };
+}
+
+export type { OpenAiCodexConfig } from './config.js';
+export { configFromEnv } from './config.js';
+export { OPENAI_CODEX_ID } from './errors.js';

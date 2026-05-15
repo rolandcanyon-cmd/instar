@@ -1,0 +1,50 @@
+/**
+ * ToolAccess implementation for the openai-codex adapter.
+ *
+ * Codex built-in tool kinds (per the deep-dive 02-codex-deep-dive.md):
+ *   - file read / write / edit (sandboxed by sandbox_mode)
+ *   - bash via command/exec (sandboxed) or process/spawn (unsandboxed)
+ *   - web search / fetch (cached)
+ *   - MCP tool surface
+ *   - image generation (via OpenAI API)
+ *   - code execution
+ *   - subagent spawning
+ */
+
+import type {
+  ToolAccess,
+  ToolKind,
+  RegisteredTool,
+} from '../../../primitives/capability/toolAccess.js';
+import { CapabilityFlag } from '../../../capabilities.js';
+
+const KINDS: ReadonlySet<ToolKind> = new Set<ToolKind>([
+  'file-read',
+  'file-write',
+  'file-edit',
+  'bash',
+  'web-fetch',
+  'web-search',
+  'mcp',
+  'subagent-spawn',
+  'task-delegation',
+  'image-generation',
+  'code-execution',
+]);
+
+const TOOLS: ReadonlyArray<RegisteredTool> = [
+  { name: 'bash', kind: 'bash', enabledByDefault: true, requiresApproval: true },
+  { name: 'apply_patch', kind: 'file-edit', enabledByDefault: true, requiresApproval: true },
+  { name: 'web_search', kind: 'web-search', enabledByDefault: true, requiresApproval: false },
+  { name: 'image_gen', kind: 'image-generation', enabledByDefault: false, requiresApproval: true },
+];
+
+class OpenAiCodexToolAccess implements ToolAccess {
+  readonly capability = CapabilityFlag.ToolAccess;
+  supportedToolKinds(): ReadonlySet<ToolKind> { return KINDS; }
+  registeredTools(): ReadonlyArray<RegisteredTool> { return TOOLS; }
+}
+
+export function createToolAccess(): ToolAccess {
+  return new OpenAiCodexToolAccess();
+}
