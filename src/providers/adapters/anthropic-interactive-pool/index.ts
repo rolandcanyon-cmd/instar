@@ -46,7 +46,6 @@ import { createLiveOutputStream } from './observability/liveOutputStream.js';
 import { createProcessLifecycle } from './observability/processLifecycle.js';
 import { createSessionId } from './observability/sessionId.js';
 
-import { createStubPrimitive } from './stubs.js';
 import { CapabilityFlag as Cap } from '../../capabilities.js';
 
 /**
@@ -110,38 +109,23 @@ export function createAnthropicInteractivePoolAdapter(
     retire: inbox.retire.bind(inbox),
   };
 
+  // Each entry in `impls` matches a real capability declared in
+  // capabilities.ts. The pool no longer wires throwing stubs for
+  // primitives it doesn't actually implement — those primitives are
+  // simply not declared, so the registry resolves them on the headless
+  // adapter instead.
   const impls = new Map<CapabilityFlag, unknown>();
 
   // Transport
   impls.set(Cap.OneShotCompletion, wrappedOneShot);
-  impls.set(Cap.StructuredOneShot, createStubPrimitive(Cap.StructuredOneShot));
-  impls.set(Cap.AgenticSessionHeadless, createStubPrimitive(Cap.AgenticSessionHeadless));
-  impls.set(Cap.AgenticSessionInteractive, createStubPrimitive(Cap.AgenticSessionInteractive));
   impls.set(Cap.WarmSessionInbox, wrappedInbox);
-  impls.set(Cap.AgenticSessionRpc, createStubPrimitive(Cap.AgenticSessionRpc));
 
-  // Capability layer — all stubbed (same as 3a's posture for non-active
-  // consumer primitives; spec primitives are present so the registry can
-  // route, real impls land when a consumer arrives).
-  impls.set(Cap.ToolAccess, createStubPrimitive(Cap.ToolAccess));
-  impls.set(Cap.ToolAllowlist, createStubPrimitive(Cap.ToolAllowlist));
-  impls.set(Cap.FileSystemAccess, createStubPrimitive(Cap.FileSystemAccess));
-  impls.set(Cap.PathAllowlist, createStubPrimitive(Cap.PathAllowlist));
-  impls.set(Cap.BashExecution, createStubPrimitive(Cap.BashExecution));
-  impls.set(Cap.WebAccess, createStubPrimitive(Cap.WebAccess));
-
-  // Observability — three real implementations land in Phase 3b.
+  // Observability — pool-session-state primitives only.
   impls.set(Cap.LiveOutputStream, createLiveOutputStream(config));
   impls.set(Cap.ProcessLifecycle, createProcessLifecycle(config));
   impls.set(Cap.SessionId, createSessionId(pool));
-  impls.set(Cap.ConversationLogReader, createStubPrimitive(Cap.ConversationLogReader));
-  impls.set(Cap.ConversationLogTailer, createStubPrimitive(Cap.ConversationLogTailer));
-  impls.set(Cap.HookEventReceiver, createStubPrimitive(Cap.HookEventReceiver));
-  impls.set(Cap.SubagentLifecycleObserver, createStubPrimitive(Cap.SubagentLifecycleObserver));
-  impls.set(Cap.UsageMeterProvider, createStubPrimitive(Cap.UsageMeterProvider));
-  impls.set(Cap.InteractivePromptObserver, createStubPrimitive(Cap.InteractivePromptObserver));
 
-  // Control
+  // Control — session-management primitives needed by the pool.
   impls.set(Cap.InputInjection, createInputInjection(config));
   impls.set(Cap.HardKill, createHardKill(pool));
   impls.set(Cap.Interrupt, createInterrupt(config));
@@ -149,16 +133,8 @@ export function createAnthropicInteractivePoolAdapter(
   impls.set(Cap.TimeoutBound, createTimeoutBound());
   impls.set(Cap.IdleBound, createIdleBound());
   impls.set(Cap.AuthCredentialInjection, createAuthCredentialInjection());
-  impls.set(Cap.CredentialStorageProvider, createStubPrimitive(Cap.CredentialStorageProvider));
   impls.set(Cap.ContextScopeControl, createContextScopeControl());
   impls.set(Cap.CompactionLifecycle, createCompactionLifecycle());
-  impls.set(Cap.IntelligenceCallQueue, createStubPrimitive(Cap.IntelligenceCallQueue));
-
-  // Integration — stubbed pending consumer arrival
-  impls.set(Cap.ProviderScaffolder, createStubPrimitive(Cap.ProviderScaffolder));
-  impls.set(Cap.McpToolRegistry, createStubPrimitive(Cap.McpToolRegistry));
-  impls.set(Cap.SessionResumeIndex, createStubPrimitive(Cap.SessionResumeIndex));
-  impls.set(Cap.ConversationLogProvider, createStubPrimitive(Cap.ConversationLogProvider));
 
   return {
     id: ANTHROPIC_INTERACTIVE_POOL_ID,

@@ -1,44 +1,41 @@
 /**
  * Capability declaration for the anthropic-interactive-pool adapter.
  *
- * Optimized for the warm-pool pattern: WarmSessionInbox is the primary
- * primitive. OneShotCompletion routes through the pool too (allocate,
- * run, release). AgenticSessionHeadless is stubbed because long-running
- * autonomous sessions don't fit the pool model — those should use
- * anthropic-headless.
+ * Declares ONLY the capabilities the pool actually implements — no
+ * stub-only entries. The previous version claimed the full universal
+ * capability surface even for primitives that were wired to throwing
+ * stubs; the Phase 3c parity harness now catches that as a "declared
+ * but mixed real/stub" lie and fails the suite. The honest fix is to
+ * stop claiming what we don't implement, which is what this file does.
+ *
+ * Primary role: warm REPL pool driven by prompt injection. Owns
+ * WarmSessionInbox and a pool-routed OneShotCompletion. Owns the
+ * session-control primitives the pool needs to manage its REPLs
+ * (HardKill / Interrupt / InputInjection / etc.). Owns
+ * LiveOutputStream / ProcessLifecycle / SessionId for pool-session
+ * observability.
+ *
+ * Anything NOT in this list — long-running autonomous sessions
+ * (AgenticSessionHeadless), capability-layer primitives, asymmetric
+ * observability that reads provider state files (ConversationLogReader,
+ * HookEventReceiver, UsageMeterProvider, etc.), integration primitives
+ * — routes to anthropic-headless via the registry. The pool adapter
+ * does not claim them, so it isn't a candidate.
  */
 
 import { CapabilityFlag, capabilitySet } from '../../capabilities.js';
 
 export const anthropicInteractivePoolCapabilities = capabilitySet([
-  // ── TRANSPORT ────────────────────────────────────────────────────────
+  // ── TRANSPORT (real only) ────────────────────────────────────────────
   CapabilityFlag.OneShotCompletion,             // real — via pool
-  CapabilityFlag.StructuredOneShot,             // STUB
-  CapabilityFlag.AgenticSessionHeadless,        // STUB — use anthropic-headless for autonomous work
-  CapabilityFlag.AgenticSessionInteractive,     // STUB — different use case
   CapabilityFlag.WarmSessionInbox,              // PRIMARY — the pool's main contract
-  CapabilityFlag.AgenticSessionRpc,             // STUB
 
-  // ── CAPABILITY ───────────────────────────────────────────────────────
-  CapabilityFlag.ToolAccess,
-  CapabilityFlag.ToolAllowlist,
-  CapabilityFlag.FileSystemAccess,
-  CapabilityFlag.PathAllowlist,
-  CapabilityFlag.BashExecution,
-  CapabilityFlag.WebAccess,
-
-  // ── OBSERVABILITY ────────────────────────────────────────────────────
+  // ── OBSERVABILITY (only pool-session-state primitives) ───────────────
   CapabilityFlag.LiveOutputStream,
-  CapabilityFlag.ConversationLogReader,
-  CapabilityFlag.ConversationLogTailer,
-  CapabilityFlag.HookEventReceiver,
-  CapabilityFlag.SubagentLifecycleObserver,
   CapabilityFlag.SessionId,
-  CapabilityFlag.UsageMeterProvider,
   CapabilityFlag.ProcessLifecycle,
-  CapabilityFlag.InteractivePromptObserver,
 
-  // ── CONTROL ──────────────────────────────────────────────────────────
+  // ── CONTROL (session-management primitives needed by the pool) ───────
   CapabilityFlag.InputInjection,
   CapabilityFlag.HardKill,
   CapabilityFlag.Interrupt,
@@ -46,19 +43,6 @@ export const anthropicInteractivePoolCapabilities = capabilitySet([
   CapabilityFlag.TimeoutBound,
   CapabilityFlag.IdleBound,
   CapabilityFlag.AuthCredentialInjection,
-  CapabilityFlag.CredentialStorageProvider,
   CapabilityFlag.ContextScopeControl,
   CapabilityFlag.CompactionLifecycle,
-  CapabilityFlag.IntelligenceCallQueue,         // STUB
-
-  // ── INTEGRATION ──────────────────────────────────────────────────────
-  CapabilityFlag.ProviderScaffolder,
-  CapabilityFlag.McpToolRegistry,
-  CapabilityFlag.SessionResumeIndex,
-  CapabilityFlag.ConversationLogProvider,
-
-  // ── ASYMMETRIC SUB-CAPABILITIES (same as anthropic-headless) ─────────
-  CapabilityFlag.PublicUsageApi,
-  CapabilityFlag.PreCompactHook,
-  CapabilityFlag.SubagentLifecycleHooks,
 ]);

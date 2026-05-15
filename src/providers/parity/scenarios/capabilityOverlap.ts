@@ -12,6 +12,7 @@
  */
 
 import { CapabilityFlag } from '../../capabilities.js';
+import { isStubPrimitive } from '../../markers.js';
 import type { ParityScenario } from '../runner.js';
 
 /**
@@ -46,14 +47,40 @@ export const sharedCapabilitiesInstantiate: ParityScenario = async ({ left, righ
     return { scenario: '', status: 'fail', reason: 'no capabilities shared between adapters' };
   }
   const failures: string[] = [];
+  let bothReal = 0;
+  let bothStub = 0;
   for (const cap of sharedCaps) {
+    let lp: unknown;
+    let rp: unknown;
     try {
-      const lp = left.primitive(cap);
-      const rp = right.primitive(cap);
-      if (lp == null) failures.push(`left.${String(cap)} returned nullish`);
-      if (rp == null) failures.push(`right.${String(cap)} returned nullish`);
+      lp = left.primitive(cap);
+      rp = right.primitive(cap);
     } catch (err) {
-      failures.push(`${String(cap)} threw: ${(err as Error).message}`);
+      failures.push(`${String(cap)} threw on primitive(): ${(err as Error).message}`);
+      continue;
+    }
+    if (lp == null) {
+      failures.push(`left.${String(cap)} returned nullish`);
+      continue;
+    }
+    if (rp == null) {
+      failures.push(`right.${String(cap)} returned nullish`);
+      continue;
+    }
+    // Bug D: mixed real/stub on a shared capability is a lie — the
+    // adapter that stubbed it is claiming a capability it doesn't
+    // actually implement. Catch this here rather than at first-use.
+    const lIsStub = isStubPrimitive(lp);
+    const rIsStub = isStubPrimitive(rp);
+    if (lIsStub && rIsStub) {
+      bothStub += 1;
+    } else if (lIsStub !== rIsStub) {
+      failures.push(
+        `${String(cap)} declared shared but mixed real/stub: `
+        + `${left.id}=${lIsStub ? 'stub' : 'real'}, ${right.id}=${rIsStub ? 'stub' : 'real'}`,
+      );
+    } else {
+      bothReal += 1;
     }
   }
   if (failures.length > 0) {
@@ -61,13 +88,13 @@ export const sharedCapabilitiesInstantiate: ParityScenario = async ({ left, righ
       scenario: '',
       status: 'fail',
       reason: failures.join('; '),
-      observations: { left: sharedCaps.length, right: sharedCaps.length },
+      observations: { sharedCount: sharedCaps.length, bothReal, bothStub, failures: failures.length },
     };
   }
   return {
     scenario: '',
     status: 'pass',
-    observations: { sharedCount: sharedCaps.length },
+    observations: { sharedCount: sharedCaps.length, bothReal, bothStub },
   };
 };
 

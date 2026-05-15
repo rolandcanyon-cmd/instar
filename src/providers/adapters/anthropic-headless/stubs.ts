@@ -11,29 +11,35 @@
 
 import { UnsupportedCapabilityError } from '../../errors.js';
 import type { CapabilityFlag } from '../../capabilities.js';
+import { STUB_MARKER } from '../../markers.js';
 import { ANTHROPIC_HEADLESS_ID } from './errors.js';
 
 /**
  * Returns a Proxy-style stub for any primitive. Every property access
  * returns a function that throws with the capability name and the
  * specific method that was called.
+ *
+ * Stubs declare themselves via the substrate-level {@link STUB_MARKER}
+ * symbol so the parity test harness can distinguish real implementations
+ * from throwing placeholders. See src/providers/markers.ts.
  */
 export function createStubPrimitive(capability: CapabilityFlag): { capability: typeof capability } {
-  return new Proxy(
-    { capability },
-    {
-      get(target, prop, receiver) {
-        if (prop === 'capability') {
-          return target.capability;
-        }
-        // Return a function that throws when called
-        return (..._args: unknown[]) => {
-          throw new UnsupportedCapabilityError(
-            `${String(capability)}.${String(prop)} (not yet implemented in anthropic-headless adapter)`,
-            ANTHROPIC_HEADLESS_ID,
-          );
-        };
-      },
+  const target = { capability };
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop === 'capability') {
+        return t.capability;
+      }
+      if (prop === STUB_MARKER) {
+        return true;
+      }
+      // Return a function that throws when called
+      return (..._args: unknown[]) => {
+        throw new UnsupportedCapabilityError(
+          `${String(capability)}.${String(prop)} (not yet implemented in anthropic-headless adapter)`,
+          ANTHROPIC_HEADLESS_ID,
+        );
+      };
     },
-  ) as { capability: typeof capability };
+  }) as { capability: typeof capability };
 }

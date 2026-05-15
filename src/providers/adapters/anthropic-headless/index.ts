@@ -55,7 +55,6 @@ import { createPathAllowlist } from './capability/pathAllowlist.js';
 import { createBashExecution } from './capability/bashExecution.js';
 import { createWebAccess } from './capability/webAccess.js';
 
-import { createStubPrimitive } from './stubs.js';
 import { CapabilityFlag as Cap } from '../../capabilities.js';
 
 /**
@@ -74,13 +73,10 @@ export function createAnthropicHeadlessAdapter(
   // capability flag for the `primitive()` lookup.
   const impls = new Map<CapabilityFlag, unknown>();
 
-  // Transport
+  // Transport — real only. Stubbed primitives are not wired here and not
+  // declared in capabilities.ts; the registry routes them elsewhere.
   impls.set(Cap.OneShotCompletion, createOneShotCompletion(config));
-  impls.set(Cap.StructuredOneShot, createStubPrimitive(Cap.StructuredOneShot));
   impls.set(Cap.AgenticSessionHeadless, createAgenticSessionHeadless(config));
-  impls.set(Cap.AgenticSessionInteractive, createStubPrimitive(Cap.AgenticSessionInteractive));
-  impls.set(Cap.WarmSessionInbox, createStubPrimitive(Cap.WarmSessionInbox));
-  impls.set(Cap.AgenticSessionRpc, createStubPrimitive(Cap.AgenticSessionRpc));
 
   // Capability
   impls.set(Cap.ToolAccess, createToolAccess());
@@ -99,7 +95,7 @@ export function createAnthropicHeadlessAdapter(
   impls.set(Cap.SessionId, createSessionId());
   impls.set(Cap.UsageMeterProvider, createUsageMeterProvider(config));
   impls.set(Cap.ProcessLifecycle, createProcessLifecycle(config));
-  impls.set(Cap.InteractivePromptObserver, createStubPrimitive(Cap.InteractivePromptObserver));
+  // InteractivePromptObserver stubbed in Phase 3a — not wired.
 
   // Control
   impls.set(Cap.InputInjection, createInputInjection(config));
@@ -112,7 +108,7 @@ export function createAnthropicHeadlessAdapter(
   impls.set(Cap.CredentialStorageProvider, createCredentialStorageProvider());
   impls.set(Cap.ContextScopeControl, createContextScopeControl());
   impls.set(Cap.CompactionLifecycle, createCompactionLifecycle());
-  impls.set(Cap.IntelligenceCallQueue, createStubPrimitive(Cap.IntelligenceCallQueue));
+  // IntelligenceCallQueue stubbed (lives in app layer) — not wired.
 
   // Integration
   impls.set(Cap.ProviderScaffolder, createProviderScaffolder());

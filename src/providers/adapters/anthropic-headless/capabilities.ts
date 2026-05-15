@@ -18,13 +18,16 @@ import { CapabilityFlag, capabilitySet } from '../../capabilities.js';
  * used by the adapter export.
  */
 export const anthropicHeadlessCapabilities = capabilitySet([
-  // ── TRANSPORT (3 real, 3 stub) ───────────────────────────────────────
-  CapabilityFlag.OneShotCompletion,             // real
-  CapabilityFlag.StructuredOneShot,             // STUB
-  CapabilityFlag.AgenticSessionHeadless,        // real
-  CapabilityFlag.AgenticSessionInteractive,     // STUB (use anthropic-interactive-pool for human-attached)
-  CapabilityFlag.WarmSessionInbox,              // STUB (Phase 3b adapter implements this)
-  CapabilityFlag.AgenticSessionRpc,             // STUB (no native RPC on Anthropic)
+  // ── TRANSPORT (real only — stubs are not declared) ───────────────────
+  // The adapter previously declared StructuredOneShot, AgenticSessionInteractive,
+  // WarmSessionInbox, AgenticSessionRpc as stubs to keep the registry able
+  // to "find" them. The parity harness now treats declared-but-stubbed as
+  // a capability-declaration lie. The honest fix: declare only what's
+  // actually implemented. Unimplemented primitives are NOT declared, so
+  // the registry's `candidates(cap)` correctly returns no candidates for
+  // anything stubbed — which is the truth.
+  CapabilityFlag.OneShotCompletion,
+  CapabilityFlag.AgenticSessionHeadless,
 
   // ── CAPABILITY (all real but most are buildSpec-only) ────────────────
   CapabilityFlag.ToolAccess,
@@ -43,7 +46,7 @@ export const anthropicHeadlessCapabilities = capabilitySet([
   CapabilityFlag.SessionId,                     // real
   CapabilityFlag.UsageMeterProvider,            // real (OAuth API)
   CapabilityFlag.ProcessLifecycle,              // real (tmux/process)
-  CapabilityFlag.InteractivePromptObserver,     // real (TUI scrape — STUB for Phase 3a; Phase 3b shares)
+  // InteractivePromptObserver is stubbed in Phase 3a — not declared.
 
   // ── CONTROL (real for active consumers) ──────────────────────────────
   CapabilityFlag.InputInjection,                // real (tmux send-keys)
@@ -56,7 +59,7 @@ export const anthropicHeadlessCapabilities = capabilitySet([
   CapabilityFlag.CredentialStorageProvider,     // real (Keychain + ~/.claude)
   CapabilityFlag.ContextScopeControl,           // real (--setting-sources)
   CapabilityFlag.CompactionLifecycle,           // real (PreCompact hook + marker)
-  CapabilityFlag.IntelligenceCallQueue,         // STUB (queue is provider-agnostic; lives in app layer)
+  // IntelligenceCallQueue is stubbed (queue is provider-agnostic; lives in app layer) — not declared.
 
   // ── INTEGRATION (real) ───────────────────────────────────────────────
   CapabilityFlag.ProviderScaffolder,            // real (.agent/anthropic/ scaffolding)
