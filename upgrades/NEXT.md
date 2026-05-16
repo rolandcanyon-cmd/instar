@@ -32,6 +32,8 @@ Tier 0 release blocker fixed: stripped a hardcoded developer-specific path (`/Us
 
 Tier 1.B (multi-provider credentials) landed: new `ProviderCredentialKind` + `ProviderCredential` types, new `SessionManagerConfig.credentials: { [providerId]: ... }` field with legacy `anthropicApiKey` / `anthropicBaseUrl` automatically migrated at load time. New helpers `getProviderCredential(config, providerId)` and `buildProviderEnvFlags(providerId, cred)` give code paths a clean way to ask "do I have a credential for X" and "what env vars do I inject when spawning a subprocess for provider X." SessionManager spawn paths are unchanged in this slice — they still read the legacy field; migration to the helper is a follow-up. 14 tests cover migration, kind detection, baseUrl propagation, lookup fallback, and env-flag building for anthropic/openai/google + unknown-provider safe-no-op.
 
+Tier 1.C (Codex intelligence provider) landed: new `CodexCliIntelligenceProvider` sibling of `ClaudeCliIntelligenceProvider`. Routes evaluate() calls through `codex exec` with tier→model mapping reused from the Codex adapter. Plus a `buildIntelligenceProvider({ framework })` factory that picks the right implementation at startup, and a `frameworkFromEnv()` parser for the new `INSTAR_FRAMEWORK` env var (accepts `claude-code` / `claude` / `codex-cli` / `codex` case-insensitive). Until now `ClaudeCliIntelligenceProvider` was the ONLY implementation, so every reviewer/sentinel/canary ran `claude -p` exclusively — "supports Codex" was a promise we couldn't keep. 10 tests cover framework selection, binary detection fallback, env-var parsing.
+
 ## What to Tell Your User
 
 <!-- Write talking points the agent should relay to their user. -->
