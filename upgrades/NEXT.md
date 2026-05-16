@@ -18,6 +18,8 @@ The anthropic-interactive-pool adapter now accepts an optional `llmFallback` in 
 
 Phase 5c shipped: `CostAwareRoutingPolicy` and `CostStateTracker` in `src/providers/costAwareRouting.ts`. The policy implements the path-constraints "Routing default" (drain SDK credit pot while above the 10% safety margin, switch to subscription floor when at or below). The tracker emits `CostStateSnapshot` objects with a `isMaterialShift` helper Phase 5b consumes to decide when to re-ask the user. Pure additive infrastructure — not yet wired into the runtime; that wiring lands with Phase 5b implementation. 23 unit tests cover every row of the decision matrix and every material-shift category.
 
+Phase 5b.1 shipped: `PreferenceStore` (sqlite-backed cache of framework+model picks keyed by user × task pattern) and `TriggerGate` (pure-function decision logic implementing Phase 5b's three-trigger rule with priority ordering). Both live under `src/providers/uxConfirm/`. The remaining Phase 5b components — TaskClassifier, TelegramConfirmer, OverrideDetector, and the FrameworkModelRouter composition root — land in subsequent slices.
+
 ## What to Tell Your User
 
 <!-- Write talking points the agent should relay to their user. -->
