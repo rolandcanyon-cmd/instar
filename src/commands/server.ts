@@ -2035,9 +2035,24 @@ export async function startServer(options: StartOptions): Promise<void> {
       ));
     }
 
+    // Provider-portability v1.0.0: pick the IntelligenceProvider that
+    // matches the configured framework. Defaults to claude-code for
+    // backwards-compat; INSTAR_FRAMEWORK=codex-cli routes through Codex.
     try {
-      sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
-      intelligenceSource = 'Claude CLI subscription';
+      const { buildIntelligenceProvider, frameworkFromEnv } = await import('../core/intelligenceProviderFactory.js');
+      const framework = frameworkFromEnv() ?? 'claude-code';
+      const built = buildIntelligenceProvider({
+        framework,
+        binaryPath: framework === 'claude-code' ? config.sessions.claudePath : undefined,
+      });
+      if (built) {
+        sharedIntelligence = built;
+        intelligenceSource = framework === 'codex-cli' ? 'Codex CLI' : 'Claude CLI subscription';
+      } else {
+        // Fall back to the legacy Claude path for backwards-compat.
+        sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        intelligenceSource = 'Claude CLI subscription (fallback)';
+      }
     } catch { /* CLI not available */ }
 
     _sharedIntelligence = sharedIntelligence ?? null;
