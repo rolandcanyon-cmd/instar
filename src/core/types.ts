@@ -5,6 +5,38 @@
  * Everything flows from these — sessions, jobs, users, messaging.
  */
 
+// ── Provider Credentials ────────────────────────────────────────────
+
+/**
+ * The kind of credential a provider accepts. Influences which env var
+ * the SessionManager injects when spawning a subprocess.
+ *
+ *   - `oauth-token`: subscription path (Anthropic CLAUDE_CODE_OAUTH_TOKEN,
+ *     OpenAI sub OAuth, Google ADC).
+ *   - `api-key`: pay-per-call path (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
+ */
+export type ProviderCredentialKind = 'oauth-token' | 'api-key';
+
+/**
+ * A credential for a single provider. Carries enough information for
+ * SessionManager to inject the correct env vars at spawn time.
+ *
+ * Provider-portability v1.0.0: replaces the single `anthropicApiKey`
+ * field on SessionManagerConfig. Keys in the parent `credentials` map
+ * are provider ids (e.g. 'anthropic', 'openai', 'google').
+ */
+export interface ProviderCredential {
+  /** Which auth mode this credential represents. */
+  kind: ProviderCredentialKind;
+  /** The credential string (token or API key). */
+  value: string;
+  /**
+   * Optional API base URL override. Used by translation-proxy installs
+   * (e.g. ANTHROPIC_BASE_URL pointed at a local proxy) and OSS deployments.
+   */
+  baseUrl?: string;
+}
+
 // ── Session Management ──────────────────────────────────────────────
 
 export interface Session {
@@ -53,9 +85,28 @@ export interface SessionManagerConfig {
   authToken?: string;
   /** Server port — used to construct INSTAR_SERVER_URL for HTTP hooks */
   port?: number;
-  /** Anthropic API key for spawned sessions (e.g., 'x' for meridian proxy) */
+  /**
+   * Per-provider credentials. Keys are provider ids
+   * (e.g. 'anthropic', 'openai', 'google'). Values declare the
+   * credential kind and value, plus an optional base-URL override
+   * (used for translation-proxy / OSS routing).
+   *
+   * Replaces the v0.x single-provider `anthropicApiKey` field. When
+   * `credentials` is unset, the legacy fields are read at load time
+   * and migrated into `credentials.anthropic` for backwards-compat.
+   */
+  credentials?: Record<string, ProviderCredential>;
+  /**
+   * @deprecated v1.0.0 — use `credentials.anthropic` instead.
+   * Anthropic API key for spawned sessions (e.g., 'x' for meridian proxy).
+   * Still readable for backwards-compat; new code should consult
+   * `credentials` via `getProviderCredential()`.
+   */
   anthropicApiKey?: string;
-  /** Anthropic base URL for spawned sessions (e.g., 'http://127.0.0.1:3456' for meridian) */
+  /**
+   * @deprecated v1.0.0 — use `credentials.anthropic.baseUrl` instead.
+   * Anthropic base URL for spawned sessions.
+   */
   anthropicBaseUrl?: string;
   /** Minutes of idle-at-prompt before a non-protected session is killed (default: 15) */
   idlePromptKillMinutes?: number;

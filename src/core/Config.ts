@@ -211,6 +211,155 @@ export function detectCodexPath(): string | null {
   return detectFrameworkBinary('codex');
 }
 
+// ── Provider Credentials ───────────────────────────────────────────────
+
+/**
+ * Build the credentials map from raw config file contents.
+ *
+ * Provider-portability v1.0.0: migrates the legacy single-provider
+ * fields (`sessions.anthropicApiKey`, `sessions.anthropicBaseUrl`) into
+ * the new multi-provider `credentials` map. If both are present, the
+ * explicit `credentials.anthropic` wins.
+ *
+ * Returns a copy — never mutates the input.
+ */
+function buildCredentialsMap(
+  sessionsConfig: Record<string, unknown> | undefined,
+): Record<string, import('./types.js').ProviderCredential> | undefined {
+  if (!sessionsConfig) return undefined;
+
+  const existingMap = sessionsConfig['credentials'] as
+    | Record<string, import('./types.js').ProviderCredential>
+    | undefined;
+  const credentials: Record<string, import('./types.js').ProviderCredential> = {
+    ...(existingMap ?? {}),
+  };
+
+  // Legacy field migration: only fill in if not explicitly set.
+  if (!credentials['anthropic']) {
+    const legacyKey = sessionsConfig['anthropicApiKey'] as string | undefined;
+    const legacyBaseUrl = sessionsConfig['anthropicBaseUrl'] as string | undefined;
+    if (legacyKey || legacyBaseUrl) {
+      // OAuth tokens start with `sk-ant-oat`; everything else is an API key.
+      const kind: import('./types.js').ProviderCredentialKind =
+        legacyKey && legacyKey.startsWith('sk-ant-oat') ? 'oauth-token' : 'api-key';
+      credentials['anthropic'] = {
+        kind,
+        value: legacyKey ?? '',
+        ...(legacyBaseUrl ? { baseUrl: legacyBaseUrl } : {}),
+      };
+    }
+  }
+
+  return Object.keys(credentials).length > 0 ? credentials : undefined;
+}
+
+/**
+ * Look up a provider's credential. Returns null when none is configured.
+ *
+ * Use this in any code path that previously read `config.anthropicApiKey`
+ * — the helper consults the new `credentials` map first and falls back
+ * to the legacy field for 'anthropic' so existing installs continue to
+ * work without migration.
+ *
+ * @example
+ *   const cred = getProviderCredential(config, 'anthropic');
+ *   if (cred?.kind === 'oauth-token') { ... }
+ */
+export function getProviderCredential(
+  config: import('./types.js').SessionManagerConfig,
+  providerId: string,
+): import('./types.js').ProviderCredential | null {
+  const fromMap = config.credentials?.[providerId];
+  if (fromMap) return fromMap;
+
+  // Backwards-compat for the only previously-supported provider.
+  if (providerId === 'anthropic' && config.anthropicApiKey !== undefined) {
+    const value = config.anthropicApiKey;
+    const kind: import('./types.js').ProviderCredentialKind = value.startsWith('sk-ant-oat')
+      ? 'oauth-token'
+      : 'api-key';
+    return {
+      kind,
+      value,
+      ...(config.anthropicBaseUrl ? { baseUrl: config.anthropicBaseUrl } : {}),
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Build env vars to inject into a spawned subprocess for the given
+ * provider credential. Provider-aware: maps the credential to the env
+ * var the framework's CLI expects.
+ *
+ * For Anthropic:
+ *   - oauth-token → CLAUDE_CODE_OAUTH_TOKEN set, ANTHROPIC_API_KEY cleared
+ *   - api-key     → ANTHROPIC_API_KEY set, CLAUDE_CODE_OAUTH_TOKEN cleared
+ *   - baseUrl     → ANTHROPIC_BASE_URL set
+ *
+ * For OpenAI/Codex:
+ *   - api-key     → OPENAI_API_KEY set
+ *   - oauth-token → (no env var — Codex CLI reads its own auth.json)
+ *
+ * For Google/Gemini:
+ *   - api-key     → GOOGLE_API_KEY set
+ *
+ * Returns a flat list of [`-e`, `KEY=value`, ...] suitable for tmux
+ * `new-session -e KEY=VAL`. Empty if the credential is missing/unknown.
+ */
+export function buildProviderEnvFlags(
+  providerId: string,
+  credential: import('./types.js').ProviderCredential,
+): ReadonlyArray<string> {
+  const flags: string[] = [];
+  const push = (key: string, value: string): void => {
+    flags.push('-e', `${key}=${value}`);
+  };
+
+  switch (providerId) {
+    case 'anthropic':
+      if (credential.kind === 'oauth-token') {
+        push('CLAUDE_CODE_OAUTH_TOKEN', credential.value);
+        push('ANTHROPIC_API_KEY', '');
+      } else {
+        push('ANTHROPIC_API_KEY', credential.value);
+        push('CLAUDE_CODE_OAUTH_TOKEN', '');
+      }
+      if (credential.baseUrl) {
+        push('ANTHROPIC_BASE_URL', credential.baseUrl);
+      }
+      break;
+
+    case 'openai':
+      // Codex CLI reads ~/.codex/auth.json for OAuth, OPENAI_API_KEY for api-key.
+      if (credential.kind === 'api-key') {
+        push('OPENAI_API_KEY', credential.value);
+      }
+      if (credential.baseUrl) {
+        push('OPENAI_BASE_URL', credential.baseUrl);
+      }
+      break;
+
+    case 'google':
+      if (credential.kind === 'api-key') {
+        push('GOOGLE_API_KEY', credential.value);
+      }
+      if (credential.baseUrl) {
+        push('GEMINI_BASE_URL', credential.baseUrl);
+      }
+      break;
+
+    default:
+      // Unknown provider — return empty. Adapters can implement their
+      // own env-mapping when they register; this default is safe.
+      break;
+  }
+
+  return flags;
+}
+
 export function detectProjectDir(startDir?: string): string {
   let dir = startDir || process.cwd();
 
@@ -335,6 +484,7 @@ export function loadConfig(projectDir?: string): InstarConfig {
     port: (fileConfig.port as number | undefined) ?? 4040,
     anthropicApiKey: fileConfig.sessions?.anthropicApiKey as string | undefined,
     anthropicBaseUrl: fileConfig.sessions?.anthropicBaseUrl as string | undefined,
+    credentials: buildCredentialsMap(fileConfig.sessions as Record<string, unknown> | undefined),
   };
 
   const scheduler: JobSchedulerConfig = {

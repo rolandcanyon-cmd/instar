@@ -30,6 +30,8 @@ Phase 5b.5.a shipped: `StaticCatalogProvider` — hand-curated CatalogProvider i
 
 Tier 0 release blocker fixed: stripped a hardcoded developer-specific path (`/Users/justin/.asdf/installs/nodejs/22.18.0/bin/codex`) from the Codex adapter default config. Replaced with a new framework-agnostic `detectFrameworkBinary(name)` helper that searches install locations, npm-global, nvm-managed, and PATH for any of eight known framework binaries (claude, codex, gemini, aider, goose, cursor-cli, opencode, plandex). Includes a source-level regression test that fails if any future commit re-introduces the asdf hardcode.
 
+Tier 1.B (multi-provider credentials) landed: new `ProviderCredentialKind` + `ProviderCredential` types, new `SessionManagerConfig.credentials: { [providerId]: ... }` field with legacy `anthropicApiKey` / `anthropicBaseUrl` automatically migrated at load time. New helpers `getProviderCredential(config, providerId)` and `buildProviderEnvFlags(providerId, cred)` give code paths a clean way to ask "do I have a credential for X" and "what env vars do I inject when spawning a subprocess for provider X." SessionManager spawn paths are unchanged in this slice — they still read the legacy field; migration to the helper is a follow-up. 14 tests cover migration, kind detection, baseUrl propagation, lookup fallback, and env-flag building for anthropic/openai/google + unknown-provider safe-no-op.
+
 ## What to Tell Your User
 
 <!-- Write talking points the agent should relay to their user. -->
