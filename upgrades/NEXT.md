@@ -24,6 +24,8 @@ Phase 5b.2 shipped: `TaskClassifier` and `OverrideDetector` — both fast-tier I
 
 Phase 5b.3 shipped: `TelegramConfirmer` — the blocking suggest-and-confirm round-trip. Sends the structured prompt via a thin `ConfirmationTransport` interface (testable without real Telegram), blocks on next reply with timeout, parses replies through four deterministic shorthand paths (`ok|c|👍|no|once|/route reset`) before falling through to the LLM-backed `OverrideDetector` for free-text. Returns a discriminated `ConfirmationResult` (`confirmed | overridden | reset | default-no-reply`). 30 new tests; cumulative uxConfirm coverage now 86 tests.
 
+Phase 5b.4 shipped: `FrameworkModelRouter` — the composition root that ties every Phase 5b component into the full flow. Returns a structured `RouteResult` with eight distinct `source` values covering every outcome (cached-silent, confirmed, confirmed-one-shot, overridden-this-task, overridden-this-pattern, reset-defaulted, auto-defaulted-no-topic, auto-defaulted-no-reply, auto-defaulted-unclassified). Cache writes are scoped strictly to user-confirmed paths. The `CatalogProvider` interface abstracts over Phase 5a artifacts so the router doesn't read markdown directly. 13 router tests; cumulative uxConfirm coverage 99 tests.
+
 ## What to Tell Your User
 
 <!-- Write talking points the agent should relay to their user. -->
