@@ -145,7 +145,9 @@ export class InteractivePool extends EventEmitter {
     }
     try {
       const { runEmptyPromptCanary } = await import('./canary/emptyPromptCanary.js');
-      const result = await runEmptyPromptCanary(this, session, this.config);
+      const result = await runEmptyPromptCanary(this, session, this.config, {
+        llmFallback: this.config.llmFallback,
+      });
       if (result.status === 'fail') {
         const { DegradationReporter } = await import('../../../monitoring/DegradationReporter.js');
         DegradationReporter.getInstance().report({
@@ -260,7 +262,9 @@ export class InteractivePool extends EventEmitter {
       let canaryResult: import('./canary/emptyPromptCanary.js').CanaryResult | null = null;
       try {
         const { runEmptyPromptCanary } = await import('./canary/emptyPromptCanary.js');
-        canaryResult = await runEmptyPromptCanary(this, session, this.config);
+        canaryResult = await runEmptyPromptCanary(this, session, this.config, {
+          llmFallback: this.config.llmFallback,
+        });
         this.canaryHasRunInCurrentLifetime = true;
       } catch (canaryErr) {
         // Canary infrastructure (import / promise chain) crashed — distinct
@@ -318,6 +322,11 @@ export class InteractivePool extends EventEmitter {
   }
 
   async capturePane(tmuxName: string, lines: number): Promise<string | null> {
+    // RULE 3: EXEMPT — raw byte capture, no state parsing. The bytes are
+    // returned verbatim to callers (promptRunner, canary, sentinels) which
+    // are the authorities that interpret them. The state-detection logic
+    // lives in those callers (covered by the empty-prompt canary and the
+    // poolDecayCanary). This function is a transport-layer signal source.
     try {
       const { stdout } = await execFileAsync(
         this.config.tmuxPath,

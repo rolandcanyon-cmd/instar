@@ -2,6 +2,8 @@
  * Configuration shape for the anthropic-interactive-pool adapter.
  */
 
+import type { CanaryLlmFallback } from './canary/emptyPromptCanary.js';
+
 export interface InteractivePoolConfig {
   /** Absolute path to the `claude` CLI binary. */
   claudePath: string;
@@ -43,6 +45,15 @@ export interface InteractivePoolConfig {
    * constraints.
    */
   canaryIntervalMs: number;
+  /**
+   * Optional LLM fallback for the empty-prompt canary. When deterministic
+   * re-derivation fails (structure shifted enough that the canary can't
+   * extract a new signature), the canary calls this function with the
+   * captured pane to ask a small model whether Claude Code is idle.
+   * Wire via `buildCanaryLlmFallback(intelligence)` from this adapter's
+   * index. Omitting it leaves the canary deterministic-only.
+   */
+  llmFallback?: CanaryLlmFallback;
 }
 
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): InteractivePoolConfig {

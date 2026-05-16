@@ -14,6 +14,8 @@ CoherenceGate now requires an IntelligenceProvider. When none is wired, the resp
 
 Internal-only API change: external code that constructs CoherenceGate directly must drop `apiKey` from the options bag and supply `intelligence`.
 
+The anthropic-interactive-pool adapter now accepts an optional `llmFallback` in its config. The empty-prompt canary (Rule 3 detector for the pool's idle signal) had a tested LLM-fallback contract but no application-layer wiring — that's now plumbed end-to-end. Adapter clients can opt in by passing `buildCanaryLlmFallback(intelligence)`; omitting it preserves deterministic-only behavior.
+
 ## What to Tell Your User
 
 <!-- Write talking points the agent should relay to their user. -->

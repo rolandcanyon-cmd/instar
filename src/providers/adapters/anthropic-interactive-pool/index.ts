@@ -160,3 +160,54 @@ export function createAnthropicInteractivePoolAdapter(
 export type { InteractivePoolConfig } from './config.js';
 export { configFromEnv } from './config.js';
 export { ANTHROPIC_INTERACTIVE_POOL_ID } from './errors.js';
+
+/**
+ * Build a CanaryLlmFallback that delegates to an IntelligenceProvider.
+ *
+ * The pool's recurring empty-prompt canary calls the fallback only when
+ * its deterministic re-derivation has already failed — so this is a
+ * rare, last-line-of-defense path. The prompt is intentionally narrow
+ * ("does this terminal capture show Claude Code at a completed prompt?")
+ * and routes through the fast tier (Haiku-class).
+ *
+ * Wire at the application layer:
+ *
+ *   const adapter = createAnthropicInteractivePoolAdapter({
+ *     ...,
+ *     llmFallback: buildCanaryLlmFallback(intelligence),
+ *   });
+ *
+ * Omitting the fallback leaves the canary deterministic-only — a failed
+ * re-derivation will surface as a hard failure rather than a soft
+ * llm-confirmed pass.
+ */
+export function buildCanaryLlmFallback(
+  intelligence: import('../../../core/types.js').IntelligenceProvider,
+): import('./canary/emptyPromptCanary.js').CanaryLlmFallback {
+  return async (capturedPane, context) => {
+    const prompt =
+      'You are inspecting a terminal capture of a Claude Code session.\n\n'
+      + 'Question: does the bottom of this capture indicate Claude Code is at a '
+      + 'completed prompt and ready for the next user input? Answer with the single '
+      + 'word "complete" or "not-complete" — nothing else.\n\n'
+      + `Canary prompt that was sent (for context): ${JSON.stringify(context.canaryPrompt)}\n`
+      + `Expected response pattern: ${context.canaryExpected.source}\n\n`
+      + 'Terminal capture (bottom 30 lines):\n'
+      + '<<<CAPTURE>>>\n'
+      + capturedPane.split('\n').slice(-30).join('\n')
+      + '\n<<<CAPTURE>>>';
+    try {
+      const raw = await intelligence.evaluate(prompt, {
+        model: 'fast',
+        maxTokens: 16,
+        temperature: 0,
+      });
+      const verdict = raw.trim().toLowerCase();
+      if (verdict.startsWith('complete')) return 'complete';
+      if (verdict.startsWith('not-complete') || verdict.startsWith('not complete')) return 'not-complete';
+      return 'error';
+    } catch {
+      return 'error';
+    }
+  };
+}
