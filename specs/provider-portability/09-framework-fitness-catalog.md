@@ -218,6 +218,42 @@ Same confidence markers as `08-model-fitness-catalog.md`: HIGH / MEDIUM / LOW (s
 
 ## Patterns, not frameworks
 
+### Translation-proxy pattern (Claude Code + Anthropic-API-compatible proxy)
+
+**What it is.** A local proxy that impersonates `api.anthropic.com`. The Claude Code CLI binary runs unchanged; its `ANTHROPIC_BASE_URL` env var is pointed at the proxy (typically `http://localhost:8082`). The proxy translates each Anthropic Messages API request to the wire shape of a different provider — DeepSeek, Kimi, OpenRouter, NVIDIA NIM, Wafer, LM Studio, llama.cpp, Ollama, OpenCode Zen, or Z.ai — dispatches it, and translates the response back to Anthropic shape. Claude Code never knows the model behind the curtain isn't Anthropic.
+
+**Working implementation.** [`Alishahryar1/free-claude-code`](https://github.com/Alishahryar1/free-claude-code) is the canonical reference — 24.8k stars, 3.7k forks, MIT license, actively maintained (commits every 1-3 days as of 2026-05-15). Ten backends supported. Per-tier routing: `MODEL_OPUS`, `MODEL_SONNET`, `MODEL_HAIKU` can each map to a different backend. Local admin UI at `/admin` for runtime configuration.
+
+**Why this matters architecturally.** The framework/model separation this catalog encodes turns out to be the industry-proven pattern. 24k+ developers run Claude Code-the-framework with DeepSeek/Kimi/Qwen/local-models behind it via this proxy. **The separation we drew on paper has a working implementation in the field.** That's the strongest external validation our portability work has received.
+
+**What survives the proxy (Claude Code client-side):** hooks, MCP tool registry, plan mode, ultra-review subcommand, file-editing tools, tmux integration, slash commands, scaffolding, session-resume. All of these run in the client; the backend doesn't touch them.
+
+**What does NOT survive (Anthropic server-side):**
+- Opus 4.7 max-effort levels (extra-high / max) — these are server-side compute scheduling unique to Anthropic.
+- Anthropic prompt caching.
+- Anthropic-specific reasoning-token budgeting (`thinking_budget`).
+- Anthropic's specific tool-use schema interpretation quirks — the backend model has to handle Claude's tool-use shape gracefully. DeepSeek V4 reportedly does so well; not all do.
+
+**Three independent paths surfaced.** Under the path constraints (`04-anthropic-path-constraints.md`), Instar treats subscription, SDK credit, and translation-proxy as three SEPARATE routes:
+
+- **Subscription** and **SDK credit** are Anthropic-traffic — bound by Rules 1+2.
+- **Translation-proxy** is non-Anthropic traffic — exempt from Rules 1+2 because no Anthropic API call is made. It's a Rule-exempt third route.
+
+**Instar compatibility — fully compatible, not built-in.** Locked 2026-05-15 by Justin:
+- Instar's substrate must NOT break when a user configures `ANTHROPIC_BASE_URL` to point at a proxy. Same as how Instar treats real Claude Code today, the proxy variant is a valid framework+model pairing the routing layer (Phase 5b) can suggest.
+- Instar does NOT ship, recommend, or default to the proxy. Anthropic ToS implications are the user's to evaluate. The "Free Claude Code" naming of the canonical implementation tells you the author considers it cost-avoidance — that framing is on the user, not on Instar.
+
+**When to use this routing.**
+- Subscription + SDK credit both exhausted and Rule 2 would otherwise force a stop. Instead of stopping or violating Rule 2, route Claude Code traffic to a non-Anthropic backend via proxy.
+- User explicitly wants a non-Anthropic model behind Claude Code's UX — e.g., DeepSeek V4 for its 1M context, or local Ollama for air-gapped work.
+- Provider-cost flexibility: per-tier routing means Haiku-class work goes to free local models while Opus-class still goes to Claude (or DeepSeek V4-Pro if the user opted into that for cost).
+
+**Research source.** Repository inspection and `tn7zXRv3Xmo` YouTube transcript (Jack Roberts, 2026-05; 8k word transcript stored under `research/transcripts/`).
+
+**Confidence overall.** HIGH on existence + technical mechanism (direct repo inspection); MEDIUM on quality with each backend (varies); LOW on long-running reliability (no Instar empirical yet).
+
+---
+
 ### Karpathy's nanochat / Open Brain pattern
 
 Not a framework you adopt directly — a PATTERN to evaluate other frameworks against. The durable agentic primitive: `edit→run→measure→keep/revert` `[xnG8h3UnNFI, dxq7WtWxi44 confidence:LOW]`. Empirical wins cited: Skypilot 910 experiments under $300; Tobi Lutke 19% gain; 700 experiments overnight with 11% speedup.

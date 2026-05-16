@@ -39,6 +39,15 @@ We assess models on these axes. The selection layer maps incoming task descripti
 - `instruction-following` — precise compliance with prompt requirements
 - `tone-and-judgment` — empathy, hedging, assertiveness calibration
 
+## Cross-cutting attributes (apply to every model)
+
+In addition to per-task fitness, every model also carries these orthogonal attributes that affect routability:
+
+- `tool-use-schema-compat` — how well the model handles Anthropic's tool-use schema, OpenAI's function-call schema, and other major schemas. **Specifically matters for the translation-proxy routing pattern** (see `09-framework-fitness-catalog.md` Translation-proxy pattern): when Claude Code is pointed at a non-Anthropic backend via proxy, the backend has to handle Claude's tool-use shape gracefully. Models that translate cleanly are MORE PROXY-ROUTABLE than those that don't. Per Jack Roberts (YT `tn7zXRv3Xmo`), DeepSeek V4 has notably strong native tool-calling — one of the things that makes it the canonical proxy backend.
+- `provider-reliability` — measured availability over a 90-day window (separate from per-call latency).
+- `context-window` — max tokens; affects which routing rules apply.
+- `parameter-control` — what knobs (temperature, top_p, top_k, thinking_budget) the provider exposes.
+
 ---
 
 ## Anthropic models
@@ -216,6 +225,11 @@ The Chinese open-source frontier (DeepSeek, Qwen, Kimi) shipped major releases i
 - 1M context is the largest in our catalog — strong for repository-scale code work.
 - NIST published a CAISI evaluation `[NIST 2026-05 confidence:HIGH]` — first government-grade benchmark of a Chinese open-source frontier model. Result not summarized in my searches; worth fetching for the full picture before any production routing rule depends on V4.
 
+**Cross-cutting attributes.**
+- `tool-use-schema-compat`: STRONG with Anthropic schema — Jack Roberts (`tn7zXRv3Xmo`) called this out specifically as what made DeepSeek V4 viable as a Claude Code proxy backend. Canonical "translation-proxy" pairing per `09-framework-fitness-catalog.md`. `confidence:MEDIUM`.
+- `context-window`: 1M (catalog leader).
+- `provider-reliability`: not directly profiled; DeepSeek API operational maturity is meaningfully below the Western frontier per ecosystem reports.
+
 **Confidence overall.** MEDIUM.
 
 ---
@@ -243,6 +257,11 @@ The Chinese open-source frontier (DeepSeek, Qwen, Kimi) shipped major releases i
 - Terminal-Bench 2.0 at 59.3 on the 27B variant "matches Claude 4.5 Opus exactly" — the stat driving the most community excitement `[buildfastwithai confidence:MEDIUM]`.
 - Available natively in Ollama under the `qwen3` namespace `[ollama.com/library/qwen3 confidence:HIGH]`.
 
+**Cross-cutting attributes.**
+- `tool-use-schema-compat`: PROVISIONAL — Qwen has native function-calling support but its compatibility with Anthropic's specific tool-use schema (relevant for translation-proxy routing) isn't profiled in our research yet. Phase 5d benchmark should probe.
+- `context-window`: 1M (Qwen3.6-Plus tier), 260K (Max-Preview), 256K (typical).
+- `parameter-control`: Standard OpenAI-style params (temperature, top_p) supported.
+
 **Confidence overall.** MEDIUM. Numbers are from Alibaba's own benchmark publishing — cross-verify before load-bearing routing.
 
 ---
@@ -269,6 +288,11 @@ The Chinese open-source frontier (DeepSeek, Qwen, Kimi) shipped major releases i
 - "Open-source just beat GPT-5.5 at coding" framing from multiple analyses `[buildfastwithai title confidence:MEDIUM]` — read as marketing-tinged but with real benchmark backing.
 - Leads on 5 of 8 major agentic and coding benchmarks while remaining the only open-weight model in the comparison `[Verdent confidence:MEDIUM]`.
 - INT4 native quantization makes self-hosting on consumer GPU clusters meaningfully more accessible than its 1T parameter count suggests.
+
+**Cross-cutting attributes.**
+- `tool-use-schema-compat`: STRONG — Kimi K2.6 is one of the named backends in the free-claude-code proxy (`09-framework-fitness-catalog.md` Translation-proxy pattern) and is available via NVIDIA NIM as `nvidia_nim/moonshotai/kimi-k2.5`. Industry use as a proxy backend implies acceptable Anthropic-tool-use compatibility, but we have no direct fitness number — `confidence:LOW`.
+- `context-window`: 262K.
+- `parameter-control`: Standard.
 
 **Confidence overall.** MEDIUM.
 

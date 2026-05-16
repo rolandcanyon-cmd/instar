@@ -86,6 +86,27 @@ The framing matters: SDK credits are the prepaid accelerator (use them while the
 
 ---
 
+## Scope clarification — what "Anthropic traffic" means (locked 2026-05-15)
+
+**Both rules govern Anthropic-API-bound traffic specifically, NOT "any model call from anywhere in the stack."**
+
+This distinction matters because of a third architectural path that surfaced during the Phase 5a research: the **translation-proxy pattern**, where the Claude Code CLI runs unchanged but its `ANTHROPIC_BASE_URL` is pointed at a local proxy that translates the Anthropic Messages API shape to a different provider's API and dispatches the request there. The most prominent implementation is [`Alishahryar1/free-claude-code`](https://github.com/Alishahryar1/free-claude-code) (24.8k stars, MIT, 10 backends). Documented in `09-framework-fitness-catalog.md` under the Translation-proxy pattern section.
+
+Under the proxy pattern, traffic that LOOKS like Anthropic-bound from Claude Code's perspective is actually dispatched to DeepSeek's API, Kimi's API, OpenRouter, Ollama, etc. **No Anthropic API call is made.** Rules 1 and 2 do not apply to that path — it is neither subscription-driven nor direct-Anthropic. It's a Rule-1/2-exempt third route.
+
+The three Anthropic-stack paths Instar treats distinctly:
+
+| Path | Subject to Rule 1 (subscription floor)? | Subject to Rule 2 (no direct API)? | Notes |
+|---|---|---|---|
+| **Subscription path** (REPL pool, `claude` interactive) | YES — IS the floor | n/a — not the API path | Mandatory bedrock. Always available. |
+| **SDK credit path** (`claude -p` headless) | YES — every primitive must also work on the subscription path | YES — this IS the routable Anthropic API path; constrained to Agent SDK credit only | Prepaid accelerator. Drain first when available. |
+| **Direct Anthropic API** (raw Messages API) | n/a | YES — explicitly forbidden | Banned. Not a routable destination. |
+| **Translation-proxy** (Claude Code CLI → non-Anthropic backend via `ANTHROPIC_BASE_URL` override) | n/a — not Anthropic traffic | n/a — not Anthropic traffic | Rule-exempt third route. Instar must be FULLY COMPATIBLE with this routing (treat it like any other framework+model pairing) but does NOT bake the proxy into its core path. The proxy is user-installed and any ToS implications are the user's choice. |
+
+**Compatibility, not endorsement.** Instar's design must accommodate users who configure `ANTHROPIC_BASE_URL` to point at a proxy — the substrate should not break, error, or treat that configuration as invalid. The catalog's framework selection layer (Phase 5b) treats "Claude Code + proxy" as a valid framework+model pairing that users may pick. But Instar itself does not ship, recommend, or default to the proxy.
+
+---
+
 ## How this document is enforced
 
 - **At design time:** every new substrate primitive's review checks both rules. If the interactive pool can't serve it, it's either capability-flagged or rejected.
