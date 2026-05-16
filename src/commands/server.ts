@@ -306,13 +306,21 @@ let _fixDeps: FixCommandDeps | null = null;
 // Set once in startServer() and used by spawnSessionForTopic/respawnSessionForTopic.
 let _topicResumeMap: import('../core/TopicResumeMap.js').TopicResumeMap | null = null;
 /** Per-topic framework override (claude-code | codex-cli). Populated from
- *  `config.topicFrameworks` at server boot; consulted by spawnSessionForTopic
- *  and respawnSessionForTopic when threading framework into spawnInteractiveSession. */
+ *  `config.topicFrameworks` at server boot. Boot-immutable; runtime
+ *  mutations go through `_topicFrameworksStore` instead so they persist
+ *  across restarts and don't race with operator-edited config.json. */
 let _topicFrameworks: Record<string, 'claude-code' | 'codex-cli'> = {};
+/** Runtime-mutable, atomically-persisted per-topic framework store.
+ *  Initialized in startServer(); consulted by resolveTopicFramework on every spawn. */
+let _topicFrameworksStore: import('../core/TopicFrameworksStore.js').TopicFrameworksStore | null = null;
 /** Default framework for sessions when no per-topic override is set. */
 let _defaultFramework: 'claude-code' | 'codex-cli' = 'claude-code';
 
 function resolveTopicFramework(topicId: number | undefined): 'claude-code' | 'codex-cli' {
+  if (topicId !== undefined && _topicFrameworksStore) {
+    const stored = _topicFrameworksStore.get(topicId);
+    if (stored === 'claude-code' || stored === 'codex-cli') return stored;
+  }
   if (topicId !== undefined && _topicFrameworks[String(topicId)]) {
     return _topicFrameworks[String(topicId)]!;
   }
@@ -870,6 +878,49 @@ function wireTelegramCallbacks(
       console.error(`[telegram] Login failed:`, err);
       await telegram.sendToTopic(replyTopicId, 'Login didn\'t complete successfully. Try again, or if this keeps happening, the authentication service may be down.');
     }
+  };
+
+  // /route — get or set the framework for this topic. Persists via
+  // TopicFrameworksStore (atomic write) and triggers a respawn so the
+  // new framework binding takes effect on the next session for this topic.
+  telegram.onRouteCommand = async (topicId: number, framework: string | null): Promise<{ ok: boolean; message: string }> => {
+    if (framework === null) {
+      // Status query — read current resolved framework
+      const current = resolveTopicFramework(topicId);
+      return { ok: true, message: `This topic is using "${current}". Run /route claude-code or /route codex-cli to switch.` };
+    }
+
+    const valid = ['claude-code', 'codex-cli'];
+    if (!valid.includes(framework)) {
+      return { ok: false, message: `Unknown framework "${framework}". Supported: ${valid.join(', ')}.` };
+    }
+
+    if (!_topicFrameworksStore) {
+      return { ok: false, message: 'Routing store not initialized — server boot was incomplete. Restart the server.' };
+    }
+
+    const prev = resolveTopicFramework(topicId);
+    if (prev === framework) {
+      return { ok: true, message: `This topic is already on "${framework}". Nothing to change.` };
+    }
+
+    _topicFrameworksStore.set(topicId, framework as 'claude-code' | 'codex-cli');
+
+    // Trigger a respawn so the new framework takes effect immediately.
+    // Re-use the existing respawn path which builds context from TopicMemory.
+    const existingSession = telegram.getSessionForTopic(topicId);
+    if (existingSession) {
+      try {
+        await respawnSessionForTopic(
+          sessionManager, telegram, existingSession, topicId, undefined,
+          topicMemory, undefined, undefined, { silent: true },
+        );
+      } catch (err) {
+        return { ok: false, message: `Persisted "${framework}", but respawn failed: ${err instanceof Error ? err.message : String(err)}. The new framework will take effect on the next session for this topic.` };
+      }
+    }
+
+    return { ok: true, message: `Routed this topic to "${framework}". ${existingSession ? 'Session respawned.' : 'Will take effect when a session starts for this topic.'}` };
   };
 }
 
@@ -2057,8 +2108,19 @@ export async function startServer(options: StartOptions): Promise<void> {
       const { buildIntelligenceProvider, frameworkFromEnv } = await import('../core/intelligenceProviderFactory.js');
       const framework = frameworkFromEnv() ?? 'claude-code';
       resolvedFramework = framework;
-      _defaultFramework = framework;
+      _defaultFramework = framework as 'claude-code' | 'codex-cli';
       _topicFrameworks = (config as { topicFrameworks?: Record<string, 'claude-code' | 'codex-cli'> }).topicFrameworks ?? {};
+      // Initialize the runtime-mutable persistent store (overrides win over
+      // config defaults; both layers feed resolveTopicFramework).
+      try {
+        const { TopicFrameworksStore } = await import('../core/TopicFrameworksStore.js');
+        _topicFrameworksStore = new TopicFrameworksStore({
+          stateFilePath: path.join(config.stateDir, 'state', 'topic-frameworks.json'),
+          configDefaults: _topicFrameworks,
+        });
+      } catch (err) {
+        console.warn(`[server] TopicFrameworksStore failed to initialize: ${err}`);
+      }
       const built = buildIntelligenceProvider({
         framework,
         binaryPath: framework === 'claude-code' ? config.sessions.claudePath : undefined,

@@ -331,6 +331,17 @@ export class TelegramAdapter implements MessagingAdapter {
   public onIsSessionAlive: ((tmuxSession: string) => boolean) | null = null;
   public onIsSessionActive: ((tmuxSession: string) => Promise<boolean>) | null = null;
 
+  /**
+   * Route-command handler. Called when a user posts `/route <framework>`
+   * in a topic. The handler is responsible for persisting the new
+   * framework binding and triggering a respawn of the topic's session.
+   * Returns a short status string for the adapter to echo back to the
+   * topic, or null on failure.
+   */
+  public onRouteCommand: (
+    (topicId: number, framework: string | null) => Promise<{ ok: boolean; message: string }>
+  ) | null = null;
+
   // Message log callback — fires on every message logged (inbound and outbound).
   // Used by TopicMemory to dual-write to SQLite for search and summarization.
   // Includes sender identity fields (Phase 1C/1D — User-Agent Topology Spec).
@@ -2461,6 +2472,28 @@ export class TelegramAdapter implements MessagingAdapter {
         await this.sendToTopic(topicId, filterUnclaimed ? 'No unclaimed sessions.' : 'No sessions.').catch(() => {});
       } else {
         await this.sendToTopic(topicId, lines.join('\n')).catch(() => {});
+      }
+      return true;
+    }
+
+    // /route — get or set the framework adapter for this topic.
+    // Usage:
+    //   /route             → show current adapter
+    //   /route status      → same as /route
+    //   /route claude-code → switch this topic to Claude Code
+    //   /route codex-cli   → switch this topic to Codex
+    if (cmd === '/route' || cmd.startsWith('/route ')) {
+      if (!this.onRouteCommand) {
+        await this.sendToTopic(topicId, 'Routing not available — server did not wire the /route handler.').catch(() => {});
+        return true;
+      }
+      const arg = cmd === '/route' ? '' : text.trim().slice('/route '.length).trim().toLowerCase();
+      const requested = arg === '' || arg === 'status' ? null : arg;
+      try {
+        const result = await this.onRouteCommand(topicId, requested);
+        await this.sendToTopic(topicId, result.message).catch(() => {});
+      } catch (err) {
+        await this.sendToTopic(topicId, `Routing failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
       }
       return true;
     }
