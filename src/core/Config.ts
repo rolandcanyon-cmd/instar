@@ -587,6 +587,10 @@ export function loadConfig(projectDir?: string): InstarConfig {
     // can route a session to any framework without re-running detection.
     frameworkBinaryPaths: {
       ...(claudePathDetected ? { 'claude-code': claudePathDetected } : {}),
+      // claude-code-agent-sdk uses the same Claude binary as claude-code;
+      // the variant differs in the credential pathway (API key vs OAuth),
+      // not the binary.
+      ...(claudePathDetected ? { 'claude-code-agent-sdk': claudePathDetected } : {}),
       ...(codexPathDetected ? { 'codex-cli': codexPathDetected } : {}),
     },
     projectDir: resolvedProjectDir,
