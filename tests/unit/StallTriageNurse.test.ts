@@ -318,33 +318,26 @@ describe('StallTriageNurse', () => {
       expect(result.diagnosis).not.toBeNull();
     });
 
-    it('falls back to direct API when no IntelligenceProvider', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          content: [{ type: 'text', text: NUDGE_DIAGNOSIS_JSON }],
-        }),
+    it('without an IntelligenceProvider, the LLM layer surfaces an error and the heuristic fallback runs', async () => {
+      // Per Rule 2 (specs/provider-portability/04-anthropic-path-constraints.md),
+      // the direct-Anthropic-API fallback was removed. The previous version of this
+      // test asserted that a missing intelligence provider caused a `fetch` to
+      // api.anthropic.com — that's no longer the contract. The current contract:
+      // when intelligence is absent, `diagnose` throws inside the LLM layer and
+      // the layer-3 process-tree / layer-4 heuristic fallback decides the action.
+      const nurse = new StallTriageNurse(deps, {
+        config: { ...TEST_CONFIG },
+        // No intelligence provider
       });
-      vi.stubGlobal('fetch', mockFetch);
 
-      try {
-        const nurse = new StallTriageNurse(deps, {
-          config: { ...TEST_CONFIG, useIntelligenceProvider: false, apiKey: 'test-key' },
-          // No intelligence provider
-        });
+      const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
-        const result = await nurse.triage(1, 'sess', 'hello', Date.now());
-
-        expect(mockFetch).toHaveBeenCalledTimes(1);
-        expect(mockFetch).toHaveBeenCalledWith(
-          'https://api.anthropic.com/v1/messages',
-          expect.objectContaining({ method: 'POST' }),
-        );
-        expect(result.diagnosis?.action).toBe('nudge');
-      } finally {
-        vi.unstubAllGlobals();
-      }
+      // Must not invoke the LLM (we didn't supply one).
+      expect(mockIntelligence.evaluate).not.toHaveBeenCalled();
+      // A diagnosis must still be produced — fallback layer is responsible.
+      expect(result.diagnosis).not.toBeNull();
+      expect(['interrupt', 'restart', 'nudge', 'unstick']).toContain(result.diagnosis!.action);
+      expect(result.diagnosis!.confidence).toBe('low');
     });
 
     it('falls back to nudge on LLM error', async () => {

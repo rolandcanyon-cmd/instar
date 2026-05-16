@@ -1,41 +1,59 @@
 /**
- * OrphanProcessReaper — Detect and clean up orphaned Claude processes.
+ * OrphanProcessReaper — Detect and clean up orphaned agentic-CLI
+ * processes (Claude, Codex, future frameworks).
  *
- * Addresses the critical gap where Claude processes spawned outside
- * SessionManager (setup-wizard, login flow, corrupted state) are invisible
- * to the watchdog and accumulate indefinitely.
+ * Addresses the critical gap where framework CLI processes spawned
+ * outside SessionManager (setup-wizard, login flow, corrupted state)
+ * are invisible to the watchdog and accumulate indefinitely.
  *
  * Classification strategy:
  *   1. "tracked" — In a tmux session managed by SessionManager → leave alone
  *   2. "instar-orphan" — In a tmux session matching project naming but not tracked → auto-clean
- *   3. "external" — Not in a project-prefixed tmux session (user's own Claude, VS Code, etc.) → report only
+ *   3. "external" — Not in a project-prefixed tmux session (user's own framework session, VS Code, etc.) → report only
  *
- * Safety: NEVER auto-kills user Claude sessions outside Instar.
+ * Safety: NEVER auto-kills framework sessions outside Instar.
  * External processes are only reported via Telegram for user decision.
+ *
+ * Provider-portability v1.0.0: was Claude-only. Now scans every
+ * registered framework via `frameworkProcessSignals.ts`.
  */
 
 import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import type { SessionManager } from '../core/SessionManager.js';
 import type { InstarConfig } from '../core/types.js';
+import type { IntelligenceFramework } from '../core/intelligenceProviderFactory.js';
+import {
+  listProcessSignals,
+  matchProcessSignal,
+  type FrameworkProcessSignal,
+} from './frameworkProcessSignals.js';
 
 /** Drop-in replacement for execSync that avoids its security concerns. */
 function shellExec(cmd: string, timeout = 5000): string {
   return spawnSync('/bin/sh', ['-c', cmd], { encoding: 'utf-8', timeout }).stdout ?? '';
 }
 
-export interface ClaudeProcess {
+export interface FrameworkProcess {
   pid: number;
   ppid: number;
   rssKB: number;       // Resident Set Size in KB
   elapsedMs: number;   // How long it's been running
   command: string;      // Full command line
   tmuxSession: string | null;  // Which tmux session it belongs to (if any)
+  /** Which framework this process belongs to (claude-code, codex-cli, ...). */
+  framework: IntelligenceFramework;
 }
+
+/**
+ * @deprecated Use FrameworkProcess. ClaudeProcess remains as a type
+ * alias for backwards-compat with v0.x consumers.
+ */
+export type ClaudeProcess = FrameworkProcess;
 
 export type ProcessClassification = 'tracked' | 'instar-orphan' | 'external';
 
-export interface ClassifiedProcess extends ClaudeProcess {
+export interface ClassifiedProcess extends FrameworkProcess {
   classification: ProcessClassification;
   reason: string;
 }
@@ -128,7 +146,7 @@ export class OrphanProcessReaper extends EventEmitter {
   // ── Core Poll ──────────────────────────────────────────────────────
 
   private async poll(): Promise<ReaperReport> {
-    const claudeProcesses = this.findAllClaudeProcesses();
+    const claudeProcesses = this.findAllFrameworkProcesses();
     const tmuxSessions = this.listAllTmuxSessions();
     const trackedSessions = this.getTrackedSessionNames();
 
@@ -202,7 +220,16 @@ export class OrphanProcessReaper extends EventEmitter {
       const totalExternal = external.length;
       const totalMemMB = Math.round(external.reduce((sum, p) => sum + p.rssKB, 0) / 1024);
       const processWord = totalExternal === 1 ? 'process' : 'processes';
-      const msg = `Found ${totalExternal} Claude ${processWord} running outside your agent (using ${totalMemMB}MB of memory). This is usually from VS Code or a terminal session you have open — no action needed if that's the case.\n\nIf you're not actively using Claude elsewhere, reply "clean processes" to free up the memory.`;
+      // Group by framework so the alert reads naturally regardless of
+      // which CLI tools the user has installed and running.
+      const byFramework = new Map<IntelligenceFramework, number>();
+      for (const p of external) byFramework.set(p.framework, (byFramework.get(p.framework) ?? 0) + 1);
+      const displayNames = new Map<IntelligenceFramework, string>();
+      for (const s of listProcessSignals()) displayNames.set(s.framework, s.displayName);
+      const breakdown = Array.from(byFramework.entries())
+        .map(([f, n]) => `${n} ${displayNames.get(f) ?? f}`)
+        .join(', ');
+      const msg = `Found ${totalExternal} agent-CLI ${processWord} running outside your agent (${breakdown}; using ${totalMemMB}MB of memory). This is usually from VS Code or a terminal session you have open — no action needed if that's the case.\n\nIf you're not actively using these elsewhere, reply "clean processes" to free up the memory.`;
 
       try {
         await alertCallback(msg);
@@ -235,22 +262,33 @@ export class OrphanProcessReaper extends EventEmitter {
   // ── Process Discovery ──────────────────────────────────────────────
 
   /**
-   * Find ALL Claude processes owned by the current user.
-   * Uses `ps` to get PID, PPID, RSS, elapsed time, and command.
+   * Find ALL framework-CLI processes (Claude, Codex, future frameworks)
+   * owned by the current user.
+   *
+   * Builds a single `ps … | egrep …` pipeline with the disjunction of
+   * every signal's psGrepNeedle, then parses each line and tags it with
+   * the matched framework via `matchProcessSignal`. A single ps call
+   * keeps the impact off the runtime hot-path.
    */
-  private findAllClaudeProcesses(): ClaudeProcess[] {
+  private findAllFrameworkProcesses(): FrameworkProcess[] {
+    const signals = listProcessSignals();
+    if (signals.length === 0) return [];
+
     try {
-      // Find all processes named "claude" owned by current user
-      // Use ps with custom format for reliable parsing
       const uid = process.getuid?.() ?? 0;
+      // egrep alternation over every framework's bracket-escaped needle.
+      // The bracket trick keeps grep itself from matching its own argv.
+      const needleAlternation = signals
+        .map(s => s.psGrepNeedle)
+        .join('|');
       const output = shellExec(
-        `ps -u ${uid} -o pid=,ppid=,rss=,etime=,command= 2>/dev/null | grep -i '[c]laude' | grep -v grep`,
+        `ps -u ${uid} -o pid=,ppid=,rss=,etime=,command= 2>/dev/null | egrep -i '${needleAlternation}' | grep -v grep`,
         10_000,
       ).trim();
 
       if (!output) return [];
 
-      const processes: ClaudeProcess[] = [];
+      const processes: FrameworkProcess[] = [];
       for (const line of output.split('\n')) {
         const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+([\d:.-]+)\s+(.+)$/);
         if (!match) continue;
@@ -264,8 +302,12 @@ export class OrphanProcessReaper extends EventEmitter {
         // Skip the instar server process itself
         if (command.includes('instar') && command.includes('server')) continue;
 
-        // Only count actual Claude Code processes (not helpers, MCP servers, etc.)
-        if (!this.isClaudeCodeProcess(command)) continue;
+        // Match against EVERY framework signal — the line passed the
+        // first-stage grep, but might have been from a helper false-
+        // positive (the helper-prefix check inside matchProcessSignal
+        // catches those).
+        const signal = matchProcessSignal(command, signals);
+        if (!signal) continue;
 
         processes.push({
           pid,
@@ -274,6 +316,7 @@ export class OrphanProcessReaper extends EventEmitter {
           elapsedMs: elapsed,
           command: command.slice(0, 300),
           tmuxSession: null, // Will be resolved in classification
+          framework: signal.framework,
         });
       }
 
@@ -284,40 +327,21 @@ export class OrphanProcessReaper extends EventEmitter {
   }
 
   /**
-   * Determine if a command is an actual Claude Code session (not an MCP server, etc.)
-   *
-   * IMPORTANT: Must match the claude BINARY, not substrings in file paths.
-   * A path like `/agents/demiclaude/server` contains "claude" but is NOT a Claude process.
-   * Fix for: cluster-orphanreaper-kills-server-tmux-session-via-false-positive-cl
+   * @deprecated v0.x compat shim — internal callers use the framework-
+   * generic name. Retained so external code that referenced this method
+   * via reflection or tests doesn't break. Will be removed in v2.
+   */
+  private findAllClaudeProcesses(): FrameworkProcess[] {
+    return this.findAllFrameworkProcesses();
+  }
+
+  /**
+   * @deprecated v0.x compat shim — delegates to `matchProcessSignal`
+   * with the Claude-code signal. New code should use the framework-
+   * generic helpers from `frameworkProcessSignals.ts`.
    */
   private isClaudeCodeProcess(command: string): boolean {
-    // Known non-Claude helper processes that may appear in claude-containing paths
-    const helperProcesses = [
-      'cloudflared', 'caffeinate', 'tee', 'tail', 'cat', 'grep',
-    ];
-    // If the command starts with or is primarily a helper process, reject early
-    const cmdTrimmed = command.trimStart();
-    for (const helper of helperProcesses) {
-      if (cmdTrimmed.startsWith(helper)) return false;
-    }
-
-    // Match actual Claude CLI binary — either:
-    //   1. Command starts with "claude " or is exactly "claude"
-    //   2. Path ends with /claude (e.g., /usr/local/bin/claude)
-    //   3. npx/node running @anthropic-ai/claude-code
-    const claudeBinaryPattern = /(^|\/)claude(\s|$)/;
-    const claudeNodePattern = /@anthropic-ai\/claude-code|claude-code\/cli/;
-
-    if (claudeBinaryPattern.test(command) || claudeNodePattern.test(command)) {
-      // Exclude MCP servers, helpers, etc.
-      const exclusions = [
-        'claude-in-chrome', 'claude-mcp', 'playwright-mcp',
-        'mcp-remote', 'exa-mcp', 'payments-mcp',
-      ];
-      return !exclusions.some(e => command.includes(e));
-    }
-
-    return false;
+    return matchProcessSignal(command)?.framework === 'claude-code';
   }
 
   /**
@@ -364,7 +388,7 @@ export class OrphanProcessReaper extends EventEmitter {
    *   - external: Everything else (user sessions, VS Code, etc.)
    */
   private classifyProcesses(
-    processes: ClaudeProcess[],
+    processes: FrameworkProcess[],
     tmuxSessions: Map<number, string>,
     trackedSessions: Set<string>,
   ): ClassifiedProcess[] {
