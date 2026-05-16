@@ -26,6 +26,8 @@ Phase 5b.3 shipped: `TelegramConfirmer` — the blocking suggest-and-confirm rou
 
 Phase 5b.4 shipped: `FrameworkModelRouter` — the composition root that ties every Phase 5b component into the full flow. Returns a structured `RouteResult` with eight distinct `source` values covering every outcome (cached-silent, confirmed, confirmed-one-shot, overridden-this-task, overridden-this-pattern, reset-defaulted, auto-defaulted-no-topic, auto-defaulted-no-reply, auto-defaulted-unclassified). Cache writes are scoped strictly to user-confirmed paths. The `CatalogProvider` interface abstracts over Phase 5a artifacts so the router doesn't read markdown directly. 13 router tests; cumulative uxConfirm coverage 99 tests.
 
+Phase 5b.5.a shipped: `StaticCatalogProvider` — hand-curated CatalogProvider implementation. 20 task-pattern defaults derived from the Phase 5a catalogs (code-generation/refactor/debug → Opus 4.7; web-research → Sonnet 4.6; summarize/draft/shell → Haiku 4.5; etc.) plus per-(framework, model) confidence baselines and a `CATALOG_VERSION` string that drives Phase 5b's re-ask trigger. Hand-curated rather than markdown-parsed: deliberate updates when the catalog moves, not silent drift from regex breakage. 16 new tests; cumulative uxConfirm coverage 115 tests.
+
 ## What to Tell Your User
 
 <!-- Write talking points the agent should relay to their user. -->
