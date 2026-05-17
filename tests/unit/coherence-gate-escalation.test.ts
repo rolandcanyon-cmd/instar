@@ -181,23 +181,22 @@ describe('CoherenceGate — escalation context wiring', () => {
     it('passes escalation context through to reviewers', async () => {
       const { CoherenceGate } = await import('../../src/core/CoherenceGate.js');
 
-      // Mock fetch to capture what's sent to reviewers
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          content: [{ type: 'text', text: JSON.stringify({ pass: true, severity: 'warn', issue: '', suggestion: '' }) }],
-        }),
-        text: async () => JSON.stringify({ pass: true }),
-        headers: new Headers(),
-      } as unknown as Response));
+      // Reviewers route through IntelligenceProvider (post Rule 2 lockdown).
+      // Mock evaluate to record every prompt sent and return a passing
+      // response so the gate completes normally.
+      const intel = {
+        evaluate: vi.fn().mockResolvedValue(
+          JSON.stringify({ pass: true, severity: 'warn', issue: '', suggestion: '' }),
+        ),
+      };
 
       const gate = new CoherenceGate({
         stateDir: tmpDir,
         config: {},
+        intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider,
       });
 
-      const result = await gate.evaluate({
+      await gate.evaluate({
         message: 'I need the human to restart the server for me.',
         sessionId: 'test-session',
         stopHookActive: false,
@@ -211,26 +210,16 @@ describe('CoherenceGate — escalation context wiring', () => {
         },
       });
 
-      // The escalation reviewer should receive the capability registry in its prompt
-      // We verify by checking that the fetch was called with a prompt containing
-      // the capability information
-      const calls = fetchSpy.mock.calls;
-      const escalationCall = calls.find(call => {
-        const body = call[1]?.body;
-        if (typeof body !== 'string') return false;
-        try {
-          const parsed = JSON.parse(body);
-          const messages = parsed.messages ?? [];
-          return messages.some((m: any) =>
-            typeof m.content === 'string' && m.content.includes('bash') && m.content.includes('unnecessarily escalating'),
-          );
-        } catch {
-          return false;
-        }
+      // The escalation reviewer's prompt should mention the agent's
+      // capabilities — verifying the context flows through
+      // EscalationReviewContext into the prompt builder.
+      const escalationCall = intel.evaluate.mock.calls.find(call => {
+        const prompt = call[0];
+        return typeof prompt === 'string'
+          && prompt.includes('bash')
+          && prompt.includes('unnecessarily escalating');
       });
 
-      // The escalation reviewer's prompt should mention the agent's capabilities
-      // (This verifies the context flows through the EscalationReviewContext)
       expect(escalationCall).toBeDefined();
     });
   });

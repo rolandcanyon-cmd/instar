@@ -1,98 +1,109 @@
 /**
  * Integration Tests — Model Resolution Across Components
  *
- * Verifies that AnthropicIntelligenceProvider, ClaudeCliIntelligenceProvider,
- * and StallTriageNurse all correctly resolve model tiers through the
- * centralized dictionary (src/core/models.ts).
+ * Verifies that ClaudeCliIntelligenceProvider and StallTriageNurse correctly
+ * resolve model tiers through the centralized dictionary (src/core/models.ts).
  *
- * These tests use mocked network/process calls but wire real component
- * code to verify the integration between models.ts and its consumers.
+ * Note: direct Anthropic API calls are forbidden per the provider-portability
+ * path constraints (specs/provider-portability/04-anthropic-path-constraints.md).
+ * The only sanctioned intelligence path is `claude -p`, so model resolution is
+ * verified through the CLI args (`--model <flag>`) rather than HTTP bodies.
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ANTHROPIC_MODELS, resolveModelId } from '../../src/core/models.js';
+import { describe, it, expect, vi } from 'vitest';
+import { ANTHROPIC_MODELS, CLI_MODEL_FLAGS, resolveModelId } from '../../src/core/models.js';
 
-// ─── AnthropicIntelligenceProvider Integration ──────────────
+// ─── ClaudeCliIntelligenceProvider Integration ──────────────
 
-describe('AnthropicIntelligenceProvider + model dictionary', () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
-  let originalFetch: typeof globalThis.fetch;
+// Mock node:child_process.execFile so the provider doesn't actually shell out
+// to `claude`. The fake invokes the callback with empty stdout to resolve the
+// promise; the test inspects the args passed to execFile.
+const execFileSpy = vi.fn();
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual: any = await importOriginal();
+  return {
+    ...actual,
+    execFile: (...args: any[]) => {
+      execFileSpy(...args);
+      const cb = args[args.length - 1];
+      // Return a stub with .stdin so the provider can call .stdin?.end()
+      const stub = { stdin: { end: () => {} } };
+      // Invoke the callback asynchronously with no error.
+      setImmediate(() => cb(null, '', ''));
+      return stub;
+    },
+  };
+});
 
-  beforeEach(() => {
-    originalFetch = globalThis.fetch;
-    fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        content: [{ type: 'text', text: 'test response' }],
-      }),
-    });
-    globalThis.fetch = fetchSpy as any;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  it('resolves "fast" tier to haiku model ID', async () => {
-    const { AnthropicIntelligenceProvider } = await import(
-      '../../src/core/AnthropicIntelligenceProvider.js'
+describe('ClaudeCliIntelligenceProvider + model dictionary', () => {
+  it('resolves "fast" tier to haiku CLI flag', async () => {
+    execFileSpy.mockClear();
+    const { ClaudeCliIntelligenceProvider } = await import(
+      '../../src/core/ClaudeCliIntelligenceProvider.js'
     );
-    const provider = new AnthropicIntelligenceProvider('test-key');
+    const provider = new ClaudeCliIntelligenceProvider('/usr/local/bin/claude');
     await provider.evaluate('test', { model: 'fast' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.model).toBe(ANTHROPIC_MODELS.haiku);
+    const args = execFileSpy.mock.calls[0][1] as string[];
+    const modelIdx = args.indexOf('--model');
+    expect(args[modelIdx + 1]).toBe(CLI_MODEL_FLAGS.haiku);
   });
 
-  it('resolves "balanced" tier to sonnet model ID', async () => {
-    const { AnthropicIntelligenceProvider } = await import(
-      '../../src/core/AnthropicIntelligenceProvider.js'
+  it('resolves "balanced" tier to sonnet CLI flag', async () => {
+    execFileSpy.mockClear();
+    const { ClaudeCliIntelligenceProvider } = await import(
+      '../../src/core/ClaudeCliIntelligenceProvider.js'
     );
-    const provider = new AnthropicIntelligenceProvider('test-key');
+    const provider = new ClaudeCliIntelligenceProvider('/usr/local/bin/claude');
     await provider.evaluate('test', { model: 'balanced' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.model).toBe(ANTHROPIC_MODELS.sonnet);
+    const args = execFileSpy.mock.calls[0][1] as string[];
+    const modelIdx = args.indexOf('--model');
+    expect(args[modelIdx + 1]).toBe(CLI_MODEL_FLAGS.sonnet);
   });
 
-  it('resolves "capable" tier to opus model ID', async () => {
-    const { AnthropicIntelligenceProvider } = await import(
-      '../../src/core/AnthropicIntelligenceProvider.js'
+  it('resolves "capable" tier to opus CLI flag', async () => {
+    execFileSpy.mockClear();
+    const { ClaudeCliIntelligenceProvider } = await import(
+      '../../src/core/ClaudeCliIntelligenceProvider.js'
     );
-    const provider = new AnthropicIntelligenceProvider('test-key');
+    const provider = new ClaudeCliIntelligenceProvider('/usr/local/bin/claude');
     await provider.evaluate('test', { model: 'capable' });
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.model).toBe(ANTHROPIC_MODELS.opus);
+    const args = execFileSpy.mock.calls[0][1] as string[];
+    const modelIdx = args.indexOf('--model');
+    expect(args[modelIdx + 1]).toBe(CLI_MODEL_FLAGS.opus);
   });
 
   it('defaults to haiku (fast tier) when no model specified', async () => {
-    const { AnthropicIntelligenceProvider } = await import(
-      '../../src/core/AnthropicIntelligenceProvider.js'
+    execFileSpy.mockClear();
+    const { ClaudeCliIntelligenceProvider } = await import(
+      '../../src/core/ClaudeCliIntelligenceProvider.js'
     );
-    const provider = new AnthropicIntelligenceProvider('test-key');
+    const provider = new ClaudeCliIntelligenceProvider('/usr/local/bin/claude');
     await provider.evaluate('test');
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-    expect(body.model).toBe(ANTHROPIC_MODELS.haiku);
+    const args = execFileSpy.mock.calls[0][1] as string[];
+    const modelIdx = args.indexOf('--model');
+    expect(args[modelIdx + 1]).toBe(CLI_MODEL_FLAGS.haiku);
   });
 
-  it('uses model IDs from the centralized dictionary, not hardcoded values', async () => {
-    const { AnthropicIntelligenceProvider } = await import(
-      '../../src/core/AnthropicIntelligenceProvider.js'
+  it('uses CLI flags from the centralized dictionary, not hardcoded values', async () => {
+    const { ClaudeCliIntelligenceProvider } = await import(
+      '../../src/core/ClaudeCliIntelligenceProvider.js'
     );
-    const provider = new AnthropicIntelligenceProvider('test-key');
+    const provider = new ClaudeCliIntelligenceProvider('/usr/local/bin/claude');
 
-    // Test all three tiers
-    for (const [tier, expectedModel] of Object.entries({
-      fast: ANTHROPIC_MODELS.haiku,
-      balanced: ANTHROPIC_MODELS.sonnet,
-      capable: ANTHROPIC_MODELS.opus,
+    for (const [tier, expectedFlag] of Object.entries({
+      fast: CLI_MODEL_FLAGS.haiku,
+      balanced: CLI_MODEL_FLAGS.sonnet,
+      capable: CLI_MODEL_FLAGS.opus,
     })) {
-      fetchSpy.mockClear();
+      execFileSpy.mockClear();
       await provider.evaluate('test', { model: tier as any });
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-      expect(body.model).toBe(expectedModel);
+      const args = execFileSpy.mock.calls[0][1] as string[];
+      const modelIdx = args.indexOf('--model');
+      expect(args[modelIdx + 1]).toBe(expectedFlag);
     }
   });
 });
@@ -120,52 +131,33 @@ describe('StallTriageNurse + model dictionary', () => {
     expect(resolveModelId('claude-haiku-4-5')).toBe('claude-haiku-4-5');
   });
 
-  it('StallTriageNurse callAnthropicApi uses resolved model', async () => {
-    // Mock fetch for the direct API call path
-    const fetchSpy = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        content: [{ type: 'text', text: JSON.stringify({
-          summary: 'test',
-          action: 'nudge',
-          confidence: 'medium',
-          userMessage: 'test',
-        })}],
-      }),
+  it('StallTriageNurse constructor resolves tier names to model IDs', async () => {
+    // Direct API access (callAnthropicApi) was removed when the nurse moved
+    // to the IntelligenceProvider abstraction. The remaining surface for the
+    // resolved model is the nurse's config — passing a tier name to the
+    // constructor should yield the resolved model ID on the config object.
+    const { StallTriageNurse } = await import(
+      '../../src/monitoring/StallTriageNurse.js'
+    );
+
+    const deps = {
+      captureSessionOutput: vi.fn().mockReturnValue('some output'),
+      isSessionAlive: vi.fn().mockReturnValue(true),
+      sendKey: vi.fn().mockReturnValue(true),
+      sendInput: vi.fn().mockReturnValue(true),
+      getTopicHistory: vi.fn().mockReturnValue([]),
+      sendToTopic: vi.fn().mockResolvedValue({}),
+      respawnSession: vi.fn().mockResolvedValue(undefined),
+      clearStallForTopic: vi.fn(),
+    };
+
+    const nurse = new StallTriageNurse(deps, {
+      config: { apiKey: 'test-key', model: 'haiku', useIntelligenceProvider: false },
     });
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = fetchSpy as any;
 
-    try {
-      const { StallTriageNurse } = await import(
-        '../../src/monitoring/StallTriageNurse.js'
-      );
-
-      const deps = {
-        captureSessionOutput: vi.fn().mockReturnValue('some output'),
-        isSessionAlive: vi.fn().mockReturnValue(true),
-        sendKey: vi.fn().mockReturnValue(true),
-        sendInput: vi.fn().mockReturnValue(true),
-        getTopicHistory: vi.fn().mockReturnValue([]),
-        sendToTopic: vi.fn().mockResolvedValue({}),
-        respawnSession: vi.fn().mockResolvedValue(undefined),
-        clearStallForTopic: vi.fn(),
-      };
-
-      // Create nurse with explicit model tier name — should be resolved to full model ID
-      const nurse = new StallTriageNurse(deps, {
-        config: { apiKey: 'test-key', model: 'haiku', useIntelligenceProvider: false },
-      });
-
-      // callAnthropicApi takes a single prompt string
-      await nurse.callAnthropicApi('test prompt');
-
-      const body = JSON.parse(fetchSpy.mock.calls[0][1].body);
-      // Should resolve 'haiku' tier to the actual model ID
-      expect(body.model).toBe(ANTHROPIC_MODELS.haiku);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    // The nurse exposes its resolved config (the constructor calls
+    // resolveModelId on the tier name).
+    expect((nurse as any).config.model).toBe(ANTHROPIC_MODELS.haiku);
   });
 });
 

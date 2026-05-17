@@ -33,19 +33,23 @@ let tmpDir: string;
 let callCount: number;
 
 type MockResponse = Record<string, unknown>;
+type MockIntelligence = { evaluate: ReturnType<typeof vi.fn> };
 
-function createMockFetch(responses: MockResponse[]) {
+// Build an IntelligenceProvider mock whose `evaluate` returns each
+// canned response in sequence (then sticks on the last). As of the
+// Rule 2 path-constraint lockdown, reviewers no longer call `fetch`
+// directly — they route through the IntelligenceProvider.
+function createMockIntelligence(responses: MockResponse[]): MockIntelligence {
   callCount = 0;
-  return vi.fn().mockImplementation(async () => {
-    const response = responses[callCount % responses.length];
-    callCount++;
-    return {
-      ok: true,
-      json: async () => ({
-        content: [{ type: 'text', text: JSON.stringify(response) }],
-      }),
-    };
-  });
+  return {
+    evaluate: vi.fn().mockImplementation(async () => {
+      // Stick on the last response once exhausted — tests that don't
+      // care about every reviewer call can pass a single response.
+      const response = responses[Math.min(callCount, responses.length - 1)];
+      callCount++;
+      return JSON.stringify(response);
+    }),
+  };
 }
 
 function createFullConfig(overrides?: Partial<ResponseReviewConfig>): ResponseReviewConfig {
@@ -71,10 +75,14 @@ function createFullConfig(overrides?: Partial<ResponseReviewConfig>): ResponseRe
   };
 }
 
-function createGate(overrides?: Partial<ResponseReviewConfig>): CoherenceGate {
+function createGate(
+  overrides?: Partial<ResponseReviewConfig>,
+  intelligence?: MockIntelligence,
+): CoherenceGate {
   return new CoherenceGate({
     config: createFullConfig(overrides),
     stateDir: tmpDir,
+    intelligence: (intelligence ?? createMockIntelligence([{ pass: true, severity: 'warn', issue: '', suggestion: '' }])) as unknown as import('../../src/core/types.js').IntelligenceProvider,
   });
 }
 
@@ -105,10 +113,11 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 1: Clean message — full pass', () => {
     it('simple acknowledgment bypasses gate (internal channel)', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', createMockFetch([
+      const intel = createMockIntelligence([
         { needsReview: false, reason: 'Simple acknowledgment' },
-      ]));
+      ]);
+
+      const gate = createGate(undefined, intel);
 
       const result = await gate.evaluate({
         message: 'Got it, working on that now.',
@@ -122,12 +131,12 @@ Build and stress-test instar as a dogfooding agent.
     });
 
     it('clean response passes all reviewers (external channel)', async () => {
+      const intel = createMockIntelligence([
+        { pass: true, severity: 'warn', issue: '', suggestion: '' },
+      ]);
+
       const gate = createGate();
       // skipGate=true for external, so all calls go to specialists
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
-
       const result = await gate.evaluate({
         message: 'Your scheduler is running 12 jobs. Three ran in the last hour.',
         sessionId: 'e2e-2',
@@ -145,10 +154,6 @@ Build and stress-test instar as a dogfooding agent.
     it('blocks credential leakage regardless of reviewer opinion', async () => {
       const gate = createGate();
       // Even if reviewers pass, PEL should catch the API key
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
-
       const result = await gate.evaluate({
         message: 'Your API key is sk-ant-abc123XYZdefghijklmnopqrstuvwx',
         sessionId: 'e2e-3',
@@ -163,9 +168,6 @@ Build and stress-test instar as a dogfooding agent.
 
     it('blocks internal URL in external message', async () => {
       const gate = createGate();
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
 
       const result = await gate.evaluate({
         message: 'Check the dashboard at http://localhost:4042/dashboard',
@@ -179,10 +181,11 @@ Build and stress-test instar as a dogfooding agent.
     });
 
     it('allows internal URL on internal channel', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', createMockFetch([
+      const intel = createMockIntelligence([
         { needsReview: false, reason: 'Internal info' },
-      ]));
+      ]);
+
+      const gate = createGate(undefined, intel);
 
       const result = await gate.evaluate({
         message: 'Check the dashboard at http://localhost:4042/dashboard',
@@ -199,6 +202,14 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 3: Block → Revision → Pass', () => {
     it('blocks on first attempt, passes on clean revision', async () => {
+      // External channel: skipGate=true, so only the enabled specialists
+      // fire. Only conversational-tone is enabled, so each evaluate()
+      // consumes one intelligence response.
+      const intel = createMockIntelligence([
+        { pass: false, severity: 'block', issue: 'Technical language detected', suggestion: 'Use conversational language' },
+        { pass: true, severity: 'warn', issue: '', suggestion: '' },
+      ]);
+
       const gate = createGate({
         reviewers: {
           'conversational-tone': { enabled: true, mode: 'block' },
@@ -210,13 +221,9 @@ Build and stress-test instar as a dogfooding agent.
           'value-alignment': { enabled: false, mode: 'block' },
           'information-leakage': { enabled: false, mode: 'block' },
         },
-      });
+      }, intel);
 
       // First call: reviewer says block
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: false, severity: 'block', issue: 'Technical language detected', suggestion: 'Use conversational language' },
-      ]));
-
       const firstResult = await gate.evaluate({
         message: 'Configure the endpoint by setting the parameter value.',
         sessionId: 'e2e-revision',
@@ -229,10 +236,6 @@ Build and stress-test instar as a dogfooding agent.
       expect(firstResult._outcome).toBe('block');
 
       // Second call: reviewer says pass (revised message)
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
-
       const secondResult = await gate.evaluate({
         message: 'I have set that up for you. All done!',
         sessionId: 'e2e-revision',
@@ -248,6 +251,11 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 4: Retry exhaustion', () => {
     it('passes after retries exhausted on non-critical issue', async () => {
+      // Every evaluate() returns block; after maxRetries the gate
+      // exhausts and falls through to pass on a non-critical issue.
+      const intel = createMockIntelligence([
+        { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix it' },
+      ]);
       const gate = createGate({
         maxRetries: 1,
         reviewers: {
@@ -260,13 +268,9 @@ Build and stress-test instar as a dogfooding agent.
           'value-alignment': { enabled: false, mode: 'block' },
           'information-leakage': { enabled: false, mode: 'block' },
         },
-      });
+      }, intel);
 
       // All attempts return block
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix it' },
-      ]));
-
       // First: block
       await gate.evaluate({
         message: 'Technical jargon that triggers reviewer flag.',
@@ -292,10 +296,11 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 5: ObserveOnly mode', () => {
     it('logs violations but never blocks (except PEL)', async () => {
-      const gate = createGate({ observeOnly: true });
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: false, severity: 'block', issue: 'Severe violation', suggestion: 'Fix it now' },
-      ]));
+      // Reviewer flags an issue; observeOnly logs it but never blocks.
+      const intel = createMockIntelligence([
+        { pass: false, severity: 'block', issue: 'Tone violation', suggestion: 'Reword' },
+      ]);
+      const gate = createGate({ observeOnly: true }, intel);
 
       const result = await gate.evaluate({
         message: 'This would normally be blocked by the reviewer.',
@@ -311,10 +316,11 @@ Build and stress-test instar as a dogfooding agent.
     });
 
     it('PEL still blocks in observeOnly mode', async () => {
-      const gate = createGate({ observeOnly: true });
-      vi.stubGlobal('fetch', createMockFetch([
+      const intel = createMockIntelligence([
         { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
+      ]);
+
+      const gate = createGate({ observeOnly: true }, intel);
 
       const result = await gate.evaluate({
         message: 'Here is the key: sk-ant-abc123XYZdefghijklmnopqrstuvwx',
@@ -332,17 +338,10 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 6: Information leakage boundary', () => {
     it('skips information-leakage reviewer for primary-user', async () => {
-      const gate = createGate();
-      let fetchCallCount = 0;
-      vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => {
-        fetchCallCount++;
-        return {
-          ok: true,
-          json: async () => ({
-            content: [{ type: 'text', text: JSON.stringify({ pass: true, severity: 'warn', issue: '', suggestion: '' }) }],
-          }),
-        };
-      }));
+      const intel = createMockIntelligence([
+        { pass: true, severity: 'warn', issue: '', suggestion: '' },
+      ]);
+      const gate = createGate(undefined, intel);
 
       await gate.evaluate({
         message: 'Here is the information you requested about the project.',
@@ -352,9 +351,8 @@ Build and stress-test instar as a dogfooding agent.
       });
 
       // Store the call count for primary-user
-      const primaryUserCalls = fetchCallCount;
+      const primaryUserCalls = intel.evaluate.mock.calls.length;
 
-      fetchCallCount = 0;
       await gate.evaluate({
         message: 'Here is the information you requested about the project.',
         sessionId: 'e2e-leak-run',
@@ -362,8 +360,9 @@ Build and stress-test instar as a dogfooding agent.
         context: { channel: 'telegram', isExternalFacing: true, recipientType: 'agent' },
       });
 
+      const agentCalls = intel.evaluate.mock.calls.length - primaryUserCalls;
       // Agent recipient should have more reviewer calls (includes information-leakage)
-      expect(fetchCallCount).toBeGreaterThanOrEqual(primaryUserCalls);
+      expect(agentCalls).toBeGreaterThanOrEqual(primaryUserCalls);
     });
   });
 
@@ -386,10 +385,6 @@ Build and stress-test instar as a dogfooding agent.
       });
 
       // Evaluate a message
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
-
       await gate.evaluate({
         message: 'Your project is running smoothly. All systems operational.',
         sessionId: 'e2e-full-1',
@@ -542,9 +537,6 @@ Build and stress-test instar as a dogfooding agent.
   describe('Scenario 12: Full canary cycle', () => {
     it('runs canaries → checks health → creates proposals for misses', async () => {
       const gate = createGate();
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
 
       // Run canary tests
       const canaryResults = await gate.runCanaryTests();
@@ -580,10 +572,11 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 13: DSAR data deletion', () => {
     it('deletes all history for a session', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', createMockFetch([
+      const intel = createMockIntelligence([
         { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
+      ]);
+
+      const gate = createGate(undefined, intel);
 
       // Create multiple sessions
       await gate.evaluate({
@@ -617,14 +610,15 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 14: Channel-specific behavior', () => {
     it('uses explicit channel config when available', async () => {
+      const intel = createMockIntelligence([
+        { pass: true, severity: 'warn', issue: '', suggestion: '' },
+      ]);
+
       const gate = createGate({
         channels: {
           email: { failOpen: false, skipGate: true, queueOnFailure: true, queueTimeoutMs: 60000 },
         },
-      });
-      vi.stubGlobal('fetch', createMockFetch([
-        { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
+      }, intel);
 
       const result = await gate.evaluate({
         message: 'Hello via email channel with specific config.',
@@ -641,10 +635,11 @@ Build and stress-test instar as a dogfooding agent.
 
   describe('Scenario 15: Concurrent evaluations', () => {
     it('handles concurrent evaluations on different sessions', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', createMockFetch([
+      const intel = createMockIntelligence([
         { pass: true, severity: 'warn', issue: '', suggestion: '' },
-      ]));
+      ]);
+
+      const gate = createGate(undefined, intel);
 
       // Fire multiple evaluations concurrently
       const results = await Promise.all([
