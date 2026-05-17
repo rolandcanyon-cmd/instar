@@ -103,7 +103,7 @@ describe('per-topic framework dispatch end-to-end', () => {
     expect(log).not.toContain('--sandbox');
   });
 
-  it('topic with framework=codex-cli spawns the codex binary with --sandbox workspace-write --ask-for-approval never', async () => {
+  it('topic with framework=codex-cli spawns the codex binary with --dangerously-bypass-approvals-and-sandbox (Claude --dangerously-skip-permissions parity)', async () => {
     const mgr = buildManager();
     await mgr.spawnInteractiveSession(undefined, 'topic-2', {
       telegramTopicId: 202,
@@ -111,10 +111,7 @@ describe('per-topic framework dispatch end-to-end', () => {
     });
     const log = tmuxLog();
     expect(log).toContain(fakeCodex);
-    expect(log).toContain('--sandbox');
-    expect(log).toContain('workspace-write');
-    expect(log).toContain('--ask-for-approval');
-    expect(log).toContain('never');
+    expect(log).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(log).toContain('INSTAR_FRAMEWORK=codex-cli');
     expect(log).toContain('INSTAR_TELEGRAM_TOPIC=202');
     // Claude flag MUST NOT appear.
@@ -184,8 +181,7 @@ describe('per-topic framework dispatch end-to-end', () => {
     // recognize, which is louder than a silent claude fallback.
     await mgr.spawnInteractiveSession(undefined, 'topic-mis', { telegramTopicId: 601, framework: 'codex-cli' });
     const log = tmuxLog();
-    // Whatever binary got used, the Codex sandbox flag shape must be present.
-    expect(log).toContain('--sandbox');
-    expect(log).toContain('workspace-write');
+    // Whatever binary got used, the Codex bypass flag shape must be present.
+    expect(log).toContain('--dangerously-bypass-approvals-and-sandbox');
   });
 });

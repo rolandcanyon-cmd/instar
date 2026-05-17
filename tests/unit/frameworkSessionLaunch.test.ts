@@ -42,20 +42,27 @@ describe('frameworkSessionLaunch.buildInteractiveLaunch', () => {
   });
 
   describe('codex-cli', () => {
-    it('passes --sandbox workspace-write + --ask-for-approval never by default (agentic equivalent of --dangerously-skip-permissions)', () => {
+    it('passes --model gpt-5.3-codex + --dangerously-bypass-approvals-and-sandbox by default (parity with Claude\'s --dangerously-skip-permissions)', () => {
       const spec = buildInteractiveLaunch('codex-cli', {
         binaryPath: '/usr/local/bin/codex',
       });
+      // The `--model gpt-5.3-codex` flag is required to avoid Codex
+      // CLI's default `gpt-5.2-codex`, which OpenAI retired from
+      // ChatGPT-subscription auth on 2026-04-14. See models.ts comment
+      // block for the empirically-verified working-model list.
+      // The bypass flag is the single-flag parity for Claude's
+      // `--dangerously-skip-permissions` — both removes approval
+      // prompts AND drops the sandbox (which would otherwise block the
+      // agent from reaching localhost where instar's server lives).
       expect(spec.argv).toEqual([
         '/usr/local/bin/codex',
-        '--sandbox',
-        'workspace-write',
-        '--ask-for-approval',
-        'never',
+        '--model',
+        'gpt-5.3-codex',
+        '--dangerously-bypass-approvals-and-sandbox',
       ]);
     });
 
-    it('honors a custom codexSandboxMode', () => {
+    it('honors a custom codexSandboxMode by switching to the flag-pair form (safer profile, no bypass)', () => {
       const spec = buildInteractiveLaunch('codex-cli', {
         binaryPath: '/usr/local/bin/codex',
         codexSandboxMode: 'read-only',
@@ -64,6 +71,7 @@ describe('frameworkSessionLaunch.buildInteractiveLaunch', () => {
       expect(spec.argv).toContain('read-only');
       expect(spec.argv).toContain('--ask-for-approval');
       expect(spec.argv).toContain('never');
+      expect(spec.argv).not.toContain('--dangerously-bypass-approvals-and-sandbox');
     });
 
     it('does NOT pass a --resume flag — Codex resume is a subcommand and is not yet supported on this path', () => {

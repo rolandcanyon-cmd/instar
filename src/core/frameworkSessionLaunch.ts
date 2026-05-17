@@ -60,21 +60,38 @@ const claudeCodeBuilder: Builder = (options) => {
 };
 
 const codexCliBuilder: Builder = (options) => {
-  // Codex's interactive REPL takes its sandbox + approval policy via
-  // flags. Claude's `--dangerously-skip-permissions` means
-  // "act autonomously, no human approval prompts" — the equivalent for
-  // Codex is `--sandbox workspace-write` (writes restricted to the
-  // project) + `--ask-for-approval never`. This is safer than
-  // `danger-full-access` (which removes the sandbox entirely) while
-  // still letting the agent operate without prompting on every step.
-  // Operators wanting a tighter or looser sandbox can override via
-  // codexSandboxMode.
-  const sandbox = options.codexSandboxMode ?? 'workspace-write';
+  // Claude's `--dangerously-skip-permissions` means BOTH "no approval
+  // prompts" AND "no sandbox on shell exec." Codex splits these into
+  // two flags. Initial attempts used `--sandbox workspace-write
+  // --ask-for-approval never` to silence approvals, but that leaves
+  // Codex's seatbelt sandbox in place — which blocks the agent from
+  // reaching localhost (where the instar server lives, where
+  // telegram-reply relays through) and blocks writes outside the
+  // project (which the relay script needs for its outbox). Codex's
+  // single-flag parity for "autonomous, no guardrails on exec" is
+  // `--dangerously-bypass-approvals-and-sandbox`. Use that as the
+  // default for instar's autonomous agent topics. Callers wanting a
+  // safer profile can override via codexSandboxMode (which switches
+  // back to the flag-pair form below).
+  // Codex CLI's default model is `gpt-5.2-codex`, which OpenAI retired
+  // from ChatGPT-subscription auth on 2026-04-14 (Community thread
+  // 1378986). Sessions launched without an explicit model on
+  // subscription auth fail with "not supported when using Codex with a
+  // ChatGPT account." `gpt-5.3-codex` is the coding-specialist tier
+  // that empirically works on the subscription path (see
+  // providers/adapters/openai-codex/models.ts for the full map). API-
+  // key users can still override by editing ~/.codex/config.toml or
+  // setting CODEX_MODEL — passing the flag here only sets the default
+  // for this session.
   const argv: string[] = [
     options.binaryPath,
-    '--sandbox', sandbox,
-    '--ask-for-approval', 'never',
+    '--model', 'gpt-5.3-codex',
   ];
+  if (options.codexSandboxMode) {
+    argv.push('--sandbox', options.codexSandboxMode, '--ask-for-approval', 'never');
+  } else {
+    argv.push('--dangerously-bypass-approvals-and-sandbox');
+  }
   // Codex's `resume` is a subcommand (`codex resume <id>`), not a flag.
   // For the interactive launch path, callers who want to resume should
   // use the subcommand form; we keep the flag-style behavior off for

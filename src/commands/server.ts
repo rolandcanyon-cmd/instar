@@ -603,6 +603,21 @@ async function respawnSessionForTopic(
     }
   }
 
+  // Kill the old tmux session before spawning. spawnInteractiveSession
+  // no-ops when a tmux session with the same name already exists (it
+  // just injects the message and returns), so without this kill a
+  // framework swap via /route would silently keep the old session
+  // alive and the new framework binding never takes effect.
+  // Idempotent: if the session is already dead the kill is a no-op.
+  try {
+    execFileSync(detectTmuxPath()!, ['kill-session', '-t', `=${targetSession}`], { stdio: 'ignore' });
+  } catch { /* session may already be dead — that's fine */ }
+  // Invalidate the framework cache for this tmux name. The kill+respawn
+  // may reuse the same name under a different framework (e.g., /route
+  // claude-code → codex-cli), and a stale cache entry would make
+  // injection use the wrong submit semantics.
+  sessionManager.clearSessionFrameworkCache(targetSession);
+
   let storedName = telegram.getTopicName(topicId);
   // If the name is unknown, try to resolve it from Telegram before falling back
   if (!storedName || /^topic-\d+$/.test(storedName)) {
@@ -905,6 +920,13 @@ function wireTelegramCallbacks(
     }
 
     _topicFrameworksStore.set(topicId, framework as 'claude-code' | 'codex-cli');
+
+    // Drop any stored resume UUID — it was created under the previous
+    // framework's session-id scheme and is meaningless to the new one
+    // (Claude UUIDs ≠ Codex session ids). Without this, the new
+    // session's --resume flag gets a wrong-shape id, which at best
+    // emits a warning and at worst dies during startup.
+    _topicResumeMap?.remove(topicId);
 
     // Trigger a respawn so the new framework takes effect immediately.
     // Re-use the existing respawn path which builds context from TopicMemory.
@@ -2540,6 +2562,20 @@ export async function startServer(options: StartOptions): Promise<void> {
         };
         console.log(pc.green('  Prompt Gate: Telegram relay wired (via lifeline callback forwarding)'));
       }
+
+      // Wire incoming-message routing + command callbacks so messages forwarded
+      // by lifeline (via /internal/telegram-forward → onTopicMessage) actually
+      // fire handleCommand → onRouteCommand / onListSessions / onFlush etc.
+      // Without this, send-only mode left onTopicMessage null, so the
+      // /internal/telegram-forward handler in routes.ts fell through to the
+      // "--no-telegram (registry-only) injection" branch and slash-commands
+      // reached the AI session as plain chat text.
+      const userManagerSendOnly = new UserManager(config.stateDir, config.users);
+      _fixDeps = { state, liveConfig, sessionManager, telegram, config };
+      wireTelegramRouting(telegram, sessionManager, quotaTracker, topicMemory, userManagerSendOnly,
+        (topicId, text) => handleFixCommand(topicId, text, _fixDeps!));
+      wireTelegramCallbacks(telegram, sessionManager, state, quotaTracker, undefined, config.sessions.claudePath, topicMemory);
+      console.log(pc.green('  Telegram routing + command callbacks wired (send-only)'));
     }
 
     if (telegramConfig && !skipTelegram && !isStandbyTelegram) {

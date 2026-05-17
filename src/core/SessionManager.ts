@@ -942,6 +942,43 @@ rm()  { "${shimRunner}" rm  "$@"; }
   }
 
   /**
+   * Resolve the IntelligenceFramework a tmux session was spawned under
+   * by reading the INSTAR_FRAMEWORK env we set in its tmux env block.
+   * Cached so repeated injections don't re-shell out. Returns null when
+   * the env isn't present (legacy sessions, non-instar tmux sessions).
+   */
+  private readonly sessionFrameworkCache = new Map<string, IntelligenceFramework | null>();
+  /** Invalidate cached framework for a tmux name. Call after killing or
+   *  respawning a session whose name may be reused under a different
+   *  framework — e.g., after a /route switch. */
+  clearSessionFrameworkCache(tmuxSession: string): void {
+    this.sessionFrameworkCache.delete(tmuxSession);
+  }
+  private getSessionFramework(tmuxSession: string): IntelligenceFramework | null {
+    if (this.sessionFrameworkCache.has(tmuxSession)) {
+      return this.sessionFrameworkCache.get(tmuxSession) ?? null;
+    }
+    let resolved: IntelligenceFramework | null = null;
+    try {
+      const out = execFileSync(
+        this.config.tmuxPath,
+        ['show-environment', '-t', `=${tmuxSession}`, 'INSTAR_FRAMEWORK'],
+        { encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] },
+      ).trim();
+      const value = out.startsWith('INSTAR_FRAMEWORK=') ? out.slice('INSTAR_FRAMEWORK='.length) : '';
+      if (value === 'claude-code' || value === 'codex-cli') {
+        resolved = value;
+      }
+    } catch {
+      // @silent-fallback-ok — framework lookup is advisory; injection
+      // falls back to the Claude path which is correct for the default
+      // and conservative for unknown frameworks.
+    }
+    this.sessionFrameworkCache.set(tmuxSession, resolved);
+    return resolved;
+  }
+
+  /**
    * Send input to a running tmux session.
    */
   sendInput(tmuxSession: string, input: string): boolean {
@@ -1797,6 +1834,18 @@ rm()  { "${shimRunner}" rm  "$@"; }
     }
 
     const exactTarget = `=${tmuxSession}:`;
+    // Framework-specific submit semantics. Claude Code's readline buffers
+    // the bracketed paste and accepts a single Enter ~500ms later to
+    // submit. Codex's TUI takes longer to commit a paste into its
+    // input state and silently discards the first Enter that arrives
+    // before the commit is done — observed live: messages stacked up
+    // in the input box because the post-paste Enter landed too early.
+    // For codex we wait longer and send Enter twice (the second one
+    // submits if the first was eaten; if both land, the second is a
+    // harmless no-op against an empty buffer).
+    const framework = this.getSessionFramework(tmuxSession);
+    const postPasteDelaySec = framework === 'codex-cli' ? '1.5' : '0.5';
+    const enterPresses = framework === 'codex-cli' ? 2 : 1;
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -1814,24 +1863,28 @@ rm()  { "${shimRunner}" rm  "$@"; }
           execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, '\x1b[201~'], {
             encoding: 'utf-8', timeout: 5000,
           });
-          // Delay to let the terminal fully process the bracketed paste.
-          // 100ms was too short — Claude Code needs time to parse the paste end
-          // sequence and buffer the content before Enter can submit it.
-          // 500ms is conservative but prevents the "[Pasted text #1]" stuck state.
-          execFileSync('/bin/sleep', ['0.5'], { timeout: 2000 });
-          // Send Enter to submit
-          execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
-            encoding: 'utf-8', timeout: 5000,
-          });
+          execFileSync('/bin/sleep', [postPasteDelaySec], { timeout: 4000 });
+          for (let i = 0; i < enterPresses; i++) {
+            execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
+              encoding: 'utf-8', timeout: 5000,
+            });
+            if (i < enterPresses - 1) {
+              try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }); } catch { /* ignore */ }
+            }
+          }
         } else {
           // Single-line: simple send-keys
           execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, '-l', text], {
             encoding: 'utf-8', timeout: 10000,
           });
-          // Send Enter separately
-          execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
-            encoding: 'utf-8', timeout: 5000,
-          });
+          for (let i = 0; i < enterPresses; i++) {
+            execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
+              encoding: 'utf-8', timeout: 5000,
+            });
+            if (i < enterPresses - 1) {
+              try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }); } catch { /* ignore */ }
+            }
+          }
         }
         return true;
       } catch (err) {
