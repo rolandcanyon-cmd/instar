@@ -17,9 +17,22 @@ import * as path from 'node:path';
 
 const SCRIPT_PATH = path.resolve(__dirname, '../../../scripts/check-rule3-coverage.cjs');
 
+// Git sets GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE in the env when running
+// its own hooks (e.g. pre-push runs the test suite, which transitively spawns
+// these tests). Those vars take precedence over cwd-based repo resolution,
+// so `git diff --cached` invoked inside the tmp repo would actually resolve
+// against the parent repo's index — making the staged fixtures invisible to
+// the script. Strip the inherited git env for every git-touching call.
+const childEnv: NodeJS.ProcessEnv = { ...process.env };
+delete childEnv.GIT_DIR;
+delete childEnv.GIT_WORK_TREE;
+delete childEnv.GIT_INDEX_FILE;
+delete childEnv.GIT_OBJECT_DIRECTORY;
+delete childEnv.GIT_COMMON_DIR;
+
 function runCheck(cwd: string): { exitCode: number; stderr: string } {
   try {
-    execFileSync('node', [SCRIPT_PATH], { cwd, encoding: 'utf-8', stdio: 'pipe' });
+    execFileSync('node', [SCRIPT_PATH], { cwd, encoding: 'utf-8', stdio: 'pipe', env: childEnv });
     return { exitCode: 0, stderr: '' };
   } catch (err) {
     const e = err as { status: number; stderr: Buffer | string };
@@ -31,7 +44,7 @@ function stage(cwd: string, filepath: string, content: string): void {
   const full = path.join(cwd, filepath);
   fs.mkdirSync(path.dirname(full), { recursive: true });
   fs.writeFileSync(full, content, 'utf-8');
-  execFileSync('git', ['add', filepath], { cwd, stdio: 'pipe' });
+  execFileSync('git', ['add', filepath], { cwd, stdio: 'pipe', env: childEnv });
 }
 
 describe('check-rule3-coverage.cjs', () => {
@@ -39,9 +52,9 @@ describe('check-rule3-coverage.cjs', () => {
 
   beforeEach(() => {
     repo = fs.mkdtempSync(path.join(os.tmpdir(), 'rule3-gate-'));
-    execFileSync('git', ['init', '-q'], { cwd: repo });
-    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo });
-    execFileSync('git', ['config', 'user.name', 'test'], { cwd: repo });
+    execFileSync('git', ['init', '-q'], { cwd: repo, env: childEnv });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: repo, env: childEnv });
+    execFileSync('git', ['config', 'user.name', 'test'], { cwd: repo, env: childEnv });
     // Minimal scaffolding: copy the script and spec file the script reads.
     fs.mkdirSync(path.join(repo, 'scripts'), { recursive: true });
     fs.copyFileSync(SCRIPT_PATH, path.join(repo, 'scripts', 'check-rule3-coverage.cjs'));
@@ -51,7 +64,7 @@ describe('check-rule3-coverage.cjs', () => {
       '# Registry\n\n(Empty for tests; specific files referenced inline.)\n',
     );
     // Make an initial commit so the repo has a HEAD.
-    execFileSync('git', ['commit', '--allow-empty', '-q', '-m', 'init'], { cwd: repo });
+    execFileSync('git', ['commit', '--allow-empty', '-q', '-m', 'init'], { cwd: repo, env: childEnv });
   });
 
   afterEach(() => {
