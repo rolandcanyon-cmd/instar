@@ -342,6 +342,25 @@ export class TelegramAdapter implements MessagingAdapter {
     (topicId: number, framework: string | null) => Promise<{ ok: boolean; message: string }>
   ) | null = null;
 
+  /**
+   * Local-model command handler. Called when a user posts
+   * `/local-model <provider> [model]` (or `/local-model off`) in a
+   * topic. The handler validates the provider/model is reachable,
+   * persists the per-topic local-model binding, and triggers a
+   * respawn so the new session spawns under Codex --oss
+   * --local-provider <provider>.
+   *
+   * Conversational counterpart of editing config.json — Justin's
+   * "every config change reachable via Telegram" rule.
+   *
+   * - provider = null + model = null → "show status" (no mutation).
+   * - provider = 'off' / 'none' → clear the topic's override (revert
+   *   to cloud Codex).
+   */
+  public onLocalModelCommand: (
+    (topicId: number, provider: string | null, model: string | null) => Promise<{ ok: boolean; message: string }>
+  ) | null = null;
+
   // Message log callback — fires on every message logged (inbound and outbound).
   // Used by TopicMemory to dual-write to SQLite for search and summarization.
   // Includes sender identity fields (Phase 1C/1D — User-Agent Topology Spec).
@@ -2472,6 +2491,42 @@ export class TelegramAdapter implements MessagingAdapter {
         await this.sendToTopic(topicId, filterUnclaimed ? 'No unclaimed sessions.' : 'No sessions.').catch(() => {});
       } else {
         await this.sendToTopic(topicId, lines.join('\n')).catch(() => {});
+      }
+      return true;
+    }
+
+    // /local-model — get or set the local-model provider for this topic.
+    // Requires the topic to already be on codex-cli (use /route codex-cli
+    // first). Local-model dispatch goes through Codex CLI's --oss
+    // --local-provider passthrough; the server validates the provider is
+    // reachable before flipping the binding.
+    //
+    // Usage:
+    //   /local-model                       → show current binding
+    //   /local-model status                → same as above
+    //   /local-model ollama                → switch to ollama (default model)
+    //   /local-model ollama llama3.2:latest
+    //                                      → switch to ollama + specific model
+    //   /local-model lmstudio <model>      → switch to LM Studio
+    //   /local-model off / none            → revert to cloud Codex
+    if (cmd === '/local-model' || cmd.startsWith('/local-model ')) {
+      if (!this.onLocalModelCommand) {
+        await this.sendToTopic(topicId, 'Local-model routing not available — server did not wire the /local-model handler.').catch(() => {});
+        return true;
+      }
+      const argText = cmd === '/local-model' ? '' : text.trim().slice('/local-model '.length).trim();
+      let provider: string | null = null;
+      let model: string | null = null;
+      if (argText !== '' && argText.toLowerCase() !== 'status') {
+        const parts = argText.split(/\s+/);
+        provider = parts[0]!.toLowerCase();
+        if (parts.length > 1) model = parts.slice(1).join(' ');
+      }
+      try {
+        const result = await this.onLocalModelCommand(topicId, provider, model);
+        await this.sendToTopic(topicId, result.message).catch(() => {});
+      } catch (err) {
+        await this.sendToTopic(topicId, `Local-model switch failed: ${err instanceof Error ? err.message : String(err)}`).catch(() => {});
       }
       return true;
     }
