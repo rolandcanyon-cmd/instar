@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { SessionManager } from '../core/SessionManager.js';
+import type { SessionRefresh } from '../core/SessionRefresh.js';
 import type { StateManager } from '../core/StateManager.js';
 import type { JobScheduler } from '../scheduler/JobScheduler.js';
 import type { InstarConfig } from '../core/types.js';
@@ -45,6 +46,8 @@ import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { SafeGitExecutor } from '../core/SafeGitExecutor.js';
 import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
+import { validateStageTransition, type ValidationContext as StageValidationContext } from '../core/StageTransitionValidator.js';
+import type { PipelineStage, RoundStatus } from '../core/InitiativeTracker.js';
 
 const execFile = promisify(execFileCb);
 
@@ -129,6 +132,8 @@ import type { OrphanProcessReaper } from '../monitoring/OrphanProcessReaper.js';
 import type { TopicMemory } from '../memory/TopicMemory.js';
 import type { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 import type { ProjectMapper } from '../core/ProjectMapper.js';
+import { verifyMergedItemsViaGit } from '../core/ProjectRoundExecution.js';
+import type { ProjectDriftChecker } from '../core/ProjectDriftChecker.js';
 import type { ScopeVerifier } from '../core/ScopeVerifier.js';
 import type { HighRiskAction } from '../core/ScopeVerifier.js';
 import type { ContextHierarchy } from '../core/ContextHierarchy.js';
@@ -164,6 +169,7 @@ import type { ThreadlineRouter } from '../threadline/ThreadlineRouter.js';
 import type { HandshakeManager } from '../threadline/HandshakeManager.js';
 import { createThreadlineRoutes } from '../threadline/ThreadlineEndpoints.js';
 import type { UnifiedTrustSystem } from '../threadline/UnifiedTrustWiring.js';
+import { ThreadlineNicknames } from '../threadline/ThreadlineNicknames.js';
 import { ScopeCoherenceTracker } from '../core/ScopeCoherenceTracker.js';
 import type { ScopeCoherenceState } from '../core/ScopeCoherenceTracker.js';
 import type { HookEventReceiver } from '../monitoring/HookEventReceiver.js';
@@ -173,6 +179,7 @@ import type { InstructionsVerifier } from '../monitoring/InstructionsVerifier.js
 import type { CoherenceGate } from '../core/CoherenceGate.js';
 import type { MessagingToneGate } from '../core/MessagingToneGate.js';
 import { isJunkPayload } from '../core/junk-payload.js';
+import { detectJargon } from '../core/JargonDetector.js';
 import type { PasteManager } from '../paste/PasteManager.js';
 import type { WebSocketManager } from './WebSocketManager.js';
 import { TruncationDetector } from '../paste/TruncationDetector.js';
@@ -534,6 +541,9 @@ export interface RouteContext {
   selfKnowledgeTree: SelfKnowledgeTree | null;
   coverageAuditor: CoverageAuditor | null;
   topicResumeMap: TopicResumeMap | null;
+  /** Agent-initiated session respawn. Null when no Telegram adapter is
+   *  wired (v1 requires a Telegram-bound session). */
+  sessionRefresh: SessionRefresh | null;
   autonomyManager: AutonomyProfileManager | null;
   trustElevationTracker: TrustElevationTracker | null;
   autonomousEvolution: AutonomousEvolution | null;
@@ -546,6 +556,12 @@ export interface RouteContext {
   subagentTracker: SubagentTracker | null;
   instructionsVerifier: InstructionsVerifier | null;
   threadlineRouter: ThreadlineRouter | null;
+  /** ThreadResumeMap — exposed on ctx so /threadline/relay-send can stamp
+   *  originTopicId on outbound sends. Per THREAD-TOPIC-LINKAGE-SPEC.md. */
+  threadResumeMap: import('../threadline/ThreadResumeMap.js').ThreadResumeMap | null;
+  /** TopicLinkageHandler — drives outbound capture + inbound topic-routing.
+   *  Optional; null when threadline is disabled. */
+  topicLinkageHandler: import('../threadline/TopicLinkageHandler.js').TopicLinkageHandler | null;
   handshakeManager: HandshakeManager | null;
   threadlineRelayClient: import('../threadline/client/ThreadlineClient.js').ThreadlineClient | null;
   listenerManager: import('../threadline/ListenerSessionManager.js').ListenerSessionManager | null;
@@ -576,6 +592,34 @@ export interface RouteContext {
   ledgerSessionRegistry: import('../core/LedgerSessionRegistry.js').LedgerSessionRegistry | null;
   /** Initiative tracker — persisted record of multi-phase long-running work. */
   initiativeTracker: import('../core/InitiativeTracker.js').InitiativeTracker | null;
+  /** Project-scope round runner (Phase 1b PR 3). Single chokepoint for
+   *  /advance, /halt, /ack, /accept-partial. Null when initiativeTracker
+   *  is also null. */
+  projectRoundRunner: import('../core/ProjectRoundRunner.js').ProjectRoundRunner | null;
+  /** Project drift checker (Phase 1b connect-the-dots). Null when no
+   *  IntelligenceProvider is configured (then POST /projects/:id/drift-check
+   *  returns 503). */
+  projectDriftChecker: ProjectDriftChecker | null;
+  /** Machine heartbeat (Phase 1b PR 4). Bundled with `config.machineId`
+   *  so the claim-ownership route can compare against the current
+   *  machine without a separate top-level field. Null when running in
+   *  single-machine mode. */
+  machineHeartbeat: {
+    api: import('../core/MachineHeartbeat.js').MachineHeartbeat;
+    config: { machineId: string };
+  } | null;
+  /** Threadline → Telegram bridge config — toggles + allow/deny list. Read by
+   *  /threadline/telegram-bridge/config endpoints and by the bridge module
+   *  to decide whether to mirror an inbound message into
+   *  a Telegram topic. Null when LiveConfig is not wired. */
+  telegramBridgeConfig: import('../threadline/TelegramBridgeConfig.js').TelegramBridgeConfig | null;
+  /** Threadline → Telegram bridge — mirrors threadline messages into per-thread
+   *  Telegram topics. RELAY-ONLY: never blocks routing, swallows its own
+   *  errors. Null when no Telegram adapter is wired. */
+  telegramBridge: import('../threadline/TelegramBridge.js').TelegramBridge | null;
+  /** Threadline observability — read-only view layer over inbox/outbox/bindings.
+   *  Powers the dashboard Threadline tab via /threadline/observability/*. */
+  threadlineObservability: import('../threadline/ThreadlineObservability.js').ThreadlineObservability | null;
   /** Pending reply waiters for threadline relay-send waitForReply support.
    *  Key: threadId (UUID — unique per conversation, unlike agent names which
    *  can collide when multiple agents share a name). Value: resolve callback
@@ -589,6 +633,17 @@ export interface RouteContext {
    *  the evaluate route will still produce a response, just without
    *  persistence. */
   stopGateDb: StopGateDb | null;
+  /** Token-usage ledger (read-only observability over Claude Code JSONL
+   *  transcripts). Null when stateDir is unavailable. */
+  tokenLedger: import('../monitoring/TokenLedger.js').TokenLedger | null;
+  /** TaskFlow registry — durable multi-step job records (OpenClaw import).
+   *  Null when not enabled. Phase 1: no business consumers; admin endpoints
+   *  only. */
+  taskFlowRegistry: import('../tasks/TaskFlowRegistry.js').TaskFlowRegistry | null;
+  /** ThreadlineFlowBridge — resumes TaskFlow flows waiting on
+   *  cross-agent-callback when a matching threadline message arrives. Null
+   *  when TaskFlow is not enabled. */
+  threadlineFlowBridge: import('../tasks/ThreadlineFlowBridge.js').ThreadlineFlowBridge | null;
   startTime: Date;
 }
 
@@ -596,6 +651,162 @@ export interface RouteContext {
 const SESSION_NAME_RE = /^[a-zA-Z0-9_-]{1,200}$/;
 const JOB_SLUG_RE = /^[a-zA-Z0-9_-]{1,100}$/;
 const VALID_SORTS = ['significance', 'recent', 'name'] as const;
+
+// ── Project-scope helpers (Phase 1a PR 2) ─────────────────────────
+
+/**
+ * Hash the incoming Authorization header to derive a per-token identity
+ * for the projects-rate counter. We never store the raw token; the hash
+ * is a stable per-token key.
+ */
+function hashAuthHeader(header: unknown): string {
+  if (typeof header !== 'string') return 'anon';
+  return createHash('sha256').update(header).digest('hex').slice(0, 16);
+}
+
+/**
+ * Read-check-increment for the per-token projects-creation counter.
+ * Returns `{ok: true}` if the request is within the 5/hour window, or
+ * `{ok: false, windowEnds}` if the limit is reached.
+ *
+ * The counter file lives under `.instar/local/projects-rate.json` — the
+ * `.instar/local/` directory is gitignored (Phase 1.12) so the counter
+ * never syncs across machines. We bound file size by retaining only
+ * tokens whose window is still open.
+ */
+function checkAndIncrementProjectsRate(
+  stateDir: string,
+  tokenHash: string
+): { ok: true } | { ok: false; windowEnds: string } {
+  const localDir = path.join(stateDir, 'local');
+  try {
+    fs.mkdirSync(localDir, { recursive: true });
+  } catch {
+    // mkdir failures fall through; we'll fail the write below.
+  }
+  const ratePath = path.join(localDir, 'projects-rate.json');
+  type Window = { count: number; windowStart: number };
+  let table: Record<string, Window> = {};
+  try {
+    if (fs.existsSync(ratePath)) {
+      const raw = JSON.parse(fs.readFileSync(ratePath, 'utf-8'));
+      if (raw && typeof raw === 'object') table = raw as Record<string, Window>;
+    }
+  } catch {
+    table = {};
+  }
+  const now = Date.now();
+  const WINDOW_MS = 60 * 60 * 1000;
+  // GC entries whose window has expired.
+  for (const k of Object.keys(table)) {
+    if (now - (table[k]?.windowStart ?? 0) >= WINDOW_MS) delete table[k];
+  }
+  const entry = table[tokenHash];
+  if (!entry || now - entry.windowStart >= WINDOW_MS) {
+    table[tokenHash] = { count: 1, windowStart: now };
+  } else if (entry.count >= 5) {
+    return {
+      ok: false,
+      windowEnds: new Date(entry.windowStart + WINDOW_MS).toISOString(),
+    };
+  } else {
+    entry.count += 1;
+  }
+  try {
+    fs.writeFileSync(ratePath, JSON.stringify(table, null, 2), 'utf-8');
+  } catch {
+    // If we can't persist, fail open: still allow the call (rate-limit
+    // is best-effort, not a security boundary).
+  }
+  return { ok: true };
+}
+
+/** Project + children creation as a single logical operation. */
+async function createProjectAndChildren(
+  tracker: import('../core/InitiativeTracker.js').InitiativeTracker,
+  parsed: import('../core/PlanDocParser.js').ParsedPlanDoc
+): Promise<{ project: unknown; children: unknown[] }> {
+  if (!parsed.project) throw new Error('parsed.project is null');
+  const proj = parsed.project;
+
+  // Group children by roundName, preserving first-seen order.
+  const roundOrder: string[] = [];
+  const byRound = new Map<string, string[]>();
+  for (const c of parsed.children) {
+    if (!byRound.has(c.roundName)) {
+      roundOrder.push(c.roundName);
+      byRound.set(c.roundName, []);
+    }
+    byRound.get(c.roundName)!.push(c.id);
+  }
+  const rounds = roundOrder.map((name) => ({
+    name,
+    itemIds: byRound.get(name)!,
+    status: 'pending' as const,
+  }));
+
+  const projectInit = await tracker.create({
+    id: proj.id,
+    title: proj.title,
+    description: proj.description,
+    phases: [{ id: 'overview', name: 'overview', status: 'pending' }],
+    kind: 'project',
+    rounds,
+    sourceDocs: proj.sourceDocs,
+    autoAdvance: proj.autoAdvance,
+    telegramTopicId: proj.telegramTopicId,
+    targetRepoPath: proj.targetRepoPath,
+  });
+
+  const createdChildren: unknown[] = [];
+  for (const child of parsed.children) {
+    const c = await tracker.create({
+      id: child.id,
+      title: child.title,
+      description: `Source: ${child.sourceTag}; effort: ${child.effortTag}`,
+      phases: [{ id: 'outline', name: 'outline', status: 'pending' }],
+      kind: 'task',
+      pipelineStage: child.pipelineStage,
+      parentProjectId: proj.id,
+    });
+    createdChildren.push(c);
+  }
+  return { project: projectInit, children: createdChildren };
+}
+
+/** Subset a record by an allowlist of fields. */
+function pickFields(
+  obj: Record<string, unknown>,
+  fields: Set<string>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of fields) {
+    if (k in obj) out[k] = obj[k];
+  }
+  return out;
+}
+
+/** Maps a /projects/:id/next action verb to the suggested skill invocation.
+ *  Names are the canonical command set from PROJECT-SCOPE-SPEC § Phase 1.7. */
+function skillCommandForAction(action: string, projectId: string, roundIndex: number): string {
+  switch (action) {
+    case 'await-user-approval':
+      return `/project ack ${projectId}`;
+    case 'ack-required':
+      return `/project ack ${projectId}`;
+    case 'resolve-conflict':
+      return `/project resolve-conflict ${projectId}`;
+    case 'accept-partial':
+      return `/project accept-partial ${projectId} ${roundIndex}`;
+    case 'run-spec-converge':
+      return `/spec-converge`;
+    case 'run-drift-check':
+      return `/project drift ${projectId} ${roundIndex}`;
+    case 'start-round':
+    default:
+      return `/project run-round ${projectId} ${roundIndex}`;
+  }
+}
 
 export function createRoutes(ctx: RouteContext): Router {
   const router = Router();
@@ -714,6 +925,8 @@ export function createRoutes(ctx: RouteContext): Router {
       topicId?: number;
       allowDebugText?: boolean;
       allowDuplicate?: boolean;
+      messageKind?: 'reply' | 'health-alert' | 'unknown';
+      jargon?: boolean;
     },
   ): Promise<boolean> {
     if (!ctx.messagingToneGate) return false; // No authority configured — pass through
@@ -728,6 +941,15 @@ export function createRoutes(ctx: RouteContext): Router {
           detected: junkResult.junk,
           reason: junkResult.reason,
         };
+      }
+
+      if (options.jargon) {
+        try {
+          const j = detectJargon(text);
+          signals.jargon = { detected: j.detected, terms: j.terms, score: j.score };
+        } catch {
+          // Detector errors never override the authority — skip the signal.
+        }
       }
 
       // Recent conversation — used by both the authority and the dedup detector.
@@ -767,6 +989,7 @@ export function createRoutes(ctx: RouteContext): Router {
         recentMessages,
         signals,
         targetStyle: ctx.config.messagingStyle,
+        messageKind: options.messageKind,
       });
 
       // Structured observability: log every decision the authority made. This is
@@ -1200,6 +1423,28 @@ export function createRoutes(ctx: RouteContext): Router {
   // Compaction-resume trigger #3 — called by .instar/hooks/instar/compaction-recovery.sh
   // immediately after a compaction event, independent of HookEventReceiver and Watchdog.
   // This is the most reliable path: the hook only runs when compaction actually happened.
+  // Pre-prompt memory recall (OpenClaw import T2.2). Invoked by a Claude Code
+  // UserPromptSubmit hook to inject bounded memory context before each reply.
+  // Synchronous from the caller's perspective; bounded by recallTimeoutMs in
+  // PromptBuildRecallConfig.
+  router.post('/internal/prompt-recall', async (req, res) => {
+    const userMessage = (req.body?.userMessage ?? '').toString();
+    const sessionId = req.body?.sessionId ? String(req.body.sessionId) : undefined;
+    if (!userMessage) {
+      res.status(400).json({ error: 'userMessage required' });
+      return;
+    }
+    const recall = (globalThis as Record<string, unknown>).__instarPromptBuildRecall as
+      | { recall: (opts: { userMessage: string; sessionId?: string }) => { contextText: string; source: string; elapsedMs: number; resultsCount: number; cacheKey: string } }
+      | undefined;
+    if (!recall) {
+      res.json({ contextText: '', source: 'no-recall', elapsedMs: 0, resultsCount: 0, cacheKey: '' });
+      return;
+    }
+    const result = recall.recall({ userMessage, sessionId });
+    res.json(result);
+  });
+
   router.post('/internal/compaction-resume', async (req, res) => {
     const sessionName = (req.body?.sessionName || req.body?.tmuxSession || '').toString();
     if (!sessionName) {
@@ -2325,6 +2570,121 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // ── WikiClaim Phase 4 — Inverse-traceability HTTP endpoints ───────
+  //
+  // Per docs/specs/OPENCLAW-IMPORT-WIKICLAIM-EVIDENCE-SPEC.md § Phase 4
+  // (line 343) and § Inverse traceability (line 291).
+  //
+  // Both routes are thin pass-throughs to SemanticMemory's already-filtered
+  // typed methods (`getEvidence` / `findCitations`). Privacy enforcement
+  // lives ONE place — the storage layer's read-time filter (Phase 1) plus
+  // the EvidenceRenderer helper (Phase 5). These routes do not re-implement
+  // the filter; they invoke the methods and serialize the result.
+  //
+  // viewerScope derivation: the single bearer-token auth model has one
+  // principal (the agent itself), which sees its own data at `private`
+  // scope by default. Callers can request a NARROWED view via the
+  // `?viewerScope=shared-project|shared-topic|private` query param —
+  // useful for "what would a topic-peer see?" preview rendering in the
+  // dashboard. Widening above the auth principal is a no-op (the cap is
+  // `private`). Per spec § Storage and Privacy line 315 — the renderer is
+  // the privacy boundary; this route is a read endpoint with no
+  // judgment surface.
+  const VALID_EVIDENCE_KINDS = new Set([
+    'feedback', 'commit', 'session', 'document', 'message',
+    'job-run', 'ledger-entry', 'pattern-entity', 'external-url',
+    'supersedes-evidence',
+  ]);
+  const VALID_VIEWER_SCOPES = new Set(['shared-project', 'shared-topic', 'private']);
+
+  function resolveViewerScope(raw: unknown): 'shared-project' | 'shared-topic' | 'private' {
+    if (typeof raw === 'string' && VALID_VIEWER_SCOPES.has(raw)) {
+      return raw as 'shared-project' | 'shared-topic' | 'private';
+    }
+    // Default: agent has full visibility into its own DB.
+    return 'private';
+  }
+
+  // GET /memory/evidence/by-entity/:id
+  // Returns the entity's evidence array, viewer-scope filtered.
+  router.get('/memory/evidence/by-entity/:id', (req, res) => {
+    if (!ctx.semanticMemory) {
+      res.status(503).json({ error: 'Semantic memory not enabled' });
+      return;
+    }
+    try {
+      const entityId = req.params.id;
+      if (!entityId || typeof entityId !== 'string') {
+        res.status(400).json({ error: 'Missing entity id' });
+        return;
+      }
+      const viewerScope = resolveViewerScope(req.query.viewerScope);
+
+      // Existence + entity-level visibility check goes through the eager
+      // helper, which returns null when the entity is hidden (or missing)
+      // at the requested viewer scope. We deliberately collapse "entity
+      // exists but entity-scope wider than viewer" and "entity does not
+      // exist" into the same 404 — the spec's inverse-query non-leak rule
+      // (§ Storage and Privacy line 316) extends to direct fetch: a viewer
+      // at a narrower scope must not be able to probe entity existence by
+      // diffing 404 vs 200-empty.
+      const eager = ctx.semanticMemory.getEntityWithEvidence(entityId, viewerScope);
+      if (!eager) {
+        res.status(404).json({ error: 'Entity not found' });
+        return;
+      }
+      res.json({
+        entityId,
+        viewerScope,
+        evidence: eager.evidence,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Evidence lookup failed',
+      });
+    }
+  });
+
+  // GET /memory/entities/by-evidence?kind=feedback&sourceId=fb_123
+  // Returns entities citing (kind, sourceId), viewer-scope filtered.
+  router.get('/memory/entities/by-evidence', (req, res) => {
+    if (!ctx.semanticMemory) {
+      res.status(503).json({ error: 'Semantic memory not enabled' });
+      return;
+    }
+    try {
+      const kindRaw = req.query.kind;
+      const sourceIdRaw = req.query.sourceId;
+      const kind = typeof kindRaw === 'string' ? kindRaw : '';
+      const sourceId = typeof sourceIdRaw === 'string' ? sourceIdRaw : '';
+      if (!kind || !sourceId) {
+        res.status(400).json({ error: 'Missing required query params: kind, sourceId' });
+        return;
+      }
+      if (!VALID_EVIDENCE_KINDS.has(kind)) {
+        res.status(400).json({ error: `Invalid evidence kind: ${kind}` });
+        return;
+      }
+      const viewerScope = resolveViewerScope(req.query.viewerScope);
+
+      const entities = ctx.semanticMemory.findCitations(
+        { kind: kind as any, sourceId },
+        viewerScope,
+      );
+      res.json({
+        kind,
+        sourceId,
+        viewerScope,
+        entities,
+        totalResults: entities.length,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Citation lookup failed',
+      });
+    }
+  });
+
   // ── MEMORY.md Export (Phase 6) ─────────────────────────────────
 
   router.post('/semantic/export-memory', async (req, res) => {
@@ -2643,6 +3003,8 @@ export function createRoutes(ctx: RouteContext): Router {
         endpoints: ctx.topicMemory ? [
           'GET /topic/search?q=...&topic=N&limit=20',
           'GET /topic/context/:topicId?recent=30',
+          'GET /topic/context/:topicId?assembled=true&prompt=...',
+          'GET /session/context/:topicId?prompt=...&job=...',
           'GET /topic/list',
           'GET /topic/stats',
           'POST /topic/summarize { topicId }',
@@ -3668,6 +4030,59 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
+  // POST /sessions/refresh — agent-initiated session respawn.
+  //
+  // The agent calls this when it needs new MCPs/skills (just installed via
+  // `claude mcp add`) to attach. We kill its tmux session and respawn with
+  // `claude --resume <uuid>`, which loads the new tools while keeping the
+  // conversation. The response is 202 immediately because the kill itself
+  // ends the requester's process — there is no synchronous result.
+  //
+  // Rate limit and lifecycle live in SessionRefresh (the orchestrator);
+  // this route is a thin entry point.
+  router.post('/sessions/refresh', spawnLimiter, (req, res) => {
+    if (!ctx.sessionRefresh) {
+      res.status(503).json({ error: 'Session refresh not enabled (no Telegram adapter wired)' });
+      return;
+    }
+
+    const { sessionName, followUpPrompt, reason } = req.body || {};
+
+    if (!sessionName || typeof sessionName !== 'string' || !SESSION_NAME_RE.test(sessionName)) {
+      res.status(400).json({ error: '"sessionName" is required and must contain only letters, numbers, hyphens, underscores (max 200)' });
+      return;
+    }
+    if (followUpPrompt !== undefined && (typeof followUpPrompt !== 'string' || followUpPrompt.length > 500_000)) {
+      res.status(400).json({ error: '"followUpPrompt" must be a string under 500KB' });
+      return;
+    }
+    if (reason !== undefined && (typeof reason !== 'string' || reason.length > 1000)) {
+      res.status(400).json({ error: '"reason" must be a string under 1000 chars' });
+      return;
+    }
+
+    // Acknowledge BEFORE killing — the requester is the session being killed,
+    // so it needs to receive the 202 before its process disappears.
+    res.status(202).json({ ok: true, message: 'Refresh scheduled', sessionName });
+
+    // Schedule the kill+spawn after the response has flushed and the agent
+    // has a moment to log its last action. 500ms is enough for HTTP flush
+    // on a local loopback without being a noticeable user-facing delay.
+    const sessionRefresh = ctx.sessionRefresh;
+    setTimeout(() => {
+      sessionRefresh.refreshSession({ sessionName, followUpPrompt, reason }).then(result => {
+        if (!result.ok) {
+          // Structured logging so over-blocks (rate guard) are detectable
+          // in operations per signal-vs-authority logging rule. The agent's
+          // process may already be dead — nothing to reply to.
+          console.warn(`[sessions/refresh] refused sessionName=${sessionName} code=${result.code} message="${result.message}"`);
+        }
+      }).catch(err => {
+        console.error(`[sessions/refresh] unexpected error for sessionName=${sessionName}:`, err);
+      });
+    }, 500);
+  });
+
   router.delete('/sessions/:id', (req, res) => {
     if (!SESSION_NAME_RE.test(req.params.id)) {
       res.status(400).json({ error: 'Invalid session ID format' });
@@ -3784,6 +4199,68 @@ export function createRoutes(ctx: RouteContext): Router {
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
+  });
+
+  // ── Token Ledger ────────────────────────────────────────────────
+  // Read-only token-usage observability backed by SQLite. Source data
+  // is Claude Code's per-session JSONL transcripts at
+  // ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl.
+  // Auth is enforced globally by authMiddleware.
+
+  const TOKEN_DEFAULT_WINDOW_MS = 24 * 60 * 60 * 1000;
+  const TOKEN_DEFAULT_ORPHAN_IDLE_MS = 30 * 60 * 1000;
+
+  function parseSinceMs(raw: unknown): number {
+    if (typeof raw === 'string' && /^\d+$/.test(raw)) {
+      const n = Number(raw);
+      if (n >= 0) return n;
+    }
+    return Date.now() - TOKEN_DEFAULT_WINDOW_MS;
+  }
+
+  router.get('/tokens/summary', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    const sinceMs = parseSinceMs(req.query.since);
+    res.json({ sinceMs, summary: ctx.tokenLedger.summary({ sinceMs }) });
+  });
+
+  router.get('/tokens/sessions', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    const sinceMs = parseSinceMs(req.query.since);
+    let limit = 20;
+    if (typeof req.query.limit === 'string' && /^\d+$/.test(req.query.limit)) {
+      const n = Number(req.query.limit);
+      if (n > 0 && n <= 500) limit = n;
+    }
+    res.json({ sinceMs, limit, sessions: ctx.tokenLedger.topSessions({ limit, sinceMs }) });
+  });
+
+  router.get('/tokens/by-project', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    const sinceMs = parseSinceMs(req.query.since);
+    res.json({ sinceMs, projects: ctx.tokenLedger.byProject({ sinceMs }) });
+  });
+
+  router.get('/tokens/orphans', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    let idleMs = TOKEN_DEFAULT_ORPHAN_IDLE_MS;
+    if (typeof req.query.idleMs === 'string' && /^\d+$/.test(req.query.idleMs)) {
+      const n = Number(req.query.idleMs);
+      if (n > 0) idleMs = n;
+    }
+    res.json({ idleMs, orphans: ctx.tokenLedger.orphans({ idleMs }) });
   });
 
   // ── Jobs ────────────────────────────────────────────────────────
@@ -3956,6 +4433,132 @@ export function createRoutes(ctx: RouteContext): Router {
       },
       jobs: jobReports,
     });
+  });
+
+  /**
+   * GET /jobs/migration-status
+   * Phase 4 — surface the jobs-as-agentmd migration state so the Dashboard
+   * can render the "Confirm migration complete" / "Roll back" buttons.
+   *
+   * Returns:
+   *   - hasLegacyJobsJson: boolean (whether .instar/jobs.json exists)
+   *   - hasMigrationComplete: boolean
+   *   - hasMigrationAbandoned: boolean
+   *   - canConfirm: boolean (legacy + schedule/ exist, no marker)
+   *   - canAbandon: boolean (schedule/ exists, no completion marker)
+   *   - scheduleEntryCount: number
+   */
+  /**
+   * GET /jobs/reconcile
+   *
+   * Boot-time consistency check for the agentmd job tree. Surfaces
+   * orphan manifests, shadow .md files, missing-from-jobs.json entries,
+   * staged .new files from interrupted saves, and case-collisions per
+   * INSTAR-JOBS-AS-AGENTMD spec §Runtime "Load lifecycle (boot)".
+   *
+   * Dashboard Issues-card consumes the returned `findings` array.
+   */
+  router.get('/jobs/reconcile', async (_req, res) => {
+    try {
+      const stateDir = ctx.config.stateDir;
+      if (!stateDir) {
+        res.status(503).json({ error: 'state dir not configured' });
+        return;
+      }
+      const { reconcileAgentMdTree } = await import('../scheduler/AgentMdReconcile.js');
+      const report = reconcileAgentMdTree({ stateDir });
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.get('/jobs/migration-status', (_req, res) => {
+    try {
+      const stateDir = ctx.config.stateDir;
+      if (!stateDir) {
+        res.status(503).json({ error: 'state dir not configured' });
+        return;
+      }
+      const jobsJson = path.join(stateDir, 'jobs.json');
+      const jobsRoot = path.join(stateDir, 'jobs');
+      const scheduleDir = path.join(jobsRoot, 'schedule');
+      const completed = path.join(jobsRoot, '.migration-complete.json');
+      const abandoned = path.join(jobsRoot, '.migration-abandoned.json');
+      const hasLegacyJobsJson = fs.existsSync(jobsJson);
+      const hasMigrationComplete = fs.existsSync(completed);
+      const hasMigrationAbandoned = fs.existsSync(abandoned);
+      let scheduleEntryCount = 0;
+      if (fs.existsSync(scheduleDir)) {
+        scheduleEntryCount = fs.readdirSync(scheduleDir).filter((f) => f.endsWith('.json')).length;
+      }
+      res.json({
+        hasLegacyJobsJson,
+        hasMigrationComplete,
+        hasMigrationAbandoned,
+        canConfirm: hasLegacyJobsJson && scheduleEntryCount > 0 && !hasMigrationComplete && !hasMigrationAbandoned,
+        canAbandon: scheduleEntryCount > 0 && !hasMigrationComplete && !hasMigrationAbandoned,
+        scheduleEntryCount,
+      });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * POST /jobs/migration-confirm
+   * Phase 4 — operator confirms migration is complete. Writes
+   * .instar/jobs/.migration-complete.json which the release-cut gate
+   * consumes to allow jobs.json deletion.
+   *
+   * Idempotent — re-confirming is a no-op.
+   */
+  router.post('/jobs/migration-confirm', (_req, res) => {
+    try {
+      const stateDir = ctx.config.stateDir;
+      if (!stateDir) {
+        res.status(503).json({ error: 'state dir not configured' });
+        return;
+      }
+      const jobsRoot = path.join(stateDir, 'jobs');
+      const completed = path.join(jobsRoot, '.migration-complete.json');
+      const abandoned = path.join(jobsRoot, '.migration-abandoned.json');
+      if (fs.existsSync(abandoned)) {
+        res.status(409).json({ error: 'Migration has been abandoned; cannot confirm. Run `instar job migrate` first.' });
+        return;
+      }
+      fs.mkdirSync(jobsRoot, { recursive: true });
+      fs.writeFileSync(
+        completed,
+        JSON.stringify({ confirmedAt: new Date().toISOString(), confirmedBy: 'dashboard' }, null, 2),
+        'utf-8',
+      );
+      res.json({ ok: true, marker: completed });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  /**
+   * POST /jobs/migration-abandon
+   * Phase 4 — operator rolls back migration. Invokes
+   * `jobsMigrate({ abandon: true })` to remove `.instar/jobs/schedule/`,
+   * write `.migration-abandoned.json`, and leave `jobs.json` intact.
+   */
+  router.post('/jobs/migration-abandon', async (_req, res) => {
+    try {
+      const stateDir = ctx.config.stateDir;
+      if (!stateDir) {
+        res.status(503).json({ error: 'state dir not configured' });
+        return;
+      }
+      const { jobsMigrate } = await import('../commands/jobMigrate.js');
+      const packageRoot = path.resolve(__dirname, '..', '..');
+      const outcome = jobsMigrate({ agentStateDir: stateDir, packageRoot, abandon: true });
+      res.json(outcome);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 
   router.post('/jobs/:slug/trigger', async (req, res) => {
@@ -4836,6 +5439,84 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json(ctx.telegram.getLogStats());
   });
 
+  // ── Threadline → Telegram Bridge: settings surface ─────────────
+  //
+  // Read/write toggles + allow-list/deny-list that gate the bridge module
+  // (deliverable b). Default-OFF auto-create is a hard requirement — these
+  // endpoints are how the user opts in. Bearer-auth enforced globally.
+
+  router.get('/threadline/telegram-bridge/config', (_req, res) => {
+    if (!ctx.telegramBridgeConfig) {
+      res.status(503).json({ error: 'Telegram bridge config not initialized' });
+      return;
+    }
+    res.json(ctx.telegramBridgeConfig.getSettings());
+  });
+
+  // ── Threadline observability — read-only views over inbox/outbox/bindings ──
+
+  router.get('/threadline/observability/threads', (req, res) => {
+    if (!ctx.threadlineObservability) {
+      res.status(503).json({ error: 'Threadline observability not initialized' });
+      return;
+    }
+    const remoteAgent = typeof req.query.remoteAgent === 'string' ? req.query.remoteAgent : undefined;
+    const sinceIso = typeof req.query.since === 'string' ? req.query.since : undefined;
+    const untilIso = typeof req.query.until === 'string' ? req.query.until : undefined;
+    const hasTopicRaw = typeof req.query.hasTopic === 'string' ? req.query.hasTopic : undefined;
+    const hasTopic = hasTopicRaw === 'yes' || hasTopicRaw === 'no' ? hasTopicRaw : undefined;
+    const threads = ctx.threadlineObservability.listThreads({ remoteAgent, sinceIso, untilIso, hasTopic });
+    res.json({ threads, count: threads.length });
+  });
+
+  router.get('/threadline/observability/threads/:threadId', (req, res) => {
+    if (!ctx.threadlineObservability) {
+      res.status(503).json({ error: 'Threadline observability not initialized' });
+      return;
+    }
+    const detail = ctx.threadlineObservability.getThread(req.params.threadId);
+    if (!detail) { res.status(404).json({ error: 'Thread not found' }); return; }
+    res.json(detail);
+  });
+
+  router.get('/threadline/observability/search', (req, res) => {
+    if (!ctx.threadlineObservability) {
+      res.status(503).json({ error: 'Threadline observability not initialized' });
+      return;
+    }
+    const q = typeof req.query.q === 'string' ? req.query.q : '';
+    const limitRaw = typeof req.query.limit === 'string' ? parseInt(req.query.limit, 10) : 50;
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+    const hits = ctx.threadlineObservability.searchMessages(q, limit);
+    res.json({ hits, count: hits.length });
+  });
+
+  router.patch('/threadline/telegram-bridge/config', (req, res) => {
+    if (!ctx.telegramBridgeConfig) {
+      res.status(503).json({ error: 'Telegram bridge config not initialized' });
+      return;
+    }
+    try {
+      const body = req.body as {
+        enabled?: unknown;
+        autoCreateTopics?: unknown;
+        mirrorExisting?: unknown;
+        allowList?: unknown;
+        denyList?: unknown;
+      };
+      const patch: Record<string, unknown> = {};
+      if ('enabled' in body) patch.enabled = body.enabled;
+      if ('autoCreateTopics' in body) patch.autoCreateTopics = body.autoCreateTopics;
+      if ('mirrorExisting' in body) patch.mirrorExisting = body.mirrorExisting;
+      if ('allowList' in body) patch.allowList = body.allowList;
+      if ('denyList' in body) patch.denyList = body.denyList;
+      const settings = ctx.telegramBridgeConfig.update(patch);
+      res.json(settings);
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
   // ── Slack ──────────────────────────────────────────────────────
 
   router.post('/slack/reply/:channelId', async (req, res) => {
@@ -5011,6 +5692,24 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
+    // Attention items reach the user as a new Telegram topic with the title,
+    // summary, and (optional) description as the body. Run that user-facing
+    // candidate through the outbound-message authority before creating the
+    // topic. For health-class categories ("degradation", "health"), invoke
+    // the health-alert ruleset (B12/B13/B14) so jargon-laden, no-CTA, and
+    // self-healed-event messages get suppressed instead of spawning topics.
+    const isHealthAlert = typeof category === 'string' && /^(degradation|health|health-alert|alert)$/i.test(category);
+    const candidate = [title, summary, description].filter((s): s is string => typeof s === 'string' && s.length > 0).join('\n\n');
+    const blocked = await checkOutboundMessage(candidate, 'telegram', res, {
+      messageKind: isHealthAlert ? 'health-alert' : 'reply',
+      jargon: isHealthAlert,
+      // No topicId — attention items create new topics; no prior thread context applies.
+    });
+    if (blocked) {
+      // checkOutboundMessage already wrote the 422 response.
+      return;
+    }
+
     try {
       const item = await ctx.telegram.createAttentionItem({
         id,
@@ -5117,9 +5816,21 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-    const items = status
+    // Phase 1b PR 5 — server-side filters added so the dashboard
+    // Initiatives tab can hide project-kind records (rendered in the
+    // separate Projects tab) and any record that's a child of a
+    // project (rendered inside its parent's card).
+    const excludeKind = typeof req.query.excludeKind === 'string' ? req.query.excludeKind : undefined;
+    const excludeParented = req.query.excludeParented === 'true';
+    let items = status
       ? ctx.initiativeTracker.list({ status: status as 'active' | 'completed' | 'archived' | 'abandoned' })
       : ctx.initiativeTracker.list();
+    if (excludeKind) {
+      items = items.filter((i) => (i.kind ?? 'task') !== excludeKind);
+    }
+    if (excludeParented) {
+      items = items.filter((i) => !i.parentProjectId);
+    }
     res.json({ items, count: items.length });
   });
 
@@ -5148,7 +5859,7 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json(initiative);
   });
 
-  router.post('/initiatives', (req, res) => {
+  router.post('/initiatives', async (req, res) => {
     if (!ctx.initiativeTracker) {
       res.status(503).json({ error: 'Initiative tracker not configured' });
       return;
@@ -5171,7 +5882,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
     try {
-      const created = ctx.initiativeTracker.create({
+      const created = await ctx.initiativeTracker.create({
         id, title, description, phases, links, nextCheckAt,
         needsUser, needsUserReason, blockers,
       });
@@ -5181,7 +5892,7 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
-  router.patch('/initiatives/:id', (req, res) => {
+  router.patch('/initiatives/:id', async (req, res) => {
     if (!ctx.initiativeTracker) {
       res.status(503).json({ error: 'Initiative tracker not configured' });
       return;
@@ -5191,7 +5902,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
     try {
-      const updated = ctx.initiativeTracker.update(req.params.id, req.body ?? {});
+      const updated = await ctx.initiativeTracker.update(req.params.id, req.body ?? {});
       res.json(updated);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -5200,7 +5911,7 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
-  router.post('/initiatives/:id/phase/:phaseId', (req, res) => {
+  router.post('/initiatives/:id/phase/:phaseId', async (req, res) => {
     if (!ctx.initiativeTracker) {
       res.status(503).json({ error: 'Initiative tracker not configured' });
       return;
@@ -5211,7 +5922,7 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
     try {
-      const updated = ctx.initiativeTracker.setPhaseStatus(req.params.id, req.params.phaseId, status);
+      const updated = await ctx.initiativeTracker.setPhaseStatus(req.params.id, req.params.phaseId, status);
       res.json(updated);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -5219,17 +5930,968 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   });
 
-  router.delete('/initiatives/:id', (req, res) => {
+  router.delete('/initiatives/:id', async (req, res) => {
     if (!ctx.initiativeTracker) {
       res.status(503).json({ error: 'Initiative tracker not configured' });
       return;
     }
-    const removed = ctx.initiativeTracker.remove(req.params.id);
+    const removed = await ctx.initiativeTracker.remove(req.params.id);
     if (!removed) {
       res.status(404).json({ error: 'initiative not found' });
       return;
     }
     res.json({ id: req.params.id, deleted: true });
+  });
+
+  // ── Projects (project-scope, Phase 1a PR 2) ─────────────────────
+  //
+  // Subset of Phase 1.3 endpoints from PROJECT-SCOPE-SPEC.md. Full
+  // advance/halt/ack endpoints ship in PR 3 (skill) + Phase 1b (runner).
+  //
+  // Auth is enforced globally by `authMiddleware` on the AgentServer; we
+  // don't re-check the bearer here. Rate limiting on POST /projects is
+  // enforced via a small per-token counter in `.instar/local/projects-rate.json`.
+
+  router.get('/projects', (_req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    const items = ctx.initiativeTracker.list({ kind: 'project' });
+    res.json({ items, count: items.length });
+  });
+
+  router.get('/projects/:id', async (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    if (!initiativeIdRe.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid project id' });
+      return;
+    }
+    const project = ctx.initiativeTracker.get(req.params.id);
+    if (!project || (project.kind ?? 'task') !== 'project') {
+      res.status(404).json({ error: 'project not found' });
+      return;
+    }
+    // Join children that point at this project via parentProjectId.
+    let children = ctx.initiativeTracker
+      .list()
+      .filter((i) => i.parentProjectId === project.id);
+
+    // Lazy merged-state reconciler — spec § Phase 1.4 lines 256-258.
+    //
+    // GET /projects/:id is documented as "may mutate": when a 'building' child's
+    // mergeCommitOid is no longer ancestor of origin/main, we transition it to
+    // 'regressed' and clear future autoAdvanceAt on its round.
+    //
+    // Selection contract:
+    //   - debounce: skip any child with `ciCheckedAt < 6h ago`
+    //   - cap: at most 3 child-revalidations per GET
+    //   - order: oldest `ciCheckedAt` first (treat undefined as 1970), ties broken
+    //     by `roundIndex` ASC, then `itemId` ASC — no child can starve.
+    //   - opt-out: `?reconcile=false` (or `?reconcile=0`) skips entirely
+    const reconcileFlag = req.query.reconcile;
+    const wantReconcile = reconcileFlag !== 'false' && reconcileFlag !== '0';
+    if (wantReconcile && project.targetRepoPath) {
+      const nowMs = Date.now();
+      const debounceMs = 6 * 60 * 60 * 1000; // 6 hours
+      const roundIndexOf = (childId: string): number => {
+        const rounds = project.rounds ?? [];
+        for (let i = 0; i < rounds.length; i++) {
+          if ((rounds[i].itemIds ?? []).includes(childId)) return i;
+        }
+        return Number.MAX_SAFE_INTEGER;
+      };
+      const candidates = children
+        .filter((c) => c.pipelineStage === 'building' && typeof c.mergeCommitOid === 'string' && c.mergeCommitOid)
+        .filter((c) => {
+          const t = c.ciCheckedAt ? Date.parse(c.ciCheckedAt) : 0;
+          return !(Number.isFinite(t) && t > 0 && nowMs - t < debounceMs);
+        })
+        .sort((a, b) => {
+          const ta = a.ciCheckedAt ? Date.parse(a.ciCheckedAt) : 0;
+          const tb = b.ciCheckedAt ? Date.parse(b.ciCheckedAt) : 0;
+          if (ta !== tb) return ta - tb;
+          const ra = roundIndexOf(a.id);
+          const rb = roundIndexOf(b.id);
+          if (ra !== rb) return ra - rb;
+          return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+        })
+        .slice(0, 3);
+      const candidateIds = candidates.map((c) => c.id);
+      if (candidateIds.length > 0) {
+        let verified: Set<string> = new Set();
+        try {
+          verified = await verifyMergedItemsViaGit(project.targetRepoPath, candidateIds, ctx.initiativeTracker);
+        } catch {
+          // git not available, no network, etc. — leave verified empty so we
+          // still update ciCheckedAt to back off; better than a hot loop.
+        }
+        let touched = false;
+        for (const cand of candidates) {
+          const child = ctx.initiativeTracker.get(cand.id);
+          if (!child) continue;
+          const isMerged = verified.has(cand.id);
+          try {
+            await ctx.initiativeTracker.update(cand.id, {
+              pipelineStage: isMerged ? 'merged' : 'regressed',
+              ciCheckedAt: new Date(nowMs).toISOString(),
+              ifMatch: child.version,
+            });
+            touched = true;
+            if (!isMerged) {
+              // On regression: clear future autoAdvanceAt on the child's round
+              // so the next round doesn't auto-fire while this one is broken.
+              const projAfter = ctx.initiativeTracker.get(project.id);
+              const rIdx = roundIndexOf(cand.id);
+              if (projAfter && rIdx < (projAfter.rounds ?? []).length) {
+                const newRounds = (projAfter.rounds ?? []).map((r, i) =>
+                  i > rIdx ? { ...r, autoAdvanceAt: undefined } : r
+                );
+                try {
+                  await ctx.initiativeTracker.update(project.id, {
+                    rounds: newRounds,
+                    ifMatch: projAfter.version,
+                  });
+                } catch {
+                  // OCC race; next GET will retry.
+                }
+              }
+            }
+          } catch {
+            // OCC race or validator reject; leave as-is for next GET.
+          }
+        }
+        if (touched) {
+          children = ctx.initiativeTracker
+            .list()
+            .filter((i) => i.parentProjectId === project.id);
+        }
+      }
+    }
+
+    // Optional field selector: `?fields=id,title,pipelineStage`. Used by
+    // the dashboard projects selector (Phase 1.10). Always preserves `id`.
+    const fieldsParam = typeof req.query.fields === 'string' ? req.query.fields : '';
+    if (fieldsParam.trim()) {
+      const fields = new Set(
+        fieldsParam
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
+      fields.add('id');
+      const pickProj = pickFields(project as unknown as Record<string, unknown>, fields);
+      const pickKids = children.map((c) => pickFields(c as unknown as Record<string, unknown>, fields));
+      res.json({ project: pickProj, children: pickKids });
+      return;
+    }
+    res.json({ project, children });
+  });
+
+  // GET /projects/:id/next — structured next-action payload.
+  //
+  // Spec § Phase 1.5 (line 268): returns `{ action, params, estimatedCost?,
+  // skillCommand? }` for the FIRST round whose status is not 'complete'.
+  // Ordering: roundIndex ASC, then pipelineStage ASC, then itemId ASC.
+  //
+  // Action verbs the spec enumerates (a non-exhaustive contract):
+  //   - 'await-user-approval' — first round needs `firstLaunchAckAt`
+  //   - 'ack-required'         — unacknowledgedAdvanceCount >= cap
+  //   - 'resolve-conflict'     — `awaitingReconciliation` non-empty
+  //   - 'accept-partial'       — round is partially-complete
+  //   - 'run-spec-converge'    — at least one item is `spec-drafted`
+  //   - 'run-drift-check'      — at least one item is `approved`, no fresh
+  //                              drift verdict
+  //   - 'start-round'          — all preconditions met, ready to fire
+  //
+  // The endpoint does NOT run the runner's preflight — that's a heavier
+  // check at fire time. The action is a hint for the dashboard + skill UI.
+  router.get('/projects/:id/next', (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    if (!initiativeIdRe.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid project id' });
+      return;
+    }
+    const project = ctx.initiativeTracker.get(req.params.id);
+    if (!project || (project.kind ?? 'task') !== 'project') {
+      res.status(404).json({ error: 'project not found' });
+      return;
+    }
+    const rounds = project.rounds ?? [];
+    const idx = rounds.findIndex((r) => (r.status ?? 'pending') !== 'complete');
+    if (idx === -1) {
+      res.status(204).end();
+      return;
+    }
+    const r = rounds[idx];
+
+    // Determine the action verb from project + round state.
+    type ActionVerb =
+      | 'await-user-approval'
+      | 'ack-required'
+      | 'resolve-conflict'
+      | 'accept-partial'
+      | 'run-spec-converge'
+      | 'run-drift-check'
+      | 'start-round';
+    let action: ActionVerb = 'start-round';
+    const childrenById = new Map(
+      ctx.initiativeTracker
+        .list()
+        .filter((i) => i.parentProjectId === project.id)
+        .map((c) => [c.id, c])
+    );
+    const itemsForRound = (r.itemIds ?? []).map((id) => childrenById.get(id)).filter(Boolean);
+
+    if ((project.awaitingReconciliation ?? []).length > 0) {
+      action = 'resolve-conflict';
+    } else if ((r.status ?? 'pending') === 'partially-complete') {
+      action = 'accept-partial';
+    } else if (idx === 0 && !project.firstLaunchAckAt) {
+      action = 'await-user-approval';
+    } else if ((project.unacknowledgedAdvanceCount ?? 0) >= 2) {
+      action = 'ack-required';
+    } else if (itemsForRound.some((c) => c?.pipelineStage === 'spec-drafted')) {
+      action = 'run-spec-converge';
+    } else if (
+      itemsForRound.some(
+        (c) => c?.pipelineStage === 'approved' && !r.lastDriftVerdict
+      )
+    ) {
+      action = 'run-drift-check';
+    }
+
+    res.json({
+      action,
+      params: {
+        projectId: project.id,
+        projectVersion: project.version,
+        roundIndex: idx,
+        name: r.name,
+        itemIds: r.itemIds,
+        status: r.status ?? 'pending',
+        autoAdvanceAt: r.autoAdvanceAt,
+      },
+      skillCommand: skillCommandForAction(action, project.id, idx),
+    });
+  });
+
+  // ── /projects/:id mutating routes (Phase 1b PR 3) ──────────────
+  //
+  // All mutating endpoints require `If-Match: <version>` (OCC). Missing
+  // header → 428. Stale version → 409. Spec § Phase 1.3.
+  //
+  // /advance is a single-item stage transition driven by StageTransitionValidator.
+  // /halt, /ack, /accept-partial route through ProjectRoundRunner.
+
+  function parseIfMatch(req: ExpressRequest, res: ExpressResponse): number | null {
+    const header = req.headers['if-match'];
+    if (typeof header !== 'string' || !header.trim()) {
+      res.status(428).json({ error: 'If-Match header required' });
+      return null;
+    }
+    const n = parseInt(header.replace(/"/g, ''), 10);
+    if (!Number.isInteger(n) || n <= 0) {
+      res.status(400).json({ error: 'If-Match must be a positive integer version' });
+      return null;
+    }
+    return n;
+  }
+
+  function lookupProject(req: ExpressRequest, res: ExpressResponse) {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return null;
+    }
+    if (!initiativeIdRe.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid project id' });
+      return null;
+    }
+    const project = ctx.initiativeTracker.get(req.params.id);
+    if (!project || (project.kind ?? 'task') !== 'project') {
+      res.status(404).json({ error: 'project not found' });
+      return null;
+    }
+    return project;
+  }
+
+  // POST /projects/:id/advance — advance one child item by one stage.
+  //
+  // Body shape:
+  //   {
+  //     "itemId": "<child id>",
+  //     "fromStage": "<optional explicit current stage>",
+  //     "targetStage": "spec-drafted|spec-converged|approved|building|merged|skipped|outline",
+  //     "artifact": {
+  //       "specPath"?: "...",          // outline → spec-drafted
+  //       "prNumber"?: 123,            // building → merged
+  //       "taskFlowRecordId"?: "...",  // approved → building
+  //       "skippedReason"?: "...",     // any → skipped
+  //       "skippedBy"?: "...",         // any → skipped
+  //       "unskippedAt"?: "..."        // skipped → outline
+  //     }
+  //   }
+  //
+  // The HTTP layer does NOT enforce gates the ProjectRoundRunner already
+  // enforces — `/advance` is a single-item transition that operates on
+  // child records, not on round status. Round-level invariants (lock,
+  // first-launch ack, owner machine, etc.) apply only to /run-round
+  // and to the autonomous loop, both of which ship in a later PR.
+  router.post('/projects/:id/advance', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.initiativeTracker) return; // narrow for TS
+    const ifMatch = parseIfMatch(req, res);
+    if (ifMatch === null) return;
+    if (ifMatch !== project.version) {
+      res.status(409).json({ error: 'version mismatch', currentVersion: project.version });
+      return;
+    }
+
+    const body = (req.body ?? {}) as {
+      itemId?: unknown;
+      fromStage?: unknown;
+      targetStage?: unknown;
+      artifact?: Record<string, unknown>;
+    };
+    const itemId = typeof body.itemId === 'string' ? body.itemId : '';
+    const targetStage = typeof body.targetStage === 'string' ? (body.targetStage as PipelineStage) : null;
+    if (!itemId) {
+      res.status(400).json({ error: '"itemId" required' });
+      return;
+    }
+    if (!targetStage) {
+      res.status(400).json({ error: '"targetStage" required' });
+      return;
+    }
+    const child = ctx.initiativeTracker.get(itemId);
+    if (!child || child.parentProjectId !== project.id) {
+      res.status(404).json({ error: `child item "${itemId}" not found under project ${project.id}` });
+      return;
+    }
+
+    if (!project.targetRepoPath) {
+      res.status(400).json({ error: 'project has no targetRepoPath; cannot validate artifacts' });
+      return;
+    }
+
+    const artifact = body.artifact ?? {};
+    const validationCtx: StageValidationContext = {
+      targetRepoPath: project.targetRepoPath,
+      specPath: typeof artifact.specPath === 'string' ? artifact.specPath : undefined,
+      prNumber: typeof artifact.prNumber === 'number' ? artifact.prNumber : undefined,
+      taskFlowRecordId: typeof artifact.taskFlowRecordId === 'string' ? artifact.taskFlowRecordId : undefined,
+      skippedReason: typeof artifact.skippedReason === 'string' ? artifact.skippedReason : undefined,
+      skippedBy: typeof artifact.skippedBy === 'string' ? artifact.skippedBy : undefined,
+      unskippedAt: typeof artifact.unskippedAt === 'string' ? artifact.unskippedAt : undefined,
+    };
+
+    const fromStage =
+      typeof body.fromStage === 'string'
+        ? (body.fromStage as PipelineStage)
+        : (child.pipelineStage as PipelineStage | undefined);
+
+    const result = await validateStageTransition(fromStage, targetStage, validationCtx);
+    if (!result.ok) {
+      res.status(409).json({ error: 'stage transition rejected', code: result.code, reason: result.reason });
+      return;
+    }
+
+    try {
+      const updated = await ctx.initiativeTracker.update(itemId, {
+        pipelineStage: targetStage,
+        ifMatch: child.version,
+      });
+      // Bump the project version too so concurrent advance calls don't
+      // operate on a stale view. We touch description ("last advance
+      // <timestamp>") to force a meaningful update.
+      const refreshed = await ctx.initiativeTracker.update(project.id, {
+        // No-op-but-bump: nudge `lastTouchedAt` indirectly via update.
+        nextCheckAt: project.nextCheckAt,
+        ifMatch: project.version,
+      });
+      res.json({
+        item: { id: updated.id, pipelineStage: updated.pipelineStage, version: updated.version },
+        project: { id: refreshed.id, version: refreshed.version },
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'OccVersionMismatchError') {
+        const cv = (err as Error & { currentVersion?: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion: cv });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /projects/:id/halt — kills the active round. Idempotent.
+  router.post('/projects/:id/halt', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.projectRoundRunner) {
+      res.status(503).json({ error: 'ProjectRoundRunner not configured' });
+      return;
+    }
+    const reason = typeof (req.body ?? {}).reason === 'string' ? (req.body as { reason: string }).reason : 'no reason given';
+    try {
+      const result = await ctx.projectRoundRunner.halt(project.id, reason);
+      if (!result) {
+        res.status(409).json({ error: 'project has no halt-able round' });
+        return;
+      }
+      res.json({ id: result.project.id, roundIndex: result.roundIndex, version: result.project.version });
+    } catch (err) {
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /projects/:id/ack — record user acknowledgment.
+  router.post('/projects/:id/ack', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.projectRoundRunner) {
+      res.status(503).json({ error: 'ProjectRoundRunner not configured' });
+      return;
+    }
+    const body = (req.body ?? {}) as { forRoundIndex?: unknown; roundIndex?: unknown };
+    const idx = typeof body.forRoundIndex === 'number' ? body.forRoundIndex : (typeof body.roundIndex === 'number' ? body.roundIndex : 0);
+    if (!Number.isInteger(idx) || idx < 0) {
+      res.status(400).json({ error: '"forRoundIndex" must be a non-negative integer' });
+      return;
+    }
+    try {
+      const updated = await ctx.projectRoundRunner.recordAck(project.id, idx);
+      if (!updated) {
+        res.status(404).json({ error: 'project not found' });
+        return;
+      }
+      res.json({
+        id: updated.id,
+        firstLaunchAckAt: updated.firstLaunchAckAt,
+        lastAckedRoundIndex: updated.lastAckedRoundIndex,
+        unacknowledgedAdvanceCount: updated.unacknowledgedAdvanceCount,
+        version: updated.version,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'OccVersionMismatchError') {
+        const cv = (err as Error & { currentVersion?: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion: cv });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /projects/:id/accept-partial — close a partially-complete round.
+  router.post('/projects/:id/accept-partial', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.projectRoundRunner) {
+      res.status(503).json({ error: 'ProjectRoundRunner not configured' });
+      return;
+    }
+    const body = (req.body ?? {}) as { roundIndex?: unknown; reason?: unknown; skippedBy?: unknown };
+    const idx = typeof body.roundIndex === 'number' ? body.roundIndex : -1;
+    const reason = typeof body.reason === 'string' ? body.reason : '';
+    const skippedBy = typeof body.skippedBy === 'string' ? body.skippedBy : '';
+    if (!Number.isInteger(idx) || idx < 0) {
+      res.status(400).json({ error: '"roundIndex" must be a non-negative integer' });
+      return;
+    }
+    if (!reason.trim()) {
+      res.status(400).json({ error: '"reason" required' });
+      return;
+    }
+    if (!skippedBy.trim()) {
+      res.status(400).json({ error: '"skippedBy" required' });
+      return;
+    }
+    try {
+      const result = await ctx.projectRoundRunner.acceptPartial(project.id, idx, reason, skippedBy);
+      if (!result) {
+        res.status(404).json({ error: 'project or round not found' });
+        return;
+      }
+      res.json({
+        id: result.project.id,
+        skippedItemIds: result.skippedItemIds,
+        version: result.project.version,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'OccVersionMismatchError') {
+        const cv = (err as Error & { currentVersion?: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion: cv });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /projects/:id/claim-ownership — multi-machine ownership transfer.
+  //
+  // Body: {} or { force?: boolean }
+  // Header: If-Match: <version> (OCC)
+  //
+  // Spec § P5: the claimer must (a) commit-and-push the claim before
+  // acting on it, (b) wait 60s for git-sync to converge, (c) re-read
+  // before any auto-action. This endpoint ONLY records the ownership
+  // change; the wait-and-converge happens at the caller level (the
+  // round runner, the auto-advance poller, the dashboard). Claim is
+  // refused (409) if the current owner's heartbeat is still fresh and
+  // `force: true` was not set.
+  router.post('/projects/:id/claim-ownership', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.initiativeTracker) return; // narrow for TS
+    if (!ctx.machineHeartbeat || !ctx.machineHeartbeat.config) {
+      res.status(503).json({ error: 'machine heartbeat not configured' });
+      return;
+    }
+    const ifMatch = parseIfMatch(req, res);
+    if (ifMatch === null) return;
+    if (ifMatch !== project.version) {
+      res.status(409).json({ error: 'version mismatch', currentVersion: project.version });
+      return;
+    }
+    const force = (req.body ?? {}).force === true;
+    const heartbeat = ctx.machineHeartbeat.api;
+    const currentOwner = project.ownerMachineId;
+    const claimer = ctx.machineHeartbeat.config.machineId;
+    if (currentOwner === claimer) {
+      // Already owned by claimer — idempotent success.
+      res.json({ id: project.id, ownerMachineId: claimer, version: project.version, alreadyOwned: true });
+      return;
+    }
+    if (currentOwner && !heartbeat.isStale(currentOwner) && !force) {
+      res.status(409).json({
+        error: 'current owner heartbeat is still fresh; pass {force:true} to claim anyway',
+        currentOwner,
+      });
+      return;
+    }
+    try {
+      const updated = await ctx.initiativeTracker.update(project.id, {
+        ownerMachineId: claimer,
+        ifMatch: project.version,
+      });
+      res.json({
+        id: updated.id,
+        ownerMachineId: updated.ownerMachineId,
+        previousOwner: currentOwner ?? null,
+        version: updated.version,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'OccVersionMismatchError') {
+        const cv = (err as Error & { currentVersion?: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion: cv });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /projects/:id/drift-check — run the drift checker for a given
+  // round and return the verdict. Wraps ProjectDriftChecker.run().
+  //
+  // Body: { roundIndex: number, specPath: string, referencedFiles: string[],
+  //         timeoutMs?: number, modelId?: string }
+  //
+  // Mutex-guarded per project (spec § Phase 1.5 line 279). Without it two
+  // concurrent calls would double-spend the drift-spend ledger and
+  // double-bill the LLM. A second concurrent call returns 409 with
+  // `{error: 'drift-check already in flight'}` so the caller can poll.
+  //
+  // 400 on validation; 503 if no checker configured; 200 with verdict envelope
+  // on success. We do NOT require If-Match: drift is a read-only signal.
+  const driftInFlight: Set<string> = new Set();
+  router.post('/projects/:id/drift-check', async (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    if (!ctx.projectDriftChecker) {
+      res.status(503).json({ error: 'ProjectDriftChecker not configured' });
+      return;
+    }
+    if (!initiativeIdRe.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid project id' });
+      return;
+    }
+    const project = ctx.initiativeTracker.get(req.params.id);
+    if (!project || (project.kind ?? 'task') !== 'project') {
+      res.status(404).json({ error: 'project not found' });
+      return;
+    }
+    if (!project.targetRepoPath) {
+      res.status(400).json({ error: 'project has no targetRepoPath' });
+      return;
+    }
+    const body = (req.body ?? {}) as {
+      roundIndex?: unknown;
+      specPath?: unknown;
+      referencedFiles?: unknown;
+      timeoutMs?: unknown;
+      modelId?: unknown;
+    };
+    const roundIndex = typeof body.roundIndex === 'number' ? body.roundIndex : -1;
+    const specPath = typeof body.specPath === 'string' ? body.specPath : '';
+    const referencedFiles = Array.isArray(body.referencedFiles)
+      ? body.referencedFiles.filter((f): f is string => typeof f === 'string')
+      : [];
+    if (!Number.isInteger(roundIndex) || roundIndex < 0) {
+      res.status(400).json({ error: '"roundIndex" (non-negative integer) required' });
+      return;
+    }
+    if (!specPath.trim()) {
+      res.status(400).json({ error: '"specPath" (string) required' });
+      return;
+    }
+    const rounds = project.rounds ?? [];
+    if (roundIndex >= rounds.length) {
+      res.status(400).json({ error: 'roundIndex out of range', rounds: rounds.length });
+      return;
+    }
+    if (driftInFlight.has(project.id)) {
+      res.status(409).json({ error: 'drift-check already in flight for this project' });
+      return;
+    }
+    driftInFlight.add(project.id);
+    try {
+      const verdict = await ctx.projectDriftChecker.run({
+        projectId: project.id,
+        roundIndex,
+        targetRepoPath: project.targetRepoPath,
+        specPath,
+        referencedFiles,
+        timeoutMs: typeof body.timeoutMs === 'number' ? body.timeoutMs : undefined,
+        modelId: typeof body.modelId === 'string' ? body.modelId : undefined,
+      });
+      res.json({ verdict, projectId: project.id, roundIndex });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      driftInFlight.delete(project.id);
+    }
+  });
+
+  // POST /projects/:id/run-round — manual round-start trigger.
+  //
+  // Spec § Phase 1.7: `/project run-round` is the user-invoked entry path.
+  // Per § Phase 1.5, every entry path goes through `ProjectRoundRunner.preflight`.
+  // On a successful preflight the route schedules the round for the auto-advance
+  // poller by setting `autoAdvanceAt = now`; the poller fires the executor on
+  // its next tick (≤60s). This avoids spawning a long-running child process
+  // from a request handler and keeps a single fire path through the poller.
+  //
+  // Body: { roundIndex: number }
+  // Returns 200 with the preflight verdict + scheduling timestamp on accept,
+  // 409 with the preflight reason on reject, 503 if the runner is not wired.
+  router.post('/projects/:id/run-round', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.initiativeTracker) return;
+    if (!ctx.projectRoundRunner) {
+      res.status(503).json({ error: 'ProjectRoundRunner not configured' });
+      return;
+    }
+    const body = (req.body ?? {}) as { roundIndex?: unknown };
+    const idx = typeof body.roundIndex === 'number' ? body.roundIndex : 0;
+    if (!Number.isInteger(idx) || idx < 0) {
+      res.status(400).json({ error: '"roundIndex" must be a non-negative integer' });
+      return;
+    }
+    const rounds = project.rounds ?? [];
+    if (idx >= rounds.length) {
+      res.status(404).json({ error: `round index ${idx} out of range (0..${rounds.length - 1})` });
+      return;
+    }
+    const verdict = ctx.projectRoundRunner.preflight(project.id, idx);
+    if (!verdict.ok) {
+      res.status(409).json({ error: 'preflight rejected', code: verdict.code, reason: verdict.reason });
+      return;
+    }
+    try {
+      const now = new Date().toISOString();
+      const nextRounds = rounds.map((r, i) => (i === idx ? { ...r, autoAdvanceAt: now } : r));
+      const updated = await ctx.initiativeTracker.update(project.id, {
+        rounds: nextRounds,
+        ifMatch: project.version,
+      });
+      res.json({
+        id: updated.id,
+        roundIndex: idx,
+        scheduledAt: now,
+        version: updated.version,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'OccVersionMismatchError') {
+        const cv = (err as Error & { currentVersion?: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion: cv });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /projects/:id/resume — resume a halted round.
+  //
+  // Spec § Phase 1.5: clears `haltedAt`/`haltReason` on the round and schedules
+  // it for the auto-advance poller. For rounds with status='failed' that have
+  // hit the 3-attempt resume cap (`resumeAttempts >= 3`), the body must include
+  // `{ force: true }`; otherwise the route returns 409. Resetting a `failed`
+  // round also zeroes `resumeAttempts` so the runner gets a fresh budget.
+  //
+  // Body: { roundIndex?: number (default 0), force?: boolean }
+  router.post('/projects/:id/resume', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.initiativeTracker) return;
+    const body = (req.body ?? {}) as { roundIndex?: unknown; force?: unknown };
+    const idx = typeof body.roundIndex === 'number' ? body.roundIndex : 0;
+    const force = body.force === true;
+    if (!Number.isInteger(idx) || idx < 0) {
+      res.status(400).json({ error: '"roundIndex" must be a non-negative integer' });
+      return;
+    }
+    const rounds = project.rounds ?? [];
+    if (idx >= rounds.length) {
+      res.status(404).json({ error: `round index ${idx} out of range (0..${rounds.length - 1})` });
+      return;
+    }
+    const round = rounds[idx];
+    if (round.status === 'failed' && (round.resumeAttempts ?? 0) >= 3 && !force) {
+      res.status(409).json({
+        error: 'round at resume-attempts cap; pass {force:true} to override',
+        resumeAttempts: round.resumeAttempts,
+      });
+      return;
+    }
+    if (!round.haltedAt && round.status !== 'failed') {
+      res.status(409).json({
+        error: 'round is not halted or failed',
+        status: round.status,
+      });
+      return;
+    }
+    try {
+      const now = new Date().toISOString();
+      const nextRounds = rounds.map((r, i) => {
+        if (i !== idx) return r;
+        const { haltedAt: _h, haltReason: _r, ...rest } = r;
+        const resetAttempts = r.status === 'failed' && force;
+        return {
+          ...rest,
+          status: 'pending' as RoundStatus,
+          autoAdvanceAt: now,
+          resumeAttempts: resetAttempts ? 0 : r.resumeAttempts,
+        };
+      });
+      const nextStatus = project.status === 'halted' || project.status === 'abandoned' ? 'active' : project.status;
+      const updated = await ctx.initiativeTracker.update(project.id, {
+        rounds: nextRounds,
+        status: nextStatus,
+        ifMatch: project.version,
+      });
+      res.json({
+        id: updated.id,
+        roundIndex: idx,
+        scheduledAt: now,
+        forced: force,
+        version: updated.version,
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'OccVersionMismatchError') {
+        const cv = (err as Error & { currentVersion?: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion: cv });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // POST /projects/:id/abandon — archive a halted/failed project.
+  //
+  // Spec § Phase 1.7: "archive a halted round; children remain at current stage."
+  // Sets project.status='abandoned' and clears any future `autoAdvanceAt` on
+  // remaining rounds so the poller stops considering them. Children's
+  // `pipelineStage` is left untouched (per spec). Idempotent.
+  //
+  // Refuses (409) if any round is currently in-progress — halt first.
+  router.post('/projects/:id/abandon', async (req, res) => {
+    const project = lookupProject(req, res);
+    if (!project) return;
+    if (!ctx.initiativeTracker) return;
+    const rounds = project.rounds ?? [];
+    const active = rounds.find((r) => r.status === 'in-progress');
+    if (active) {
+      res.status(409).json({
+        error: 'cannot abandon while a round is in-progress; halt the round first',
+        activeRound: active.name,
+      });
+      return;
+    }
+    if (project.status === 'abandoned') {
+      res.json({ id: project.id, status: 'abandoned', version: project.version, alreadyAbandoned: true });
+      return;
+    }
+    try {
+      const clearedRounds = rounds.map((r) => {
+        if (r.autoAdvanceAt) {
+          const { autoAdvanceAt: _x, ...rest } = r;
+          return rest;
+        }
+        return r;
+      });
+      const updated = await ctx.initiativeTracker.update(project.id, {
+        rounds: clearedRounds,
+        status: 'abandoned',
+        ifMatch: project.version,
+      });
+      res.json({ id: updated.id, status: updated.status, version: updated.version });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'OccVersionMismatchError') {
+        const cv = (err as Error & { currentVersion?: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion: cv });
+        return;
+      }
+      res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post('/projects', async (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    const planDocPath = (req.body ?? {}).planDocPath;
+    if (typeof planDocPath !== 'string' || !planDocPath.trim()) {
+      res.status(400).json({ error: '"planDocPath" required (absolute path)' });
+      return;
+    }
+
+    // ── Rate limit: 5 creates/hour per auth token ──────────────────
+    // Per-token counter persisted under `.instar/local/projects-rate.json`.
+    // `.instar/local/` is gitignored (Phase 1.12) so the counter never
+    // syncs across machines — matches the spec's per-agent semantics.
+    const tokenHash = hashAuthHeader(req.headers.authorization);
+    const rateCheck = checkAndIncrementProjectsRate(ctx.config.stateDir, tokenHash);
+    if (!rateCheck.ok) {
+      res.status(429).json({
+        error: 'rate limit exceeded',
+        windowEnds: rateCheck.windowEnds,
+        limit: 5,
+      });
+      return;
+    }
+
+    const { parsePlanDoc } = await import('../core/PlanDocParser.js');
+    const parsed = await parsePlanDoc(planDocPath);
+    if (!parsed.project || parsed.errors.length > 0) {
+      res.status(400).json({
+        error: 'plan doc validation failed',
+        errors: parsed.errors,
+      });
+      return;
+    }
+
+    // Existing slug? Reject unless `unarchive: true` (Phase 1.6).
+    const existing = ctx.initiativeTracker.get(parsed.project.id);
+    if (existing) {
+      if (existing.status !== 'archived' || parsed.project.unarchive !== true) {
+        res.status(409).json({
+          error: `project "${parsed.project.id}" already exists`,
+          archived: existing.status === 'archived',
+        });
+        return;
+      }
+      // Un-archive path is implemented in Phase 1.6 via re-parse rules.
+      // Phase 1a defers full re-parse mutation table to PR 3+; for now we
+      // reject with a clear message so users don't accidentally clobber.
+      res.status(409).json({
+        error: 'unarchive flow not yet implemented; archive then re-create with a new id',
+      });
+      return;
+    }
+
+    try {
+      const created = await createProjectAndChildren(ctx.initiativeTracker, parsed);
+      res.status(201).json(created);
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  router.post('/projects/validate', async (req, res) => {
+    const planDocPath = (req.body ?? {}).planDocPath;
+    if (typeof planDocPath !== 'string' || !planDocPath.trim()) {
+      res.status(400).json({ error: '"planDocPath" required (absolute path)' });
+      return;
+    }
+    const { parsePlanDoc } = await import('../core/PlanDocParser.js');
+    const parsed = await parsePlanDoc(planDocPath);
+    res.json({
+      ok: parsed.errors.length === 0 && !!parsed.project,
+      project: parsed.project,
+      children: parsed.children,
+      errors: parsed.errors,
+    });
+  });
+
+  router.delete('/projects/:id', async (req, res) => {
+    if (!ctx.initiativeTracker) {
+      res.status(503).json({ error: 'Initiative tracker not configured' });
+      return;
+    }
+    if (!initiativeIdRe.test(req.params.id)) {
+      res.status(400).json({ error: 'invalid project id' });
+      return;
+    }
+    const project = ctx.initiativeTracker.get(req.params.id);
+    if (!project || (project.kind ?? 'task') !== 'project') {
+      res.status(404).json({ error: 'project not found' });
+      return;
+    }
+    // If-Match required for archive (P4: OCC on mutating endpoints).
+    const ifMatchHeader = req.headers['if-match'];
+    if (typeof ifMatchHeader !== 'string' || !ifMatchHeader.trim()) {
+      res.status(428).json({ error: 'If-Match header required for archive' });
+      return;
+    }
+    const ifMatch = parseInt(ifMatchHeader.replace(/"/g, ''), 10);
+    if (!Number.isInteger(ifMatch) || ifMatch <= 0) {
+      res.status(400).json({ error: 'If-Match must be a positive integer version' });
+      return;
+    }
+    // Refuse archive if any round is in-progress.
+    const activeRound = (project.rounds ?? []).find((r) => r.status === 'in-progress');
+    if (activeRound) {
+      res.status(409).json({
+        error: 'cannot archive while a round is in-progress',
+        activeRound: activeRound.name,
+      });
+      return;
+    }
+    try {
+      const updated = await ctx.initiativeTracker.update(project.id, {
+        status: 'archived',
+        ifMatch,
+      });
+      res.json({ id: updated.id, status: updated.status, version: updated.version });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err && (err as Error).name === 'OccVersionMismatchError') {
+        const currentVersion = (err as unknown as { currentVersion: number }).currentVersion;
+        res.status(409).json({ error: 'version mismatch', currentVersion });
+        return;
+      }
+      res.status(400).json({ error: msg });
+    }
   });
 
   // ── WhatsApp ────────────────────────────────────────────────────
@@ -7358,12 +9020,13 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ learnings: ctx.evolution.listLearnings({ category, applied }) });
   });
 
-  router.post('/evolution/learnings', (req, res) => {
+  router.post('/evolution/learnings', async (req, res) => {
     if (!ctx.evolution) {
       res.status(503).json({ error: 'Evolution system not configured' });
       return;
     }
-    const { title, category, description, source, tags, evolutionRelevance } = req.body;
+    const { title, category, description, source, tags, evolutionRelevance,
+            context, documentFallback, evidence: explicitEvidence } = req.body;
     if (!title || typeof title !== 'string' || title.length > 500) {
       res.status(400).json({ error: '"title" must be a string under 500 characters' });
       return;
@@ -7372,6 +9035,43 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"description" is required' });
       return;
     }
+
+    // WikiClaim Phase 3 (spec § Producers line 268, § Migration Plan line 341):
+    // /learn must cite at least one evidence row. Either:
+    //   (a) caller passes `evidence: MemoryEvidence[]` directly (advanced),
+    //   (b) caller passes `context: string` and we auto-derive sessions/messages,
+    //   (c) caller passes `documentFallback: {sourceId, path}` for prompted-source.
+    // Combining (b)+(c) is allowed.
+    let derivedEvidence: import('../core/types.js').MemoryEvidence[] = [];
+    let externalReferences: Array<{ kind: 'feedback' | 'commit'; sourceId: string }> = [];
+    let pendingDocumentRef: { sourceId: string; path?: string; note?: string } | undefined;
+    try {
+      if (Array.isArray(explicitEvidence) && explicitEvidence.length > 0) {
+        derivedEvidence = explicitEvidence;
+      } else {
+        const { buildLearnEvidence, LearnEvidenceError } =
+          await import('../core/LearnSkillBridge.js');
+        try {
+          const built = buildLearnEvidence({
+            context: typeof context === 'string' ? context : `${title}\n\n${description}`,
+            documentFallback,
+          });
+          derivedEvidence = built.evidence;
+          externalReferences = built.externalReferences;
+          pendingDocumentRef = built.pendingDocumentRef;
+        } catch (err) {
+          if (err instanceof LearnEvidenceError) {
+            res.status(400).json({ error: err.message });
+            return;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to derive evidence' });
+      return;
+    }
+
     const learning = ctx.evolution.addLearning({
       title, category: category || 'general', description,
       source: source || { discoveredAt: new Date().toISOString() },
@@ -7390,7 +9090,18 @@ export function createRoutes(ctx: RouteContext): Router {
       }
     }
 
-    res.status(201).json({ ...learning, soulNudge });
+    // WikiClaim Phase 3: surface derived evidence + external references on
+    // the response so callers can confirm the bridge resolved their context.
+    // Spec § Producers line 228 — LearnSkill kinds are message|session;
+    // externalReferences carry feedback/commit refs that the caller routes
+    // through the appropriate downstream producer.
+    res.status(201).json({
+      ...learning,
+      soulNudge,
+      evidence: derivedEvidence,
+      externalReferences,
+      ...(pendingDocumentRef ? { pendingDocumentRef } : {}),
+    });
   });
 
   router.patch('/evolution/learnings/:id/apply', (req, res) => {
@@ -7659,9 +9370,33 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ query: q, topicId: topicId ?? null, results, totalResults: results.length });
   });
 
+  function assembleAndRespond(
+    assembler: NonNullable<typeof ctx.workingMemory>,
+    topicId: number,
+    opts: { prompt?: string; jobSlug?: string; assembled?: boolean },
+    res: import('express').Response,
+  ): void {
+    const assembly = assembler.assemble({
+      topicId,
+      prompt: opts.prompt,
+      jobSlug: opts.jobSlug,
+    });
+    res.json({
+      topicId,
+      ...(opts.assembled != null ? { assembled: opts.assembled } : {}),
+      context: assembly.context,
+      estimatedTokens: assembly.estimatedTokens,
+      budgets: assembler.getBudgets(),
+      sources: assembly.sources,
+      queryTerms: assembly.queryTerms,
+      assembledAt: assembly.assembledAt,
+    });
+  }
+
   /**
    * Get full context for a topic (summary + recent messages).
    * GET /topic/context/:topicId?recent=30
+   * GET /topic/context/:topicId?assembled=true  — use WorkingMemoryAssembler with token budgets
    */
   router.get('/topic/context/:topicId', (req, res) => {
     if (!ctx.topicMemory) {
@@ -7675,9 +9410,49 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
 
+    if (req.query.assembled === 'true' && ctx.workingMemory) {
+      assembleAndRespond(ctx.workingMemory, topicId, {
+        prompt: req.query.prompt as string | undefined,
+        assembled: true,
+      }, res);
+      return;
+    }
+
     const recentLimit = Math.min(parseInt(req.query.recent as string, 10) || 30, 100);
     const context = ctx.topicMemory.getTopicContext(topicId, recentLimit);
     res.json(context);
+  });
+
+  /**
+   * Assembled session context — token-budgeted working memory for session start.
+   * Uses WorkingMemoryAssembler to build context within budgets:
+   *   knowledge: 800 tokens, episodes: 400, relationships: 300 (2000 total)
+   *
+   * GET /session/context/:topicId?prompt=...
+   *
+   * Both routes sit behind the global authMiddleware applied at app level in
+   * AgentServer.ts — no per-route middleware needed. Neither route is in the
+   * exemption list (/health, /ping, /dashboard/unlock, etc.).
+   */
+  router.get('/session/context/:topicId', (req, res) => {
+    if (!ctx.workingMemory) {
+      res.status(503).json({
+        error: 'WorkingMemoryAssembler not initialized',
+        hint: 'Requires SemanticMemory and/or EpisodicMemory to be active',
+      });
+      return;
+    }
+
+    const topicId = parseInt(req.params.topicId, 10);
+    if (isNaN(topicId)) {
+      res.status(400).json({ error: 'Invalid topicId' });
+      return;
+    }
+
+    assembleAndRespond(ctx.workingMemory, topicId, {
+      prompt: req.query.prompt as string | undefined,
+      jobSlug: req.query.job as string | undefined,
+    }, res);
   });
 
   /**
@@ -8035,17 +9810,49 @@ export function createRoutes(ctx: RouteContext): Router {
   router.post('/intent/journal', async (req, res) => {
     try {
       const { DecisionJournal } = await import('../core/DecisionJournal.js');
+      const { EvidencePolicyError } = await import('../memory/SemanticMemory.js');
       const journal = new DecisionJournal(ctx.config.stateDir);
 
-      const { sessionId, decision, ...rest } = req.body || {};
+      const { sessionId, decision, evidence, ...rest } = req.body || {};
 
       if (!sessionId || !decision) {
         res.status(400).json({ error: 'sessionId and decision are required' });
         return;
       }
 
-      const entry = journal.log({ sessionId, decision, ...rest });
-      res.status(201).json(entry);
+      // WikiClaim Phase 3 (spec § Producers line 258): every decision must
+      // cite at least one evidence row. The route accepts an explicit
+      // `evidence` array, OR — when omitted — synthesizes a minimum-viable
+      // `session` evidence row from the request's `sessionId` (the auth-
+      // context proxy available at this HTTP layer). Synthesis keeps the
+      // legacy POST shape working while still satisfying the policy gate;
+      // explicit evidence always overrides synthesis. Spec § Producers
+      // line 227: `session` is in the DecisionJournal allowlist. Spec
+      // § Storage and Privacy line 333: synthetic sourceIds are tolerated
+      // (consumers handle dangling refs).
+      let effectiveEvidence: any[] = Array.isArray(evidence) ? evidence : [];
+      if (effectiveEvidence.length === 0) {
+        effectiveEvidence = [{
+          kind: 'session',
+          sourceId: `session:${sessionId}`,
+          weight: 0.5,
+          confidence: 0.5,
+          privacyTier: 'private',
+          note: 'auto-synthesized from request session (no explicit evidence)',
+          updatedAt: new Date().toISOString(),
+        }];
+      }
+
+      try {
+        const entry = journal.log({ sessionId, decision, ...rest }, effectiveEvidence);
+        res.status(201).json(entry);
+      } catch (err) {
+        if (err instanceof EvidencePolicyError) {
+          res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+          return;
+        }
+        throw err;
+      }
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to log decision' });
     }
@@ -9734,6 +11541,27 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json({ withdrawn: true, id: req.params.id });
   });
 
+  /**
+   * POST /commitments/:id/resume
+   * Resume a beacon that was auto-paused after a run of unchanged heartbeats.
+   * Clears `beaconPaused` / `beaconPausedReason` / `beaconPausedAt` and resets
+   * `consecutiveUnchanged`. PromiseBeacon re-arms the timer on the `resumed`
+   * event. No-op (404) for commitments that aren't paused or are in a terminal
+   * status.
+   */
+  router.post('/commitments/:id/resume', (req, res) => {
+    if (!ctx.commitmentTracker) {
+      res.status(404).json({ error: 'CommitmentTracker not configured' });
+      return;
+    }
+    const updated = ctx.commitmentTracker.resume(req.params.id);
+    if (!updated) {
+      res.status(404).json({ error: `Commitment ${req.params.id} not found, not paused, or in terminal status` });
+      return;
+    }
+    res.json({ resumed: true, id: updated.id, commitment: updated });
+  });
+
   // ── Episodic Memory (Activity Sentinel) ──────────────────────────
 
   router.get('/episodes/stats', (req, res) => {
@@ -9879,6 +11707,22 @@ export function createRoutes(ctx: RouteContext): Router {
               console.log(`[relay-agent] Resolved reply waiter for thread ${inboundThreadId} (from ${senderAgent ?? 'unknown'})`);
               waiter.resolve(textContent);
             }
+          }
+        }
+
+        // ThreadlineFlowBridge: resume any TaskFlow flow waiting on a
+        // cross-agent-callback whose correlationId matches this inbound. The
+        // bridge runs after relay-accept (auth has passed), inspects only the
+        // envelope, and never alters the HTTP response — failures or misses
+        // are logged but not surfaced.
+        if (ctx.threadlineFlowBridge) {
+          try {
+            const bridgeResult = await ctx.threadlineFlowBridge.consumeInbound(envelope);
+            if (bridgeResult.resumed) {
+              console.log(`[relay-agent] ThreadlineFlowBridge resumed ${bridgeResult.flowIds.length} flow(s): ${bridgeResult.flowIds.join(', ')}`);
+            }
+          } catch (err) {
+            if (err instanceof Error) console.error('[routes] ThreadlineFlowBridge error:', err.message);
           }
         }
 
@@ -10501,17 +12345,150 @@ export function createRoutes(ctx: RouteContext): Router {
 
   router.post('/threadline/relay-send', async (req, res) => {
     const relayClient = ctx.threadlineRelayClient;
-    const { targetAgent, message, threadId, waitForReply, timeoutSeconds } = req.body;
+    const {
+      targetAgent,
+      message,
+      threadId,
+      waitForReply,
+      timeoutSeconds,
+      originTopicId,
+      purpose,
+    } = req.body;
 
     if (!targetAgent || !message) {
       res.status(400).json({ success: false, error: 'Missing required fields: targetAgent, message' });
       return;
     }
 
+    // THREAD-TOPIC-LINKAGE-SPEC.md: validate the optional originTopicId early.
+    // We accept either number or numeric string; ignore on type mismatch (the
+    // send still goes through, just without topic linkage).
+    let resolvedOriginTopicId: number | undefined;
+    if (originTopicId !== undefined && originTopicId !== null) {
+      const asNum = typeof originTopicId === 'number' ? originTopicId : Number(originTopicId);
+      if (Number.isFinite(asNum) && Number.isInteger(asNum) && asNum > 0) {
+        resolvedOriginTopicId = asNum;
+      }
+    }
+    const resolvedPurpose = typeof purpose === 'string' && purpose.trim().length > 0
+      ? purpose.trim().slice(0, 1024)
+      : undefined;
+
+    /**
+     * Outbound origin capture (spec §5.2). Idempotent: handler returns the
+     * existing commitment when one already exists for this threadId, so 4
+     * call-sites below are safe.
+     */
+    const captureOrigin = async (effThreadId: string, remoteAgentDisplay: string): Promise<void> => {
+      if (!ctx.topicLinkageHandler) return;
+      if (!resolvedOriginTopicId) return;
+      try {
+        ctx.topicLinkageHandler.captureOriginOnSend({
+          threadId: effThreadId,
+          remoteAgent: remoteAgentDisplay,
+          remoteAgentDisplayName: remoteAgentDisplay,
+          originTopicId: resolvedOriginTopicId,
+          purpose: resolvedPurpose,
+          subject: 'Threadline conversation',
+        });
+      } catch (err) {
+        console.warn(
+          `[relay-send] captureOrigin failed for thread ${effThreadId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+
     // Validate message size (64KB limit matching inbound)
     if (Buffer.byteLength(message, 'utf-8') > 64 * 1024) {
       res.status(413).json({ success: false, error: 'Message too large (64KB limit)' });
       return;
+    }
+
+    // Nickname-first resolution. User-curated names in nicknames.json are the
+    // highest-authority mapping (signal-vs-authority: relay discovery is signal,
+    // user nickname is authority). If "Dawn" maps to fingerprint X here, we
+    // route to X regardless of what the relay's discovery cache says about
+    // some other agent that also calls itself "Dawn". Skip when caller used
+    // a "name:fpPrefix" qualifier (they're explicitly disambiguating) or
+    // when the input already looks like a fingerprint.
+    let nicknameResolvedFp: string | null = null;
+    const looksLikeFingerprint = /^[0-9a-f]{16,64}$/i.test(targetAgent);
+    // Parse "name:fpPrefix" once so both branches below can reuse it.
+    const fpPrefixParse = (() => {
+      const ci = targetAgent.lastIndexOf(':');
+      if (ci <= 0 || ci >= targetAgent.length - 1) return null;
+      const suffix = targetAgent.substring(ci + 1);
+      if (!/^[0-9a-f]{4,32}$/i.test(suffix)) return null;
+      return { name: targetAgent.substring(0, ci), fpPrefix: suffix.toLowerCase() };
+    })();
+    const usesFpPrefixSyntax = fpPrefixParse !== null;
+    if (!looksLikeFingerprint) {
+      try {
+        const nicknameStore = new ThreadlineNicknames({ stateDir: ctx.config.stateDir });
+        // For "name:fpPrefix" inputs, look up the bare name in the nickname
+        // store and filter the candidates by the prefix. This lets the user
+        // disambiguate ambiguous nickname entries with the same syntax that
+        // works for known-agents.json — the spec promises this remedy.
+        // Without this, "Dawn:abcd" would skip nickname lookup entirely and
+        // the documented disambiguation path would be a dead end.
+        const lookupName = fpPrefixParse ? fpPrefixParse.name : targetAgent;
+        const lookup = nicknameStore.resolveByName(lookupName);
+        if (lookup && 'ambiguous' in lookup) {
+          if (fpPrefixParse) {
+            const matched = lookup.candidates.filter(c =>
+              c.fingerprint.toLowerCase().startsWith(fpPrefixParse.fpPrefix)
+            );
+            if (matched.length === 1) {
+              nicknameResolvedFp = matched[0].fingerprint;
+            } else if (matched.length === 0) {
+              const hints = lookup.candidates
+                .map(c => `${c.entry.nickname}:${c.fingerprint.substring(0, 8)}`)
+                .join(', ');
+              res.status(409).json({
+                success: false,
+                error: `Nickname "${fpPrefixParse.name}" has no candidate matching prefix "${fpPrefixParse.fpPrefix}". Candidates: ${hints}.`,
+              });
+              return;
+            } else {
+              const hints = matched
+                .map(c => `${c.entry.nickname}:${c.fingerprint.substring(0, 8)}`)
+                .join(', ');
+              res.status(409).json({
+                success: false,
+                error: `Prefix "${fpPrefixParse.fpPrefix}" still ambiguous among nickname "${fpPrefixParse.name}" candidates: ${hints}. Use a longer prefix.`,
+              });
+              return;
+            }
+          } else {
+            const hints = lookup.candidates
+              .map(c => `${c.entry.nickname}:${c.fingerprint.substring(0, 8)} (${c.fingerprint})`)
+              .join(', ');
+            res.status(409).json({
+              success: false,
+              error: `Ambiguous nickname "${targetAgent}" — multiple fingerprints share this name in nicknames.json: ${hints}. Send by fingerprint or use "name:fpPrefix" syntax.`,
+            });
+            return;
+          }
+        } else if (lookup) {
+          // Single-candidate match. If caller also passed a fpPrefix, sanity-
+          // check that it agrees with the curated mapping; on disagreement,
+          // honor the caller's explicit prefix (they may be telling us the
+          // nickname is stale) and skip nickname authority for this send.
+          if (fpPrefixParse && !lookup.fingerprint.toLowerCase().startsWith(fpPrefixParse.fpPrefix)) {
+            console.warn(
+              `[relay-send] Nickname/prefix disagreement for "${fpPrefixParse.name}": ` +
+              `nickname maps to ${lookup.fingerprint.substring(0, 8)}…, ` +
+              `caller prefix is "${fpPrefixParse.fpPrefix}". Honoring caller prefix.`,
+            );
+          } else {
+            nicknameResolvedFp = lookup.fingerprint;
+          }
+        }
+      } catch (err) {
+        // Nickname store read failed — fall through to existing resolution.
+        // Don't block sends on a corrupt nicknames file.
+        console.warn(`[relay-send] Nickname store read failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+      }
     }
 
     const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -10542,9 +12519,16 @@ export function createRoutes(ctx: RouteContext): Router {
           }
         }
 
-        const nameMatches = agents.filter(a =>
-          a.name === targetName || a.name?.toLowerCase() === targetName?.toLowerCase()
-        );
+        // If a nickname resolved upstream, prefer fingerprint match over
+        // name match — the user-curated mapping is authoritative.
+        const nameMatches = nicknameResolvedFp
+          ? agents.filter(a => {
+              const fp = (a.fingerprint || a.publicKey?.substring(0, 32) || '').toLowerCase();
+              return fp === nicknameResolvedFp!.toLowerCase();
+            })
+          : agents.filter(a =>
+              a.name === targetName || a.name?.toLowerCase() === targetName?.toLowerCase()
+            );
 
         // PR-3: Fingerprint-based disambiguation. If multiple known agents
         // share a name, require a `name:fpPrefix` qualifier to pick one.
@@ -10666,6 +12650,37 @@ export function createRoutes(ctx: RouteContext): Router {
                     : 'accepted';
                   console.log(`[relay-send] Local delivery to ${localTarget.name}:${localTarget.port} (thread: ${effectiveThreadId}) — ${outcome}`);
 
+                  // Canonical outbox write — single source of truth for outbound messages
+                  // across BOTH delivery paths (local + relay). Powers the dashboard
+                  // observability tab. Mirrors the inbound canonical write from PR #113.
+                  if (ctx.listenerManager) {
+                    try {
+                      ctx.listenerManager.appendCanonicalOutboxEntry({
+                        from: ctx.config.projectName ?? 'self',
+                        senderName: ctx.config.projectName ?? 'self',
+                        to: localTarget.name,
+                        recipientName: localTarget.name,
+                        threadId: effectiveThreadId,
+                        text: message,
+                        messageId: msgId,
+                        outcome,
+                      });
+                    } catch (err) {
+                      console.warn(`[relay-send] Canonical outbox append failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+                    }
+                  }
+                  // Mirror outbound into Telegram bridge (relay-only — best effort).
+                  if (ctx.telegramBridge) {
+                    ctx.telegramBridge.mirrorOutbound({
+                      threadId: effectiveThreadId,
+                      remoteAgent: localTarget.name,
+                      remoteAgentName: localTarget.name,
+                      text: message,
+                      messageId: msgId,
+                      outcome,
+                    }).catch(() => { /* swallow — bridge is relay-only */ });
+                  }
+                  await captureOrigin(effectiveThreadId, localTarget.name);
                   if (waitForReply) {
                     const reply = await waitForThreadlineReply(ctx, localTarget.name, effectiveThreadId, timeoutSeconds);
                     res.json({
@@ -10677,6 +12692,7 @@ export function createRoutes(ctx: RouteContext): Router {
                       deliveryOutcome: outcome,
                       threadline: tl,
                       reply,
+                      topicLinkageStamped: resolvedOriginTopicId !== undefined,
                     });
                   } else {
                     res.json({
@@ -10687,6 +12703,7 @@ export function createRoutes(ctx: RouteContext): Router {
                       deliveryPath: 'local',
                       deliveryOutcome: outcome,
                       threadline: tl,
+                      topicLinkageStamped: resolvedOriginTopicId !== undefined,
                     });
                   }
                   return;
@@ -10711,8 +12728,31 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     try {
-      // Resolve name → fingerprint if targetAgent isn't already a fingerprint
-      const resolvedId = await relayClient.resolveAgent(targetAgent);
+      // Resolve name → fingerprint. Nickname store wins over relay discovery
+      // when the user has explicitly curated a mapping (set above). Falling
+      // back to relay discovery only when no nickname matched. If the relay
+      // happens to also know this name but maps it to a different fingerprint,
+      // we silently override with the nickname mapping — the user's choice is
+      // authority. Logged so the conflict is visible in operator logs.
+      let resolvedId: string | null;
+      if (nicknameResolvedFp) {
+        resolvedId = nicknameResolvedFp;
+        try {
+          const discoveryFp = await relayClient.resolveAgent(targetAgent);
+          if (discoveryFp && discoveryFp.toLowerCase() !== nicknameResolvedFp.toLowerCase()) {
+            console.warn(
+              `[relay-send] Nickname/discovery mismatch for "${targetAgent}": ` +
+              `nickname maps to ${nicknameResolvedFp.substring(0, 8)}…, ` +
+              `relay discovery returned ${discoveryFp.substring(0, 8)}…. ` +
+              `Honoring user-curated nickname.`,
+            );
+          }
+        } catch {
+          // Discovery probe is best-effort for the conflict warning only.
+        }
+      } else {
+        resolvedId = await relayClient.resolveAgent(targetAgent);
+      }
       if (!resolvedId) {
         res.status(404).json({
           success: false,
@@ -10724,6 +12764,38 @@ export function createRoutes(ctx: RouteContext): Router {
       const relayMsgId = relayClient.sendAuto(resolvedId, message, threadId);
       const effectiveRelayThreadId = threadId ?? relayMsgId;
 
+      // Canonical outbox write for the relay-delivery path — same shape as the
+      // local-delivery path above, so the observability tab sees both paths.
+      if (ctx.listenerManager) {
+        try {
+          ctx.listenerManager.appendCanonicalOutboxEntry({
+            from: ctx.config.projectName ?? 'self',
+            senderName: ctx.config.projectName ?? 'self',
+            to: resolvedId,
+            recipientName: targetAgent,
+            threadId: effectiveRelayThreadId,
+            text: message,
+            messageId: relayMsgId,
+            outcome: 'relay-sent',
+          });
+        } catch (err) {
+          console.warn(`[relay-send] Canonical outbox append failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+        }
+      }
+
+      // Mirror outbound into Telegram bridge (relay-only — best effort).
+      if (ctx.telegramBridge) {
+        ctx.telegramBridge.mirrorOutbound({
+          threadId: effectiveRelayThreadId,
+          remoteAgent: resolvedId,
+          remoteAgentName: targetAgent,
+          text: message,
+          messageId: relayMsgId,
+          outcome: 'relay-sent',
+        }).catch(() => { /* swallow — bridge is relay-only */ });
+      }
+
+      await captureOrigin(effectiveRelayThreadId, targetAgent);
       if (waitForReply) {
         const reply = await waitForThreadlineReply(ctx, resolvedId, effectiveRelayThreadId, timeoutSeconds);
         res.json({
@@ -10733,6 +12805,7 @@ export function createRoutes(ctx: RouteContext): Router {
           resolvedAgent: resolvedId,
           deliveryPath: 'relay',
           reply,
+          topicLinkageStamped: resolvedOriginTopicId !== undefined,
         });
       } else {
         res.json({
@@ -10741,12 +12814,50 @@ export function createRoutes(ctx: RouteContext): Router {
           threadId: effectiveRelayThreadId,
           resolvedAgent: resolvedId,
           deliveryPath: 'relay',
+          topicLinkageStamped: resolvedOriginTopicId !== undefined,
         });
       }
     } catch (err) {
       res.status(500).json({
         success: false,
         error: err instanceof Error ? err.message : 'Send failed',
+      });
+    }
+  });
+
+  // ── Threadline Relay Discover ────────────────────────────────────────
+  // Proxies a discover query through the agent server's relay WebSocket so
+  // the MCP stdio subprocess can ask the relay for its live presence registry
+  // (the MCP subprocess doesn't have its own relay client — same arrangement
+  // as /threadline/relay-send above).
+  router.post('/threadline/relay-discover', async (req, res) => {
+    const relayClient = ctx.threadlineRelayClient;
+    if (!relayClient || relayClient.connectionState !== 'connected') {
+      res.status(503).json({
+        success: false,
+        error: 'Relay not connected',
+        connectionState: relayClient?.connectionState ?? 'absent',
+      });
+      return;
+    }
+    const filter = (req.body && typeof req.body === 'object') ? req.body.filter : undefined;
+    try {
+      const agents = await relayClient.discover(filter);
+      res.json({
+        success: true,
+        agents: agents.map(a => ({
+          agentId: a.agentId,
+          name: a.name,
+          publicKey: Buffer.isBuffer(a.publicKey) ? a.publicKey.toString('hex') : a.publicKey,
+          framework: a.framework,
+          capabilities: a.capabilities,
+          lastSeen: a.lastSeen,
+        })),
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        error: err instanceof Error ? err.message : 'Discover failed',
       });
     }
   });
@@ -12753,6 +14864,254 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(500).json({ error: (err as Error).message, stack: (err as Error).stack });
     }
   });
+  // ─── TaskFlow registry (OpenClaw import — Phase 1) ──────────────────
+  // Admin Bearer-token auth via global authMiddleware. The HTTP API exists for
+  // debugging and out-of-process tooling; production controllers run
+  // in-process inside the server and call the registry directly.
+  // See docs/specs/OPENCLAW-IMPORT-TASKFLOW-SPEC.md.
+  {
+    const taskFlowError = (
+      res: ExpressResponse,
+      err: unknown
+    ): void => {
+      const e = err as { name?: string; code?: string; message?: string; detail?: Record<string, unknown> };
+      if (e?.name !== 'TaskFlowError') {
+        res.status(500).json({ error: 'internal_error', message: e?.message });
+        return;
+      }
+      const status = ({
+        not_found: 404,
+        revision_conflict: 409,
+        already_terminal: 410,
+        invalid_transition: 422,
+        invalid_argument: 422,
+        unauthorized_controller: 422,
+        already_consumed: 422,
+        wait_collision: 422,
+        quota_exceeded: 429,
+      } as Record<string, number>)[e.code ?? ''] ?? 500;
+      // Phase 5: rate-limit responses surface Retry-After header for HTTP-compliant
+      // clients in addition to the in-body retryAfterMs hint. RFC 7231 § 7.1.3
+      // specifies seconds; we round UP so a sub-second retry maps to 1.
+      if (status === 429 && typeof (e.detail as any)?.retryAfterMs === 'number') {
+        const retryAfterMs = (e.detail as any).retryAfterMs as number;
+        const seconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
+        try { res.setHeader('Retry-After', String(seconds)); } catch { /* swallow */ }
+      }
+      res.status(status).json({ error: e.code, ...(e.detail ?? {}), message: e.message });
+    };
+
+    router.post('/flows', async (req, res) => {
+      if (!ctx.taskFlowRegistry) {
+        res.status(503).json({ error: 'taskflow_not_enabled' });
+        return;
+      }
+      try {
+        const out = await ctx.taskFlowRegistry.createFlow(req.body ?? {});
+        res.status(out.created ? 201 : 200).json(out.flow);
+      } catch (err) {
+        if (err instanceof Error) taskFlowError(res, err);
+        else res.status(500).json({ error: 'internal_error' });
+      }
+    });
+
+    router.get('/flows/:flowId', (req, res) => {
+      if (!ctx.taskFlowRegistry) {
+        res.status(503).json({ error: 'taskflow_not_enabled' });
+        return;
+      }
+      const flow = ctx.taskFlowRegistry.getFlow(req.params.flowId);
+      if (!flow) {
+        res.status(404).json({ error: 'not_found', flowId: req.params.flowId });
+        return;
+      }
+      // The owning controller may identify itself via header to receive the
+      // unredacted record. Otherwise we return the redacted shape (no
+      // stateJson, waitJson reduced to {kind}).
+      const callerControllerId = req.header('x-taskflow-controller-id');
+      if (callerControllerId && callerControllerId === flow.controllerId) {
+        res.json(flow);
+        return;
+      }
+      res.json(ctx.taskFlowRegistry.getRedactedFlow(req.params.flowId));
+    });
+
+    router.get('/flows/waiting', (req, res) => {
+      if (!ctx.taskFlowRegistry) {
+        res.status(503).json({ error: 'taskflow_not_enabled' });
+        return;
+      }
+      const channel = typeof req.query.channel === 'string' ? req.query.channel : undefined;
+      const threadId = typeof req.query.threadId === 'string' ? req.query.threadId : undefined;
+      const peer = typeof req.query.peer === 'string' ? req.query.peer : undefined;
+      const correlationId =
+        typeof req.query.correlationId === 'string' ? req.query.correlationId : undefined;
+      const waitKind = typeof req.query.waitKind === 'string' ? req.query.waitKind : undefined;
+      if (channel && threadId && peer) {
+        res.json({
+          matches: ctx.taskFlowRegistry.findWaitingByReply({ channel, threadId, peer }),
+        });
+        return;
+      }
+      if (correlationId && (waitKind === 'external-call' || waitKind === 'cross-agent-callback')) {
+        res.json({
+          matches: ctx.taskFlowRegistry.findWaitingByCorrelation({ waitKind, correlationId }),
+        });
+        return;
+      }
+      res.status(400).json({ error: 'invalid_query', message: 'specify (channel,threadId,peer) or (correlationId,waitKind)' });
+    });
+
+    const occMutationHandler = (
+      op: 'startStep' | 'setFlowWaiting' | 'resumeFlow' | 'finishFlow' | 'failFlow' | 'cancelFlow' | 'markLost'
+    ) => async (req: ExpressRequest, res: ExpressResponse) => {
+      if (!ctx.taskFlowRegistry) {
+        res.status(503).json({ error: 'taskflow_not_enabled' });
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const flowId = req.params.flowId;
+      const expectedRevision = Number(body.expectedRevision);
+      if (!Number.isFinite(expectedRevision)) {
+        res.status(422).json({ error: 'invalid_argument', field: 'expectedRevision' });
+        return;
+      }
+      const principal = body.principal as
+        | { scope: 'controller'; controllerId: string; controllerInstanceId: string }
+        | { scope: 'system-waker'; wakerId: string }
+        | { scope: 'admin' }
+        | undefined;
+      if (!principal || typeof principal !== 'object' || !('scope' in principal)) {
+        res.status(422).json({ error: 'invalid_argument', field: 'principal' });
+        return;
+      }
+      try {
+        let result;
+        switch (op) {
+          case 'startStep':
+            result = await ctx.taskFlowRegistry.startStep({
+              flowId,
+              expectedRevision,
+              principal: principal as any,
+              currentStep: String(body.currentStep ?? ''),
+            });
+            break;
+          case 'setFlowWaiting':
+            result = await ctx.taskFlowRegistry.setFlowWaiting({
+              flowId,
+              expectedRevision,
+              principal: principal as any,
+              waitJson: body.waitJson as any,
+              currentStep: body.currentStep as string | undefined,
+              statePatch: body.statePatch,
+            });
+            break;
+          case 'resumeFlow':
+            result = await ctx.taskFlowRegistry.resumeFlow({
+              flowId,
+              expectedRevision,
+              principal: principal as any,
+              waitInstanceId: String(body.waitInstanceId ?? ''),
+              currentStep: body.currentStep as string | undefined,
+              statePatch: body.statePatch,
+            });
+            break;
+          case 'finishFlow':
+            result = await ctx.taskFlowRegistry.finishFlow({
+              flowId,
+              expectedRevision,
+              principal: principal as any,
+              result: body.result,
+            });
+            break;
+          case 'failFlow':
+            result = await ctx.taskFlowRegistry.failFlow({
+              flowId,
+              expectedRevision,
+              principal: principal as any,
+              failureReason: String(body.failureReason ?? ''),
+            });
+            break;
+          case 'cancelFlow':
+            result = await ctx.taskFlowRegistry.cancelFlow({
+              flowId,
+              expectedRevision,
+              principal: principal as any,
+            });
+            break;
+          case 'markLost':
+            result = await ctx.taskFlowRegistry.markLost({
+              flowId,
+              expectedRevision,
+              ledgerEntryId: String(body.ledgerEntryId ?? ''),
+              reason: body.reason === 'stranded' ? 'stranded' : 'lost',
+            });
+            break;
+        }
+        res.json(result);
+      } catch (err) {
+        if (err instanceof Error) taskFlowError(res, err);
+        else res.status(500).json({ error: 'internal_error' });
+      }
+    };
+
+    router.post('/flows/:flowId/start-step', occMutationHandler('startStep'));
+    router.post('/flows/:flowId/wait', occMutationHandler('setFlowWaiting'));
+    router.post('/flows/:flowId/resume', occMutationHandler('resumeFlow'));
+    router.post('/flows/:flowId/finish', occMutationHandler('finishFlow'));
+    router.post('/flows/:flowId/fail', occMutationHandler('failFlow'));
+    router.post('/flows/:flowId/cancel-flow', occMutationHandler('cancelFlow'));
+    router.post('/flows/:flowId/mark-lost', occMutationHandler('markLost'));
+
+    router.post('/flows/:flowId/cancel-request', async (req, res) => {
+      if (!ctx.taskFlowRegistry) {
+        res.status(503).json({ error: 'taskflow_not_enabled' });
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const expectedRevision = Number(body.expectedRevision);
+      if (!Number.isFinite(expectedRevision)) {
+        res.status(422).json({ error: 'invalid_argument', field: 'expectedRevision' });
+        return;
+      }
+      try {
+        const result = await ctx.taskFlowRegistry.requestFlowCancel({
+          flowId: req.params.flowId,
+          expectedRevision,
+          requesterOrigin: body.requesterOrigin as any,
+        });
+        res.json(result);
+      } catch (err) {
+        if (err instanceof Error) taskFlowError(res, err);
+        else res.status(500).json({ error: 'internal_error' });
+      }
+    });
+
+    router.post('/flows/:flowId/ping', async (req, res) => {
+      if (!ctx.taskFlowRegistry) {
+        res.status(503).json({ error: 'taskflow_not_enabled' });
+        return;
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const principal = body.principal as
+        | { scope: 'controller'; controllerId: string; controllerInstanceId: string }
+        | undefined;
+      if (!principal || principal.scope !== 'controller') {
+        res.status(422).json({ error: 'invalid_argument', field: 'principal' });
+        return;
+      }
+      try {
+        const flow = await ctx.taskFlowRegistry.pingFlow({
+          flowId: req.params.flowId,
+          principal,
+        });
+        res.json(flow);
+      } catch (err) {
+        if (err instanceof Error) taskFlowError(res, err);
+        else res.status(500).json({ error: 'internal_error' });
+      }
+    });
+  }
 
   return router;
 }

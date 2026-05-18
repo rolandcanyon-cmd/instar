@@ -20,6 +20,9 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { detectTmuxPath } from '../core/Config.js';
 import { SleepWakeDetector } from '../core/SleepWakeDetector.js';
 import { SafeFsExecutor } from '../core/SafeFsExecutor.js';
@@ -43,6 +46,155 @@ export interface SupervisorEvents {
   updateApplied: [targetVersion: string];
 }
 
+// ── F-6: Remediator ↔ ServerSupervisor handshake ─────────────────────
+//
+// Per v2 spec §A15 (partial-upgrade window) + v3 §3 (state-file taxonomy:
+// `.instar/state/supervisor-handshake.json` and `restart-requested.json`
+// extended with HMAC). The Remediator signs a `restart-requested` request
+// with the capability-context leaf key from F-1 RemediationKeyVault; the
+// supervisor verifies the HMAC before honouring the request and notifies
+// the Remediator once the restart cycle completes (so the attempt state
+// machine can advance to verify-phase).
+
+/**
+ * The signed payload a Remediator sends to the supervisor to request a
+ * planned restart. The HMAC covers the canonical serialization of
+ * `{requestId, runbookId, attemptId, blastRadius, requestedAt, monotonicTs,
+ * handshakeVersion}` using the Remediator's per-call capability leaf key
+ * (RemediationKeyVault.deriveLeafKey('capability', runbookId)).
+ */
+export interface RestartRequestedPayload {
+  requestId: string;
+  runbookId: string;
+  attemptId: string;
+  blastRadius: 'process' | 'machine' | 'fleet';
+  /** Wall-clock ms (Date.now()). Used for staleness rejection. */
+  requestedAt: number;
+  /** `process.hrtime.bigint()` at request issuance. Informational. */
+  monotonicTs: bigint;
+  /** Handshake protocol version the Remediator is speaking. */
+  handshakeVersion: number;
+  /** HMAC-SHA256 over canonical payload using the Remediator's capability leaf. */
+  hmac: Buffer;
+}
+
+/** Reply the supervisor returns from `handleRestartRequested`. */
+export interface RestartRequestedReply {
+  requestId: string;
+  accepted: boolean;
+  /** Machine-readable reason code, e.g. `'accepted'`, `'invalid-hmac'`,
+   *  `'stale'`, `'blast-radius-out-of-scope'`, `'handshake-version-mismatch'`. */
+  reason: string;
+  /** Supervisor's handshake protocol version (informational). */
+  supervisorHandshakeVersion: number;
+  /** Supervisor's build id (informational; A15 lag check). */
+  supervisorBuildId: string;
+}
+
+// ── W-2: supervisor-preflight runbook surface (Tier-2) ──────────────
+//
+// Per v2 spec §A34 — the W-2 runbook is a SINGLE wrapper around the
+// existing private `preflightSelfHeal()` body (six in-line heal steps).
+// Mirrors `RemediatorInvocationContext` from `src/memory/NativeModuleHealer.ts`
+// so this file stays runtime-decoupled from `src/remediation/*` — same
+// structural-typing rationale as the W-1 NativeModuleHealer surface.
+
+/**
+ * Lightweight structural type compatible with F-8 Remediator's
+ * `RemediationContext`. Imported as a type-only reference; runtime
+ * decoupling lets us avoid a hard dependency from `src/lifeline/*` onto
+ * `src/remediation/*` (the legacy spawn-time `preflightSelfHeal()` path
+ * must keep working even if remediation files are absent).
+ */
+export interface SupervisorRemediatorInvocationContext {
+  attemptId: string;
+  runbookId: string;
+  abortSignal: AbortSignal;
+  /** `process.hrtime.bigint()` issued + expectedRuntimeMs converted to ns. */
+  monotonicDeadline: bigint;
+  /** §A3 capability-token HMAC — present on Tier-2 dispatched ctxs. */
+  hmac?: Buffer;
+  /** Wall-clock expiry, mirrors `RemediationContext.expiresAt`. */
+  expiresAt?: number;
+}
+
+/**
+ * Optional keyVault dependency for `invokeFromRemediator` §A3 / §A23
+ * verification. Structural so `src/lifeline/*` doesn't pull in
+ * `src/remediation/*` at module load.
+ */
+export interface SupervisorInvocationContextKeyVault {
+  deriveLeafKey(context: 'capability', scopeId: string): Buffer;
+}
+
+export interface SupervisorRemediatorExecutionResult {
+  outcome: 'success' | 'failure';
+  details: Record<string, unknown>;
+}
+
+/**
+ * §A3 verify the HMAC on a `SupervisorRemediatorInvocationContext`.
+ * Mirrors the canonical body layout in
+ * `src/remediation/RemediationContext.ts`. We inline rather than import
+ * to avoid the `src/lifeline/*` → `src/remediation/*` dependency that
+ * would break the legacy `preflightSelfHeal()` path on installs without
+ * the remediation tree.
+ */
+function verifySupervisorContextHmac(
+  ctx: SupervisorRemediatorInvocationContext,
+  keyVault: SupervisorInvocationContextKeyVault,
+): boolean {
+  if (!ctx.hmac || !Buffer.isBuffer(ctx.hmac) || ctx.hmac.length === 0) {
+    return false;
+  }
+  if (!ctx.runbookId) return false;
+  let leaf: Buffer;
+  try {
+    leaf = keyVault.deriveLeafKey('capability', ctx.runbookId);
+  } catch {
+    // @silent-fallback-ok — §A3 verification is fail-closed by design.
+    return false;
+  }
+  const HMAC_TAG = Buffer.from('instar-f8-ctx-v1\x00', 'utf-8');
+  const writeStr = (s: string): Buffer => {
+    const body = Buffer.from(s, 'utf-8');
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(body.length, 0);
+    return Buffer.concat([len, body]);
+  };
+  const expiresAtBuf = Buffer.alloc(8);
+  expiresAtBuf.writeBigUInt64BE(
+    BigInt(Math.max(0, Math.floor(ctx.expiresAt ?? 0))),
+    0,
+  );
+  const monoBuf = Buffer.alloc(8);
+  const mono = ctx.monotonicDeadline >= 0n ? ctx.monotonicDeadline : 0n;
+  monoBuf.writeBigUInt64BE(mono, 0);
+  const body = Buffer.concat([
+    HMAC_TAG,
+    writeStr(ctx.attemptId),
+    writeStr(ctx.runbookId),
+    expiresAtBuf,
+    monoBuf,
+  ]);
+  const expected = crypto.createHmac('sha256', leaf).update(body).digest();
+  if (expected.length !== ctx.hmac.length) return false;
+  try {
+    return crypto.timingSafeEqual(expected, ctx.hmac);
+  } catch {
+    // @silent-fallback-ok — fail-closed.
+    return false;
+  }
+}
+
+/** The Remediator instance interface the supervisor calls back into. */
+export interface RegisteredRemediator {
+  /** Called by supervisor after a planned restart completes. */
+  onRestartComplete: (req: { requestId: string }) => void;
+  /** Returns the leaf key the Remediator used to sign restart-requested. */
+  getCapabilityLeafKey: () => Buffer;
+}
+
 export class ServerSupervisor extends EventEmitter {
   private projectDir: string;
   private projectName: string;
@@ -63,6 +215,13 @@ export class ServerSupervisor extends EventEmitter {
   private maxRetriesExhaustedAt = 0;
   private consecutiveFailures = 0; // Hysteresis: require 2 consecutive failures before marking unhealthy
   private readonly unhealthyThreshold = 2;
+  // Bind-failure escalation — incremented when a spawn produces a server that
+  // never reaches a healthy /health response before crashing. After 2+ in a
+  // row, the next preflight forces an aggressive better-sqlite3 rebuild
+  // regardless of what the require-load probe reports. Reset on any healthy
+  // tick. See preflightSelfHeal native-module branch.
+  private consecutiveBindFailures = 0;
+  private readonly bindFailureEscalationThreshold = 2;
   private readonly processAliveThreshold = 6; // When process is alive but unresponsive (e.g., high CPU load), require 6 failures (~60s) before restarting
   private stateDir: string | null;
 
@@ -88,6 +247,17 @@ export class ServerSupervisor extends EventEmitter {
   private sleepWakeDetector: SleepWakeDetector | null = null; // Detects short sleeps that gap-based detection misses
   private wakeTransitionUntil = 0; // Timestamp until which we're in a wake transition (lenient health checks)
   private readonly wakeTransitionMs = 60_000; // 60 seconds of lenient health checking after wake
+
+  // ── F-6 handshake state ────────────────────────────────────────────
+  /** Current handshake protocol version. Bump on any wire-format change. */
+  static readonly HANDSHAKE_PROTOCOL_VERSION = 1;
+  /** Max staleness of a restart-requested payload before it's rejected. */
+  static readonly RESTART_REQUEST_MAX_AGE_MS = 5 * 60_000;
+  private registeredRemediator: RegisteredRemediator | null = null;
+  /** Pending restart requests awaiting completion notification, keyed by requestId. */
+  private pendingRemediatorRequests = new Map<string, { requestId: string; runbookId: string; attemptId: string; }>();
+  /** Build id surfaced via handshake. Tests inject; production reads package.json. */
+  private supervisorBuildId: string = process.env.INSTAR_SUPERVISOR_BUILD_ID || 'unknown';
 
   constructor(options: {
     projectDir: string;
@@ -317,6 +487,139 @@ export class ServerSupervisor extends EventEmitter {
   // `/lifeline restart` actually useful for recovery — not just a blind retry.
 
   /**
+   * Remediator-orchestrated entry point for the preflight self-heal.
+   *
+   * Wraps the existing private `preflightSelfHeal()` (six in-line heal steps:
+   * shadow-install reinstall, node-symlink repair, stuck-git-rebase abort,
+   * better-sqlite3 ABI rebuild, stale lifeline-lock cleanup, settings.json
+   * merge-conflict repair) and exposes it as the W-2 `supervisor-preflight`
+   * runbook's `surfaceCallable`.
+   *
+   * SELF-HEALING-REMEDIATOR-V2-SPEC §A34 mandates the runbook is a SINGLE
+   * runbook composing all six heal steps rather than six separate runbooks —
+   * the verify step asserts the durable lifeline state (not per-step liveness)
+   * AFTER all six attempt their fix, mirroring how the in-line path is wired
+   * into `spawnServer()`.
+   *
+   * §A3 capability-token enforcement. When `keyVault` is wired AND `ctx.hmac`
+   * is present, the HMAC is verified at entry. An invalid ctx returns an
+   * error result and does NOT run the preflight side-effects — falling back
+   * to the legacy in-line path is the supervisor's spawn-time concern, not
+   * this Remediator path's. This is fail-closed by design.
+   *
+   * Honours `ctx.abortSignal` at the boundary; the existing preflight body
+   * itself is synchronous-leaning and not interruptible mid-step. Surfaces a
+   * pre-step abort check so an already-aborted ctx returns immediately.
+   *
+   * The legacy `private preflightSelfHeal()` stays unchanged. The in-line
+   * `spawnServer()` path keeps calling it directly — both entry points share
+   * the same body, satisfying the §A2 lock-bound co-existence invariant at
+   * the process level (and the MachineLock prevents two simultaneous
+   * supervisor-preflight runs across processes).
+   */
+  async invokeFromRemediator(
+    ctx: SupervisorRemediatorInvocationContext,
+    keyVault?: SupervisorInvocationContextKeyVault,
+  ): Promise<SupervisorRemediatorExecutionResult> {
+    // §A3 — verify the capability HMAC when both keyVault and ctx.hmac are
+    // present. Fail-closed: invalid ctx does NOT touch any heal step.
+    if (keyVault && ctx.hmac !== undefined) {
+      const ok = verifySupervisorContextHmac(ctx, keyVault);
+      if (!ok) {
+        console.warn(
+          `[Supervisor] remediation.surface.invalid-context ` +
+            `runbookId=${ctx.runbookId} attemptId=${ctx.attemptId} — ` +
+            `refusing Remediator-orchestrated preflight`,
+        );
+        return {
+          outcome: 'failure',
+          details: {
+            reason: 'invalid-context',
+            attemptId: ctx.attemptId,
+            invalidContext: true,
+          },
+        };
+      }
+    }
+
+    if (ctx.abortSignal.aborted) {
+      return {
+        outcome: 'failure',
+        details: {
+          reason: 'aborted-before-start',
+          attemptId: ctx.attemptId,
+        },
+      };
+    }
+
+    if (!this.stateDir) {
+      return {
+        outcome: 'failure',
+        details: {
+          reason: 'no-state-dir',
+          attemptId: ctx.attemptId,
+        },
+      };
+    }
+
+    // Check deadline budget — preflight can take up to ~120s on a cold-cache
+    // npm install + better-sqlite3 rebuild. Refuse if the ctx has < 5s left.
+    const nowHr = process.hrtime.bigint();
+    if (ctx.monotonicDeadline > 0n && ctx.monotonicDeadline <= nowHr) {
+      return {
+        outcome: 'failure',
+        details: {
+          reason: 'deadline-already-elapsed',
+          attemptId: ctx.attemptId,
+        },
+      };
+    }
+
+    let summary = '';
+    let threw: Error | null = null;
+    try {
+      // Delegate to the existing six-step heal body. Synchronous; returns
+      // a human-readable summary (empty string if nothing was healed).
+      summary = this.preflightSelfHeal();
+    } catch (err) {
+      threw = err instanceof Error ? err : new Error(String(err));
+    }
+
+    if (ctx.abortSignal.aborted) {
+      // The abort fired during the synchronous body — record the partial
+      // attempt but report aborted so the Remediator's verify step is skipped
+      // by the dispatcher's deadline-race path.
+      return {
+        outcome: 'failure',
+        details: {
+          reason: 'aborted-mid-step',
+          attemptId: ctx.attemptId,
+          partialSummary: summary,
+        },
+      };
+    }
+
+    if (threw) {
+      return {
+        outcome: 'failure',
+        details: {
+          reason: `preflight-threw: ${threw.message.slice(0, 200)}`,
+          attemptId: ctx.attemptId,
+        },
+      };
+    }
+
+    return {
+      outcome: 'success',
+      details: {
+        attemptId: ctx.attemptId,
+        healed: summary,
+        anyHealed: summary.length > 0,
+      },
+    };
+  }
+
+  /**
    * Run preflight checks and attempt to fix broken prerequisites.
    * Returns a summary of what was healed (empty string if nothing needed fixing).
    */
@@ -403,53 +706,71 @@ export class ServerSupervisor extends EventEmitter {
 
     // 4. Native module mismatch — better-sqlite3 compiled for wrong Node version.
     //    This is the #1 cause of server crash-loops after a Node upgrade.
+    //
     //    IMPORTANT: Test with the node binary the SERVER will use (.instar/bin/node),
     //    not process.execPath (the lifeline's node), since these may differ.
+    //
+    //    IMPORTANT: Scan ALL nested copies under shadow-install/node_modules.
+    //    A previous version checked only the top-level hoisted path
+    //    `shadow-install/node_modules/better-sqlite3/...`, but npm does not
+    //    always hoist; the actually-loaded copy can live at the nested path
+    //    `shadow-install/node_modules/instar/node_modules/better-sqlite3/...`.
+    //    This was the root cause of the Inspec 2026-04-29 silent crash-loop.
     if (this.stateDir) {
-      const sqliteNode = path.join(this.stateDir, 'shadow-install', 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
       const serverNode = path.join(this.stateDir, 'bin', 'node');
       const checkNode = (fs.existsSync(serverNode)) ? serverNode : process.execPath;
-      if (fs.existsSync(sqliteNode)) {
+      const shadowNodeModules = path.join(this.stateDir, 'shadow-install', 'node_modules');
+      const sqliteCopies = findBetterSqlite3Copies(shadowNodeModules);
+      const force = this.consecutiveBindFailures >= 2;
+      if (force) {
+        console.log(`[Supervisor] Preflight: ${this.consecutiveBindFailures} consecutive bind failures — forcing aggressive better-sqlite3 rebuild`);
+      }
+      for (const copy of sqliteCopies) {
         try {
-          // Try loading the native module with the SERVER's Node — if it fails, rebuild
-          const result = spawnSync(checkNode, ['-e', `require('${sqliteNode.replace(/'/g, "\\'")}')`], {
+          // Try loading the native module with the SERVER's Node — if it fails, rebuild.
+          // When we're escalating after consecutive bind failures, force the rebuild
+          // even if the require-load succeeds (the load may pass for one copy while
+          // a different cached copy is what actually got resolved at runtime).
+          const result = spawnSync(checkNode, ['-e', `require('${copy.binaryPath.replace(/'/g, "\\'")}')`], {
             encoding: 'utf-8',
             timeout: 10_000,
             cwd: this.projectDir,
           });
-          if (result.status !== 0 && result.stderr?.includes('NODE_MODULE_VERSION')) {
-            console.log(`[Supervisor] Preflight: better-sqlite3 native module version mismatch — rebuilding (server node: ${checkNode})`);
-            const npmPath = this.findNpmPath();
-            if (npmPath) {
-              // Use the server's node for the rebuild so the native module matches
-              const rebuildEnv: Record<string, string | undefined> = { ...process.env, npm_config_node_gyp: undefined };
-              if (checkNode !== process.execPath) {
-                rebuildEnv.npm_node_execpath = checkNode;
-              }
-              const rebuildResult = spawnSync(checkNode, [npmPath, 'rebuild', 'better-sqlite3', '--prefix', path.join(this.stateDir, 'shadow-install')], {
-                encoding: 'utf-8',
-                timeout: 60_000,
-                cwd: this.projectDir,
-                env: rebuildEnv,
-              });
-              if (rebuildResult.status === 0) {
-                // Verify the rebuild actually produced a working module
-                const verifyResult = spawnSync(checkNode, ['-e', `require('${sqliteNode.replace(/'/g, "\\'")}')`], {
-                  encoding: 'utf-8', timeout: 10_000, cwd: this.projectDir,
-                });
-                if (verifyResult.status === 0) {
-                  healed.push('better-sqlite3 rebuilt for current Node');
-                  console.log('[Supervisor] Preflight: better-sqlite3 rebuilt and verified successfully');
-                } else {
-                  console.error(`[Supervisor] Preflight: better-sqlite3 rebuild succeeded but module still fails to load: ${(verifyResult.stderr || '').slice(-200)}`);
-                }
-              } else {
-                console.error(`[Supervisor] Preflight: better-sqlite3 rebuild failed: ${(rebuildResult.stderr || '').slice(-200)}`);
-              }
-            }
+          const needsRebuild = force || (result.status !== 0 && result.stderr?.includes('NODE_MODULE_VERSION'));
+          if (!needsRebuild) continue;
+          console.log(`[Supervisor] Preflight: better-sqlite3 ${force ? 'force-rebuild' : 'version mismatch'} at ${copy.packageDir} — rebuilding (server node: ${checkNode})`);
+          const npmPath = this.findNpmPath();
+          if (!npmPath) {
+            console.error('[Supervisor] Preflight: no npm binary found — cannot rebuild better-sqlite3');
+            continue;
+          }
+          const rebuildEnv: Record<string, string | undefined> = { ...process.env, npm_config_node_gyp: undefined };
+          if (checkNode !== process.execPath) {
+            rebuildEnv.npm_node_execpath = checkNode;
+          }
+          const rebuildArgs = ['rebuild', 'better-sqlite3', '--prefix', copy.prefixDir];
+          if (force) rebuildArgs.push('--force');
+          const rebuildResult = spawnSync(checkNode, [npmPath, ...rebuildArgs], {
+            encoding: 'utf-8',
+            timeout: 120_000,
+            cwd: this.projectDir,
+            env: rebuildEnv,
+          });
+          if (rebuildResult.status !== 0) {
+            console.error(`[Supervisor] Preflight: better-sqlite3 rebuild failed at ${copy.packageDir}: ${(rebuildResult.stderr || '').slice(-200)}`);
+            continue;
+          }
+          const verifyResult = spawnSync(checkNode, ['-e', `require('${copy.binaryPath.replace(/'/g, "\\'")}')`], {
+            encoding: 'utf-8', timeout: 10_000, cwd: this.projectDir,
+          });
+          if (verifyResult.status === 0) {
+            healed.push(`better-sqlite3 rebuilt at ${path.relative(this.stateDir, copy.packageDir)}`);
+            console.log(`[Supervisor] Preflight: better-sqlite3 rebuilt and verified at ${copy.packageDir}`);
+          } else {
+            console.error(`[Supervisor] Preflight: better-sqlite3 rebuild succeeded but module still fails to load at ${copy.packageDir}: ${(verifyResult.stderr || '').slice(-200)}`);
           }
         } catch (err) {
-          console.error(`[Supervisor] Preflight: native module check failed: ${err}`);
+          console.error(`[Supervisor] Preflight: native module check failed at ${copy.packageDir}: ${err}`);
         }
       }
     }
@@ -560,7 +881,7 @@ export class ServerSupervisor extends EventEmitter {
       // Shadow install is the agent's private copy at {stateDir}/shadow-install/.
       // The AutoUpdater installs updates there instead of globally, so each agent
       // manages its own version independently.
-      let cliPath = new URL('../cli.js', import.meta.url).pathname;
+      let cliPath = path.resolve(__dirname, '../cli.js');
 
       // Check for shadow install first — this is the agent's own managed version
       if (this.stateDir) {
@@ -588,10 +909,18 @@ export class ServerSupervisor extends EventEmitter {
       const quotedCli = cliPath.replace(/'/g, "'\\''");
       const nodeCmd = `'${quotedNode}' '${quotedCli}' 'server' 'start' '--foreground' '--no-telegram' 2> >(tee '${crashLogPath}' >&2)`;
 
+      // GIT_TERMINAL_PROMPT=0 prevents git operations performed during startup
+      // (auto-pull / git-sync) from falling through to an interactive terminal
+      // prompt when GIT_ASKPASS fails. Without it, a missing/expired credential
+      // helper hangs the bash command behind "Username for 'https://github.com':",
+      // which fails the health check and produces a runaway restart loop. tmux
+      // `-e` is per-session and survives an existing tmux server (process.env
+      // alone does not propagate once tmux is already running).
       execFileSync(this.tmuxPath, [
         'new-session', '-d',
         '-s', this.serverSessionName,
         '-c', this.projectDir,
+        '-e', 'GIT_TERMINAL_PROMPT=0',
         `bash`, '-c', nodeCmd,
       ], { stdio: 'ignore' });
 
@@ -709,6 +1038,11 @@ export class ServerSupervisor extends EventEmitter {
           this.lastHealthy = Date.now();
           this.restartAttempts = 0;
           this.consecutiveFailures = 0;
+          this.consecutiveBindFailures = 0;
+
+          // F-6: notify any pending Remediator restart-requested entries
+          // that the planned restart has completed. Idempotent.
+          this.notifyPendingRemediatorRequestsOnHealthy();
 
           // If circuit breaker was tripped and we recovered, reset it
           if (this.circuitBroken) {
@@ -965,6 +1299,227 @@ export class ServerSupervisor extends EventEmitter {
     }
   }
 
+  // ── F-6: Remediator handshake ───────────────────────────────────
+  //
+  // Per v2 spec §A15 + v3 §3. The Remediator registers itself, providing
+  // a `getCapabilityLeafKey()` callback so the supervisor can verify
+  // HMACs on `restart-requested` requests, and a `onRestartComplete`
+  // callback so the supervisor can notify the Remediator when a planned
+  // restart cycle finishes (advancing the attempt to verify-phase).
+  //
+  // Registration also writes `.instar/state/supervisor-handshake.json`
+  // so a freshly-spawned Remediator can detect the supervisor's
+  // handshake protocol version + build id without an in-process handle.
+  // The A15 partial-upgrade rule lives Remediator-side: a Remediator
+  // whose handshakeVersion is NEWER than the supervisor's must refuse to
+  // issue `restart-requested` and fall back to alert-only.
+
+  /**
+   * Register a Remediator instance for the handshake. Idempotent; calling
+   * twice with the same instance is a no-op. Calling with a different
+   * instance replaces the previous registration (last-writer-wins is
+   * fine because there is only ever one Remediator per process).
+   */
+  registerRemediator(remediator: RegisteredRemediator): void {
+    this.registeredRemediator = remediator;
+    this.writeSupervisorHandshakeFile();
+  }
+
+  /** Current handshake protocol version (instance accessor). */
+  getHandshakeProtocolVersion(): number {
+    return ServerSupervisor.HANDSHAKE_PROTOCOL_VERSION;
+  }
+
+  /** Build id used for the A15 partial-upgrade lag check. */
+  getSupervisorBuildId(): string {
+    return this.supervisorBuildId;
+  }
+
+  /** Tests inject; production callers should not need to set this. */
+  setSupervisorBuildId(buildId: string): void {
+    this.supervisorBuildId = buildId;
+    if (this.registeredRemediator) this.writeSupervisorHandshakeFile();
+  }
+
+  /**
+   * Receive a restart-requested from a Remediator. Verifies, in order:
+   *   1. A Remediator is registered.
+   *   2. Required fields are present and well-typed.
+   *   3. `handshakeVersion` matches the supervisor's (A15 rule).
+   *   4. `requestedAt` is within RESTART_REQUEST_MAX_AGE_MS of now.
+   *   5. `blastRadius` is in {process, machine}. Tier-2 refuses 'fleet'.
+   *   6. The HMAC verifies against the canonical payload using the
+   *      Remediator's capability leaf key.
+   *
+   * On accept, the request is tracked under `pendingRemediatorRequests`
+   * and a planned graceful restart is initiated. The Remediator's
+   * `onRestartComplete` callback fires once the supervisor sees the
+   * restart cycle finish (next healthy tick after a serverRestarting).
+   */
+  async handleRestartRequested(payload: RestartRequestedPayload): Promise<RestartRequestedReply> {
+    const supervisorBuildId = this.supervisorBuildId;
+    const supervisorHandshakeVersion = ServerSupervisor.HANDSHAKE_PROTOCOL_VERSION;
+    const requestId = (payload && typeof payload.requestId === 'string') ? payload.requestId : '';
+
+    const reject = (reason: string): RestartRequestedReply => ({
+      requestId,
+      accepted: false,
+      reason,
+      supervisorHandshakeVersion,
+      supervisorBuildId,
+    });
+
+    if (!this.registeredRemediator) {
+      return reject('no-remediator-registered');
+    }
+
+    if (!payload || typeof payload !== 'object') {
+      return reject('malformed-payload');
+    }
+    if (
+      typeof payload.requestId !== 'string' || !payload.requestId ||
+      typeof payload.runbookId !== 'string' || !payload.runbookId ||
+      typeof payload.attemptId !== 'string' || !payload.attemptId ||
+      typeof payload.blastRadius !== 'string' ||
+      typeof payload.requestedAt !== 'number' || !Number.isFinite(payload.requestedAt) ||
+      typeof payload.monotonicTs !== 'bigint' ||
+      typeof payload.handshakeVersion !== 'number' || !Number.isInteger(payload.handshakeVersion) ||
+      !Buffer.isBuffer(payload.hmac)
+    ) {
+      return reject('malformed-payload');
+    }
+
+    // A15: handshake-version mismatch. We accept ONLY exact equality.
+    // A Remediator running a newer handshake than the supervisor must
+    // fall back to alert-only (rejection is informative, not negotiation).
+    if (payload.handshakeVersion !== supervisorHandshakeVersion) {
+      return reject(
+        `handshake-version-mismatch: remediator=${payload.handshakeVersion} supervisor=${supervisorHandshakeVersion} ` +
+        `(A15 partial-upgrade rule — Remediator must fall back to alert-only)`,
+      );
+    }
+
+    // Staleness check — requestedAt must be within the window. Future
+    // timestamps are also rejected to bound clock-skew abuse.
+    const ageMs = Date.now() - payload.requestedAt;
+    if (ageMs > ServerSupervisor.RESTART_REQUEST_MAX_AGE_MS || ageMs < -ServerSupervisor.RESTART_REQUEST_MAX_AGE_MS) {
+      return reject(`stale: ageMs=${ageMs}`);
+    }
+
+    // Blast radius — Tier-2 supervisor handles process + machine restarts.
+    // 'fleet' is reserved for a future coordination-protocol surface and
+    // is refused by Tier-2 unconditionally.
+    if (payload.blastRadius !== 'process' && payload.blastRadius !== 'machine') {
+      return reject(`blast-radius-out-of-scope: ${payload.blastRadius}`);
+    }
+
+    // HMAC verification — use the Remediator's capability leaf key.
+    // Canonical payload format MUST be deterministic; see
+    // canonicalRestartRequestedBody() below.
+    let expected: Buffer;
+    try {
+      const key = this.registeredRemediator.getCapabilityLeafKey();
+      if (!Buffer.isBuffer(key) || key.length === 0) {
+        return reject('invalid-leaf-key');
+      }
+      const body = canonicalRestartRequestedBody(payload);
+      expected = crypto.createHmac('sha256', key).update(body).digest();
+    } catch (err) {
+      return reject(`hmac-compute-failed: ${(err as Error).message}`);
+    }
+
+    if (
+      expected.length !== payload.hmac.length ||
+      !crypto.timingSafeEqual(expected, payload.hmac)
+    ) {
+      return reject('invalid-hmac');
+    }
+
+    // Accepted. Track the pending request for completion notification,
+    // then initiate the planned restart. The graceful-restart path
+    // already emits `serverRestarting` and pre-sets maintenance wait via
+    // performGracefulRestart(); we wire the completion callback through
+    // the next healthy tick (see notifyPendingRemediatorRequestsOnHealthy).
+    this.pendingRemediatorRequests.set(payload.requestId, {
+      requestId: payload.requestId,
+      runbookId: payload.runbookId,
+      attemptId: payload.attemptId,
+    });
+
+    // Fire-and-forget restart; the request is already tracked and the
+    // completion callback fires on the next healthy tick.
+    this.maintenanceWaitStartedAt = Date.now();
+    void this.performGracefulRestart(`remediator:${payload.runbookId}:${payload.attemptId}`);
+
+    return {
+      requestId: payload.requestId,
+      accepted: true,
+      reason: 'accepted',
+      supervisorHandshakeVersion,
+      supervisorBuildId,
+    };
+  }
+
+  /**
+   * Notify any pending Remediator restart-requested entries that the
+   * server is healthy again. Called from the health-check loop after a
+   * serverRestarting → healthy transition. Safe to call repeatedly; each
+   * entry is removed after its callback fires so subsequent ticks are
+   * no-ops.
+   */
+  private notifyPendingRemediatorRequestsOnHealthy(): void {
+    if (this.pendingRemediatorRequests.size === 0) return;
+    if (!this.registeredRemediator) {
+      // Lost the registration mid-flight; drop the pending entries so we
+      // don't leak memory. The Remediator will time out attempt-side.
+      this.pendingRemediatorRequests.clear();
+      return;
+    }
+    for (const [, entry] of this.pendingRemediatorRequests) {
+      try {
+        this.registeredRemediator.onRestartComplete({ requestId: entry.requestId });
+      } catch (err) {
+        console.error(`[Supervisor] Remediator onRestartComplete threw: ${(err as Error).message}`);
+      }
+    }
+    this.pendingRemediatorRequests.clear();
+  }
+
+  /**
+   * Write the supervisor-handshake state file so a freshly-spawned
+   * Remediator (post-restart, post-crash, cross-process) can read the
+   * supervisor's protocol version + build id without an in-process
+   * handle. Best-effort; failure is logged and ignored — the
+   * Remediator's A15 fallback then trips, which is the correct fail-safe
+   * shape.
+   */
+  private writeSupervisorHandshakeFile(): void {
+    if (!this.stateDir) return;
+    try {
+      const stateSubdir = path.join(this.stateDir, 'state');
+      fs.mkdirSync(stateSubdir, { recursive: true });
+      const filePath = path.join(stateSubdir, 'supervisor-handshake.json');
+      const body = {
+        version: ServerSupervisor.HANDSHAKE_PROTOCOL_VERSION,
+        supervisorBuildId: this.supervisorBuildId,
+        writtenAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(filePath, JSON.stringify(body, null, 2));
+    } catch (err) {
+      console.error(`[Supervisor] Failed to write supervisor-handshake.json: ${(err as Error).message}`);
+    }
+  }
+
+  /** Test helper — surface pending-request count for assertions. */
+  getPendingRemediatorRequestCount(): number {
+    return this.pendingRemediatorRequests.size;
+  }
+
+  /** Test helper — simulate a healthy tick driving completion notifications. */
+  triggerHealthyTickForTests(): void {
+    this.notifyPendingRemediatorRequestsOnHealthy();
+  }
+
   // ── Unhealthy handling ──────────────────────────────────────────
 
   private handleUnhealthy(): void {
@@ -1058,6 +1613,18 @@ export class ServerSupervisor extends EventEmitter {
       this.emit('serverDown', 'Health check failed');
     }
     this.consecutiveFailures = 0; // Reset after triggering action
+
+    // Bind-failure tracking — if the server never reached a healthy /health
+    // tick during this spawn cycle (lastHealthy is older than spawnedAt),
+    // the spawn produced a process that crashed before binding. After 2+ in
+    // a row, preflightSelfHeal will force an aggressive better-sqlite3
+    // rebuild on the next attempt.
+    if (this.spawnedAt > 0 && this.lastHealthy < this.spawnedAt) {
+      this.consecutiveBindFailures++;
+      if (this.consecutiveBindFailures >= this.bindFailureEscalationThreshold) {
+        console.log(`[Supervisor] Bind-failure escalation armed: ${this.consecutiveBindFailures} consecutive spawns failed before binding. Next preflight will force-rebuild native modules.`);
+      }
+    }
 
     // After max retries exhausted, wait for cooldown before trying again.
     // IMPORTANT: Check cooldown BEFORE incrementing totalFailures. Otherwise, passive health check
@@ -1292,4 +1859,147 @@ export class ServerSupervisor extends EventEmitter {
       }
     } catch { /* ignore */ }
   }
+}
+
+/**
+ * Information about a discovered better-sqlite3 install copy.
+ */
+export interface BetterSqlite3Copy {
+  /** Absolute path to the package directory (contains package.json). */
+  packageDir: string;
+  /** Absolute path to the compiled .node binary. */
+  binaryPath: string;
+  /** Absolute path to use as `--prefix` when invoking npm rebuild. */
+  prefixDir: string;
+}
+
+/**
+ * Scan a node_modules tree for every copy of better-sqlite3 that has a
+ * compiled binary. Bounded depth (5) and bounded count (5) to guarantee
+ * termination on pathological trees.
+ *
+ * Why this exists: npm does not always hoist `better-sqlite3` to the top of
+ * `shadow-install/node_modules/`. A common shape is the package nested under
+ * `instar/node_modules/better-sqlite3/...`. The previous preflight only
+ * checked the hoisted path and silently missed the nested copy that was
+ * actually being loaded — root cause of the Inspec 2026-04-29 silent
+ * crash-loop.
+ *
+ * Exported for testing.
+ */
+export function findBetterSqlite3Copies(nodeModulesRoot: string): BetterSqlite3Copy[] {
+  const found: BetterSqlite3Copy[] = [];
+  const MAX_DEPTH = 5;
+  const MAX_COPIES = 5;
+
+  if (!fs.existsSync(nodeModulesRoot)) return found;
+
+  let capHit = false;
+  const visit = (dir: string, depth: number): void => {
+    if (depth > MAX_DEPTH) return;
+    if (found.length >= MAX_COPIES) {
+      capHit = true;
+      return;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (found.length >= MAX_COPIES) return;
+      if (!entry.isDirectory()) continue;
+      const childPath = path.join(dir, entry.name);
+      if (entry.name === 'better-sqlite3') {
+        const binaryPath = path.join(childPath, 'build', 'Release', 'better_sqlite3.node');
+        if (fs.existsSync(binaryPath)) {
+          // The prefix for `npm rebuild` is the parent of the package's
+          // node_modules dir — i.e., the package whose deps contain the copy.
+          // For a top-level copy (`shadow-install/node_modules/better-sqlite3`),
+          // prefix = shadow-install. For a nested copy
+          // (`shadow-install/node_modules/instar/node_modules/better-sqlite3`),
+          // prefix = shadow-install/node_modules/instar.
+          const prefixDir = path.dirname(path.dirname(childPath));
+          found.push({ packageDir: childPath, binaryPath, prefixDir });
+        }
+        // Don't descend into better-sqlite3's own node_modules; deps of
+        // better-sqlite3 itself are not better-sqlite3.
+        continue;
+      }
+      // Descend into nested node_modules trees only.
+      const nestedNodeModules = path.join(childPath, 'node_modules');
+      if (fs.existsSync(nestedNodeModules)) {
+        visit(nestedNodeModules, depth + 1);
+      }
+    }
+  };
+
+  visit(nodeModulesRoot, 0);
+  if (capHit) {
+    console.warn(`[Supervisor] findBetterSqlite3Copies: hit MAX_COPIES=${MAX_COPIES} cap under ${nodeModulesRoot} — additional copies will not be checked. If this is a real install layout (not pathological), raise the cap.`);
+  }
+  return found;
+}
+
+// ── F-6 handshake helpers ───────────────────────────────────────────
+
+/**
+ * Canonical, deterministic serialization of a restart-requested payload
+ * EXCLUDING the `hmac` field, used as the HMAC input on both sides of
+ * the handshake. Field order is fixed and lengths are length-prefixed
+ * so a malicious crafter cannot shift bytes across field boundaries.
+ *
+ * Format (network byte order, big-endian):
+ *   "instar-f6-restart-v1\0"          // 21-byte version tag
+ *   uint32 version                    // 4 bytes — handshakeVersion
+ *   uint8  blastRadiusTag             // 1 = process, 2 = machine, 3 = fleet
+ *   uint64 requestedAt (BE)           // wall-clock ms
+ *   uint64 monotonicTs (BE)           // hrtime ns
+ *   uint32 requestIdLen + requestId   // utf-8
+ *   uint32 runbookIdLen + runbookId   // utf-8
+ *   uint32 attemptIdLen + attemptId   // utf-8
+ *
+ * The tag byte for `blastRadius` ensures unknown future values cannot
+ * be silently re-cast to a known value at canonicalization time.
+ */
+export function canonicalRestartRequestedBody(payload: RestartRequestedPayload): Buffer {
+  const tag = Buffer.from('instar-f6-restart-v1\x00', 'utf-8');
+
+  const versionBuf = Buffer.alloc(4);
+  versionBuf.writeUInt32BE(payload.handshakeVersion >>> 0, 0);
+
+  let blastTag = 0;
+  if (payload.blastRadius === 'process') blastTag = 1;
+  else if (payload.blastRadius === 'machine') blastTag = 2;
+  else if (payload.blastRadius === 'fleet') blastTag = 3;
+  // Unknown values become 0 → HMAC mismatch on legitimate side, which is
+  // the intended fail-closed shape.
+  const blastBuf = Buffer.from([blastTag]);
+
+  const requestedAtBuf = Buffer.alloc(8);
+  requestedAtBuf.writeBigUInt64BE(BigInt(Math.max(0, Math.floor(payload.requestedAt))), 0);
+
+  const monoBuf = Buffer.alloc(8);
+  // monotonicTs is `bigint`; clamp non-negative for unsigned write.
+  const mono = payload.monotonicTs >= 0n ? payload.monotonicTs : 0n;
+  monoBuf.writeBigUInt64BE(mono, 0);
+
+  const writeStr = (s: string): Buffer => {
+    const body = Buffer.from(s, 'utf-8');
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(body.length, 0);
+    return Buffer.concat([len, body]);
+  };
+
+  return Buffer.concat([
+    tag,
+    versionBuf,
+    blastBuf,
+    requestedAtBuf,
+    monoBuf,
+    writeStr(payload.requestId),
+    writeStr(payload.runbookId),
+    writeStr(payload.attemptId),
+  ]);
 }

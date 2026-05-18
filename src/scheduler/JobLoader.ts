@@ -11,8 +11,10 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { Cron } from 'croner';
 import type { JobDefinition, JobPriority, ModelTier } from '../core/types.js';
+import { loadAgentMdJobs, type LoadProblem } from './AgentMdJobLoader.js';
 
 const VALID_PRIORITIES: JobPriority[] = ['critical', 'high', 'medium', 'low'];
 const VALID_MODELS: ModelTier[] = ['opus', 'sonnet', 'haiku'];
@@ -77,6 +79,99 @@ const GROUNDING_EXEMPT_SLUGS: ReadonlySet<string> = new Set([
  * handles an empty list correctly.
  */
 export function loadJobs(jobsFile: string): JobDefinition[] {
+  const legacyJobs = loadLegacyJobsJson(jobsFile);
+
+  // Phase 1a: also load per-slug manifests at .instar/jobs/schedule/.
+  // The schedule directory lives next to jobs.json (typically .instar/);
+  // its presence indicates the new layout is in use.
+  const stateDir = path.dirname(jobsFile);
+  const jobsRootDir = path.join(stateDir, 'jobs');
+  const scheduleDir = path.join(jobsRootDir, 'schedule');
+  const agentMdResult = loadAgentMdJobs(scheduleDir, jobsRootDir);
+
+  for (const p of agentMdResult.problems) {
+    console.warn(
+      `[JobLoader] agentmd problem (${p.kind})` +
+      (p.slug ? ` slug="${p.slug}"` : '') +
+      (p.origin ? ` origin=${p.origin}` : '') +
+      `: ${p.message}`,
+    );
+  }
+
+  // Mixed-state precedence: when both jobs.json and schedule/<slug>.json
+  // describe the same slug, the per-slug manifest wins. The legacy entry is
+  // skipped and surfaced as a problem. Spec §"Backwards Compatibility" pins
+  // this behavior; once migration completes, jobs.json is deleted.
+  const merged = mergeLegacyWithAgentMd(legacyJobs, agentMdResult.jobs);
+
+  // Grounding-by-default audit — warn about jobs missing grounding config
+  auditGrounding(merged);
+
+  // Phase 6 deprecation audit — warn about legacy execute.type: 'prompt'
+  // entries for slugs that have a shipped agentmd default. These are
+  // structurally inert (the agentmd entry shadows them) but their presence
+  // means the operator hasn't confirmed migration. Two-release removal
+  // cycle per INSTAR-JOBS-AS-AGENTMD spec §Rollout step 6.
+  auditLegacyPromptDeprecation(legacyJobs, agentMdResult.jobs, jobsRootDir);
+
+  return merged;
+}
+
+/**
+ * Phase 6 — deprecation audit for legacy `execute.type: 'prompt'` entries
+ * whose slug also appears as a shipped agentmd default. Emits a single
+ * deprecation warning per boot per affected slug.
+ *
+ * The warning fires only when:
+ *   - the slug is present in BOTH legacy jobs.json AND the per-slug
+ *     manifest (shadowed); AND
+ *   - the legacy entry's execute.type is 'prompt'; AND
+ *   - `.migration-complete.json` is NOT present (operator hasn't
+ *     confirmed migration yet).
+ *
+ * When `.migration-complete.json` is present, the legacy entries are about
+ * to be removed by the release-cut gate, so the deprecation warning would
+ * be noise.
+ *
+ * Spec: docs/specs/INSTAR-JOBS-AS-AGENTMD-SPEC.md §Rollout step 6.
+ */
+function auditLegacyPromptDeprecation(
+  legacy: JobDefinition[],
+  agentMd: JobDefinition[],
+  jobsRootDir: string,
+): void {
+  if (legacy.length === 0 || agentMd.length === 0) return;
+  const completedMarker = path.join(jobsRootDir, '.migration-complete.json');
+  if (fs.existsSync(completedMarker)) return;
+
+  const shippedAgentMdSlugs = new Set(
+    agentMd.filter((j) => j.origin === 'instar').map((j) => j.slug),
+  );
+  const deprecated: string[] = [];
+  for (const j of legacy) {
+    if (j.execute?.type !== 'prompt') continue;
+    if (!shippedAgentMdSlugs.has(j.slug)) continue;
+    deprecated.push(j.slug);
+  }
+
+  if (deprecated.length === 0) return;
+
+  console.warn(
+    `[JobLoader] DEPRECATION: ${deprecated.length} legacy jobs.json ` +
+    `entry(ies) with execute.type:"prompt" shadow agentmd defaults: ` +
+    `${deprecated.join(', ')}. These will be removed two releases after ` +
+    `Dashboard ships the "Confirm migration complete" action. ` +
+    `Run \`instar job migrate\` (or wait for the next update's auto-run) ` +
+    `then confirm completion via Dashboard to suppress this warning.`,
+  );
+}
+
+/**
+ * Load and validate the legacy jobs.json. Extracted to keep the new
+ * agentmd path additive — this function is byte-equivalent to the
+ * pre-spec implementation modulo the explicit naming.
+ */
+function loadLegacyJobsJson(jobsFile: string): JobDefinition[] {
   if (!fs.existsSync(jobsFile)) {
     console.warn(
       `[JobLoader] Jobs file not found: ${jobsFile} — treating as empty job list. ` +
@@ -117,16 +212,53 @@ export function loadJobs(jobsFile: string): JobDefinition[] {
 
   if (skipped.length > 0) {
     console.warn(
-      `[JobLoader] Loaded ${jobs.length} valid job(s); skipped ${skipped.length} invalid entry(ies). ` +
+      `[JobLoader] Loaded ${jobs.length} valid job(s) from legacy jobs.json; skipped ${skipped.length} invalid entry(ies). ` +
       `Fix the skipped entries to restore full scheduler coverage.`
     );
   }
 
-  // Grounding-by-default audit — warn about jobs missing grounding config
-  auditGrounding(jobs);
-
   return jobs;
 }
+
+/**
+ * Merge legacy jobs.json entries with per-slug manifest entries.
+ *
+ * Spec §"Backwards Compatibility": the per-slug `schedule/<slug>.json`
+ * wins on slug collision; the legacy jobs.json entry for the same slug is
+ * skipped. The merged ordering preserves jobs.json original ordering for
+ * non-shadowed legacy entries, followed by the agentmd entries.
+ */
+function mergeLegacyWithAgentMd(
+  legacy: JobDefinition[],
+  agentMd: JobDefinition[],
+): JobDefinition[] {
+  const agentMdSlugs = new Set(agentMd.map((j) => j.slug));
+  const result: JobDefinition[] = [];
+  const shadowed: string[] = [];
+
+  for (const j of legacy) {
+    if (agentMdSlugs.has(j.slug)) {
+      shadowed.push(j.slug);
+      continue;
+    }
+    result.push(j);
+  }
+
+  if (shadowed.length > 0) {
+    console.warn(
+      `[JobLoader] ${shadowed.length} legacy jobs.json entry(ies) shadowed by per-slug manifests in ` +
+      `.instar/jobs/schedule/: ${shadowed.join(', ')}. The per-slug entries win per spec.`,
+    );
+  }
+
+  for (const j of agentMd) result.push(j);
+  return result;
+}
+
+/** Re-export so callers (CLI, dashboard, probes) can introspect load problems
+ *  produced by the agentmd path. Phase 1a only surfaces the warnings to
+ *  stderr; later phases consume them as Issues-card rows. */
+export type { LoadProblem } from './AgentMdJobLoader.js';
 
 /**
  * Validate a single job definition.

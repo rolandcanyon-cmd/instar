@@ -134,6 +134,13 @@ export interface SessionManagerConfig {
   anthropicBaseUrl?: string;
   /** Minutes of idle-at-prompt before a non-protected session is killed (default: 15) */
   idlePromptKillMinutes?: number;
+  /** Minutes of idle-at-prompt before killing a session bound to a live Telegram/Slack/iMessage
+   *  topic. Topic-bound sessions are agents *waiting* for the next user message — "idle at
+   *  prompt" is the healthy state, not a zombie. Default: 240 (4h) — long enough that
+   *  conversational pauses through a workday don't kill the session, short enough to release
+   *  resources from sessions the user has truly abandoned. The bridge will detect truly-dead
+   *  Claude processes via isSessionAlive on the next message and respawn cleanly. */
+  idlePromptKillMinutesBoundToTopic?: number;
   /** Absolute maximum session duration in minutes — safety net for sessions
    *  without an explicit timeout (default: 240) */
   defaultMaxDurationMinutes?: number;
@@ -189,6 +196,54 @@ export interface JobDefinition {
    *  Injected into working memory at session start and used by the
    *  EscalationResolutionReviewer to catch unnecessary human escalations. */
   commonBlockers?: Record<string, CommonBlocker>;
+  /** Origin marker — distinguishes instar-default jobs from user-authored.
+   *  Populated by the JobLoader from per-slug manifest entries. Legacy
+   *  jobs.json entries do NOT carry this field (left undefined). See
+   *  docs/specs/INSTAR-JOBS-AS-AGENTMD-SPEC.md §"Two namespaces". */
+  origin?: 'instar' | 'user';
+  /** Cached markdown body for execute.type === "agentmd" entries.
+   *  Populated once at load time so buildPrompt never opens a file. */
+  body?: string;
+  /** Parsed YAML frontmatter for execute.type === "agentmd" entries.
+   *  Closed-set whitelist of keys, validated via Zod preprocessors. */
+  frontmatter?: Record<string, unknown>;
+  /** Paired flag for toolAllowlist: "*" — see spec §5. Phase 1a stores
+   *  the value but does not act on it (scheduler dispatch lands in 1b).
+   *  Phase 1b enforces: `toolAllowlist === "*"` requires this to be `true`
+   *  or the allowlist is clamped to `["Read"]`. */
+  unrestrictedTools?: boolean;
+  /** Monotonic counter for optimistic concurrency on save and
+   *  observability. Sourced from the per-slug manifest. Absent for
+   *  legacy jobs.json entries. */
+  manifestVersion?: number;
+  /** Absolute path that the agentmd body was resolved from. Populated
+   *  by the loader for `execute.type === "agentmd"` entries; absent for
+   *  legacy entries. Surfaced into the run-record. */
+  resolvedPath?: string;
+  /** Lock-file trust outcome for instar-origin agentmd entries. Set by the
+   *  Phase 1c loader after the lock-file consumer hash-checks `body` +
+   *  `frontmatter` against the signed lock-file. Possible values:
+   *
+   *  - 'trusted' — origin:instar AND lock-file present AND signature OK AND
+   *    body/frontmatter hash matches the locked entry. Full trust elevation
+   *    applies: grounding-audit exemption, allowlist default lookup, etc.
+   *  - 'untrusted-no-lockfile' — origin:instar but no lock-file shipped yet
+   *    (pre-Phase-1c-build state). Treat as user-origin for trust decisions.
+   *  - 'untrusted-bad-signature' — lock-file is present but its signature
+   *    failed Ed25519 verification. Degraded mode; alert the operator.
+   *  - 'untrusted-not-in-lockfile' — origin:instar but the slug is not in
+   *    the locked default set. This is the "forged default" attack — the
+   *    runtime refuses to elevate trust.
+   *  - 'untrusted-hash-mismatch' — slug IS in the lock-file but the
+   *    on-disk body/frontmatter hash does not match. Skip-until-ack.
+   *
+   *  Absent for legacy entries and for origin:user entries. */
+  lockTrust?:
+    | 'trusted'
+    | 'untrusted-no-lockfile'
+    | 'untrusted-bad-signature'
+    | 'untrusted-not-in-lockfile'
+    | 'untrusted-hash-mismatch';
 }
 
 /** A pre-confirmed resolution for a common blocker pattern. */
@@ -257,12 +312,25 @@ export type SupervisionTier = 'tier0' | 'tier1' | 'tier2';
 export type JobPriority = 'critical' | 'high' | 'medium' | 'low';
 
 export interface JobExecution {
-  /** Type of execution */
-  type: 'skill' | 'prompt' | 'script';
-  /** The skill name, prompt text, or script path */
-  value: string;
+  /** Type of execution.
+   *  - "skill" / "prompt" / "script": legacy inline forms.
+   *  - "agentmd": resolves to .instar/jobs/<origin>/<slug>.md whose body
+   *    is the prompt. The execution block carries no `value` — the body
+   *    lives in the markdown file and is cached on JobDefinition.body.
+   *    See docs/specs/INSTAR-JOBS-AS-AGENTMD-SPEC.md. */
+  type: 'skill' | 'prompt' | 'script' | 'agentmd';
+  /** The skill name, prompt text, or script path.
+   *  Required for legacy types; absent for "agentmd". */
+  value?: string;
   /** Additional arguments */
   args?: string;
+}
+
+/** Execute block for the new agentmd format. The markdown body and its
+ *  parsed frontmatter are loaded from disk into JobDefinition.body and
+ *  JobDefinition.frontmatter — they are NOT stored on the execute block. */
+export interface AgentMdExecute {
+  type: 'agentmd';
 }
 
 export interface JobState {
@@ -304,6 +372,13 @@ export interface JobSchedulerConfig {
   gateRetryDelayMs?: number;
   /** Auth token exposed to gate shell commands as $INSTAR_AUTH_TOKEN so gates can call authenticated localhost endpoints. */
   authToken?: string;
+  /** Wake-time job reaper — closes runs left pending after the host wakes from sleep. */
+  wakeReaper?: {
+    /** Minimum sleep duration (seconds) to trigger a reap pass. Defaults to 60. */
+    minSleepSeconds?: number;
+    /** Multiple of `expectedDurationMinutes` past which a pending run is considered stuck. Defaults to 2 — same threshold the scheduler already uses for claim TTL. */
+    thresholdMultiplier?: number;
+  };
 }
 
 // ── User Management ─────────────────────────────────────────────────
@@ -518,7 +593,66 @@ export interface IntelligenceOptions {
   maxTokens?: number;
   /** Temperature (0-1, lower = more deterministic) */
   temperature?: number;
+  /** Per-call timeout in milliseconds; provider should honor or surface as throw. */
+  timeoutMs?: number;
+  /**
+   * Attribution context for the burn-detection-and-self-heal system (Phase 1
+   * of docs/specs/token-burn-detection-and-self-heal.md). Optional; missing
+   * attribution lands under the `unknown::*` fallback keys so existing
+   * callers keep working unchanged. New callers should set it.
+   */
+  attribution?: {
+    /** Stable source-side component label, e.g. "InputDetector", "MessagingToneGate". */
+    component: string;
+  };
 }
+
+// ── Drift Checker ───────────────────────────────────────────────────
+//
+// PROJECT-SCOPE-SPEC Phase 1.4. The drift checker emits a *signal* only —
+// authority for round-start lives in ProjectRoundRunner. Verdicts are
+// recorded on the round (lastDriftVerdict) and surfaced in the digest.
+
+/**
+ * A verified excerpt from a referenced file at the time of the drift check.
+ * The LLM proposes citations; the checker re-opens the file, confirms the
+ * byteRange is in bounds, and renders the slice itself — the LLM-claimed
+ * text is never displayed. Citations that fail verification are dropped.
+ */
+export interface VerifiedCitation {
+  /** Path relative to targetRepoPath. */
+  file: string;
+  /** [start, end] byte offsets into the file, validated server-side. */
+  byteRange: [number, number];
+  /** Verified slice (truncated to 240 chars for digest display). */
+  excerpt: string;
+}
+
+/**
+ * The verdict returned by ProjectDriftChecker.run().
+ * `manual-review-required` is the catch-all for any failure mode that
+ * means the verdict cannot be trusted — over-budget, deleted files,
+ * timeout, schema-fail, citation-verification-fail. Callers route it
+ * to user attention rather than treating it as a soft pass.
+ */
+export type DriftVerdict =
+  | { verdict: 'no-drift'; rationale: string; evidenceCitations: VerifiedCitation[] }
+  | { verdict: 'minor-drift'; rationale: string; evidenceCitations: VerifiedCitation[] }
+  | { verdict: 'premise-violated'; rationale: string; evidenceCitations: VerifiedCitation[] }
+  | {
+      verdict: 'manual-review-required';
+      reason:
+        | 'over-budget'
+        | 'deleted-files'
+        | 'empty-spec'
+        | 'missing-frontmatter'
+        | 'timeout'
+        | 'failed-citation-verification'
+        | 'schema-fail'
+        | 'no-provider'
+        | 'path-jail-fail';
+      rationale?: string;
+    };
 
 // ── Relationship Tracking ───────────────────────────────────────────
 
@@ -756,6 +890,15 @@ export interface EvolutionProposal {
   resolution?: string;
   /** Tags for categorization */
   tags?: string[];
+  /**
+   * Optional MemoryEntity id for the cluster's pattern entity.
+   * Populated by Phase 2 WikiClaim evidence integration when SemanticMemory is
+   * wired into EvolutionManager. Stable across the proposal's lifetime; older
+   * proposals (created before Phase 2 wiring) leave this undefined.
+   *
+   * See docs/specs/OPENCLAW-IMPORT-WIKICLAIM-EVIDENCE-SPEC.md § Producers.
+   */
+  entityId?: string;
 }
 
 export type EvolutionType =
@@ -1137,6 +1280,31 @@ export interface DecisionJournalEntry {
   conflict?: boolean;
   /** Tags for categorization */
   tags?: string[];
+  /**
+   * Evidence supporting this decision (WikiClaim Phase 3).
+   *
+   * REQUIRED at write time when DecisionJournal is wired with SemanticMemory
+   * (the producer bridge promotes the entry to a `decision` MemoryEntity).
+   * Spec § Producers line 227 allows DecisionJournal to write evidence kinds:
+   *   `message` | `commit` | `ledger-entry` | `session`
+   * Mismatched kinds reject with `EvidencePolicyError`.
+   *
+   * On read, this field is read-through from the JSONL row — entries written
+   * before Phase 3 have `evidence: undefined` (legacy), entries written after
+   * with SemanticMemory unwired retain whatever the caller passed (defaults
+   * to `[]`).
+   *
+   * See docs/specs/OPENCLAW-IMPORT-WIKICLAIM-EVIDENCE-SPEC.md § Producers
+   * line 258 (Decision journal) and line 339 (Phase 3).
+   */
+  evidence?: MemoryEvidence[];
+  /**
+   * MemoryEntity id of the `decision` entity promoted from this journal row
+   * by the DecisionJournal→SemanticMemory bridge (Phase 3). Present when
+   * SemanticMemory was wired at log time; absent otherwise. Acts as the
+   * back-reference for inverse-traceability queries.
+   */
+  entityId?: string;
 }
 
 /**
@@ -1746,7 +1914,11 @@ export type LedgerEntrySubsystem =
   /** v2: session-asserted writes via POST /shared-state/append. instance = session id. */
   | 'session'
   /** v2 slice 5: CommitmentSweeper expired/stranded emissions. */
-  | 'commitment-sweeper';
+  | 'commitment-sweeper'
+  /** TaskFlow Phase 3a: DivergenceChecker JSON↔TaskFlow mismatch notes. */
+  | 'taskflow-divergence'
+  /** TaskFlow Phase 5: state-transition audit notes from TaskFlowRegistry. */
+  | 'taskflow-transition';
 
 /** Ledger entry kind. */
 export type LedgerEntryKind =
@@ -2710,7 +2882,113 @@ export interface MemoryEntity {
   ownerId?: string;
   /** Privacy scope controlling visibility (default: 'shared-project' for backward compat) */
   privacyScope?: PrivacyScopeType;
+
+  /**
+   * Typed evidence array — per-claim provenance with file:line citations,
+   * weights, and confidence (OpenClaw WikiClaim shape).
+   *
+   * Loaded lazily — `recall()` and `searchHybrid()` do NOT populate this
+   * field; use `getEntityWithEvidence()` or `getEvidence()` to read evidence.
+   * Empty array `[]` means "loaded but the entity has no evidence";
+   * `undefined` means "not loaded by this code path".
+   */
+  evidence?: MemoryEvidence[];
 }
+
+/**
+ * Typed citation kind for `MemoryEvidence`. Free-form `kind` would defeat
+ * inverse queries; the enum keeps the lookup surface small and indexable.
+ */
+export type MemoryEvidenceKind =
+  | 'feedback'
+  | 'commit'
+  | 'session'
+  | 'document'
+  | 'message'
+  | 'job-run'
+  | 'ledger-entry'
+  | 'pattern-entity'
+  | 'external-url'
+  | 'supersedes-evidence';
+
+/**
+ * A single piece of evidence supporting a `MemoryEntity` claim. Evidence is
+ * append-only-mostly; existing entries can have `updatedAt` refreshed and
+ * weights recomputed, but entries are not destructively edited. Retire an
+ * evidence entry by adding a new one with `kind:'supersedes-evidence'`
+ * pointing at the old `sourceId`.
+ *
+ * See docs/specs/OPENCLAW-IMPORT-WIKICLAIM-EVIDENCE-SPEC.md.
+ */
+export interface MemoryEvidence {
+  /** Kind of source — typed, not free-form, for queryability. */
+  kind: MemoryEvidenceKind;
+  /** Foreign key to the source system. Cross-store FK is best-effort —
+   *  consumers tolerate dangling references. */
+  sourceId: string;
+  /** Optional file path or URL (relative to repo root or absolute URL). */
+  path?: string;
+  /** Inclusive start line. */
+  lineStart?: number;
+  /** Inclusive end line; equal to `lineStart` for single-line citations. */
+  lineEnd?: number;
+  /** Optional freeform line range, e.g. "42-58". Derived from
+   *  `lineStart`/`lineEnd` when both present. Kept for OpenClaw shape parity. */
+  lines?: string;
+  /** Optional contribution weight (0–1). */
+  weight?: number;
+  /** Optional trust in the source (0–1) — separate from weight. */
+  confidence?: number;
+  /** Optional privacy tier; defaults to entity's privacyScope. Narrowing-only
+   *  at write time (see § Storage and Privacy). The evidence vocabulary
+   *  diverges from `PrivacyScopeType` per spec § Schema Changes — adds
+   *  'public' and 'sensitive' as endpoint tiers. */
+  privacyTier?: EvidencePrivacyTier;
+  /** Optional free-form annotation. Hard cap MAX_EVIDENCE_NOTE_BYTES = 500. */
+  note?: string;
+  /** ISO 8601 timestamp of when this evidence was added or refreshed. */
+  updatedAt: string;
+}
+
+/**
+ * Privacy tier vocabulary for `MemoryEvidence.privacyTier`. Distinct from
+ * `PrivacyScopeType` (which is the entity-level vocabulary): adds `public`
+ * and `sensitive` endpoint tiers per spec § Schema Changes line 136.
+ *
+ * Ordering for narrowing-only constraint:
+ *   public < shared-project < private < sensitive
+ *
+ * Entity vocabulary maps onto this:
+ *   PrivacyScopeType.shared-project → EvidencePrivacyTier.shared-project
+ *   PrivacyScopeType.shared-topic    → EvidencePrivacyTier.private
+ *                                        (shared-topic is conservative-mapped
+ *                                         to private; topic-scope evidence is
+ *                                         not in the spec's privacyTier set).
+ *   PrivacyScopeType.private         → EvidencePrivacyTier.private
+ */
+export type EvidencePrivacyTier = 'public' | 'shared-project' | 'private' | 'sensitive';
+
+/** Per-entity cap; overridable up to MAX_EVIDENCE_CAP_PER_ENTITY via config. */
+export const DEFAULT_EVIDENCE_CAP_PER_ENTITY = 50;
+/** Hard upper bound on per-entity evidence cap. */
+export const MAX_EVIDENCE_CAP_PER_ENTITY = 500;
+/** Hard cap on `note` field bytes. */
+export const MAX_EVIDENCE_NOTE_BYTES = 500;
+/** Bound for traversal of `kind:'supersedes-evidence'` chains. */
+export const MAX_SUPERSEDES_DEPTH = 32;
+
+/**
+ * Producer identifier — capability token for `addEvidence` /
+ * `rememberWithEvidence` calls. Restricts which kinds each subsystem may
+ * write (per-caller kind allowlist). Cross-process spoofing is NOT in the
+ * threat model — the producer ID is a process-internal symbol.
+ */
+export type EvidenceProducerId =
+  | 'EvolutionManager'
+  | 'DispatchExecutor'
+  | 'DecisionJournal'
+  | 'LearnSkill'
+  | 'manual';
 
 /**
  * A directional connection between two entities.
@@ -2793,6 +3071,10 @@ export interface SemanticMemoryConfig {
   lessonDecayHalfLifeDays: number;
   /** Minimum confidence before an entity is considered stale (default: 0.2) */
   staleThreshold: number;
+  /** Max JSONL file size (bytes) for synchronous auto-rebuild on corruption recovery.
+   *  Files larger than this are skipped with a warning — operator must rebuild manually.
+   *  Default: 50 MB (≈500k entities). Set 0 to disable auto-rebuild entirely. */
+  autoRebuildMaxBytes?: number;
 }
 
 /**

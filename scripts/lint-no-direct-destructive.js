@@ -65,21 +65,43 @@ const ALLOWLIST = new Set([
   // needs direct execSync as a bootstrap escape. The single git call here is
   // a read-only `git diff --cached --name-only` for staged-file detection.
   'scripts/lint-no-direct-destructive.js',
+  // Same bootstrap-escape pattern as lint-no-direct-destructive.js — a
+  // read-only `git diff --cached --name-only` for staged-file detection.
+  // Cannot depend on the TS funnel because TS is not compiled when the
+  // lint runs in pre-push.
+  'scripts/lint-no-direct-llm-http.js',
   // Postinstall bootstrap script — runs before TypeScript is compiled and
   // before SafeFsExecutor is available. CommonJS, can't use ESM imports.
   'scripts/fix-better-sqlite3.cjs',
   // Pre-commit hook gate — runs before TS is compiled. Read-only `git diff
   // --cached` only; cannot depend on the TS funnel.
   'scripts/instar-dev-precommit.js',
+  // Seamless Migration Guarantee fixture-protection gate — runs before
+  // TS is compiled. Read-only `git diff --cached --name-status` only.
+  'scripts/protect-migration-guarantee.js',
   // Worktree-related git hooks — run before TS is compiled.
   'scripts/worktree-precommit-gate.js',
   'scripts/worktree-commit-msg-hook.js',
   // Pre-command shim that wraps git invocations from outside the safe
   // executor — bootstraps the safety check, can't be inside the funnel.
   'scripts/destructive-command-shim.js',
+  // Phase 2 release-time drift classifier — runs `git show` and
+  // `git describe` (read-only) to diff current templates against the
+  // previous release. Build-time only; never executes on an agent's
+  // machine. Per INSTAR-JOBS-AS-AGENTMD spec §Drift Classifier.
+  'scripts/classify-default-drift.mjs',
   // Bootstrap script for the builtin-manifest — runs as part of `npm run
   // build` before tsc emits dist/.
   'scripts/generate-builtin-manifest.cjs',
+  // Phase 1c-build signer — runs as part of `npm run build`, after tsc but
+  // before publish. Uses fs.unlinkSync to remove a stale dist/jobs/instar.lock.json
+  // when no signing key is available (prevents shipping a malformed empty-signature
+  // lock-file). Build-time only, never runs in production on an agent's machine.
+  'scripts/sign-instar-lockfile.mjs',
+  // Phase 2 generator — converts getDefaultJobs() to markdown templates.
+  // Build-time only; prunes stale templates with fs.rmSync. Never runs on
+  // an agent's machine.
+  'scripts/regen-default-job-templates.mjs',
   // Transitional: paired with the messaging adapter contract gate — these
   // two files trigger the pre-push contract test requirement when modified.
   // Their fs.unlinkSync calls are local hardlink-recreation cleanup (not

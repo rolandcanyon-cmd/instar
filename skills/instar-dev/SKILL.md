@@ -40,9 +40,21 @@ Before any other phase runs, the instar-dev agent verifies the change is driven 
 - The change must be rooted in a spec file under `docs/specs/<slug>.md`.
 - That spec must have been run through `/spec-converge` to convergence (writes `review-convergence: <timestamp>` into the spec's frontmatter).
 - The user must have reviewed the convergence report and applied `approved: true` to the spec's frontmatter.
-- The spec path is passed to `write-trace.mjs` via `--spec` so the pre-commit hook can verify both tags.
+- The spec must ship with a plain-English **ELI16 overview** companion at `docs/specs/<slug>.eli16.md` (or another path declared via the spec's `eli16-overview:` frontmatter field). The overview must be at least 800 characters of real content — stubs are refused. See `skills/instar-dev/templates/eli16-overview.md` for the expected shape.
+- The spec path is passed to `write-trace.mjs` via `--spec` so the pre-commit hook can verify all three structural requirements (convergence tag, approval tag, ELI16 companion).
 
-If the spec is missing, not converged, or not approved, the pre-commit hook refuses the commit. No override inside the skill — the only exceptions are the foundational bootstrap commits that install `/instar-dev` and `/spec-converge` themselves.
+If the spec is missing, not converged, not approved, or lacks an ELI16 overview, the pre-commit hook refuses the commit. No override inside the skill — the only exceptions are the foundational bootstrap commits that install `/instar-dev` and `/spec-converge` themselves.
+
+The ELI16 overview is the entry point for any reader who has to make a real decision against the spec — the dense technical spec is for reviewers, not deciders. It leads with what the change actually is in plain English, what already exists, what's new, the safeguards in plain terms, and what the reader actually needs to decide.
+
+**Proposal-derived runbook gate (S-3).** Per `SELF-HEALING-REMEDIATOR-V2-SPEC.md` §A11/§A22/§A32, any staged file under `src/remediation/runbooks/*.{ts,js}` that carries a `__proposalDerivedFrom = '<proposalId>'` const must also:
+
+- Carry a matching `__producingAgentId = '<agentId>'` const, AND
+- Have a proposal JSON at `.instar/remediation/proposals-<machineId>/<proposalId>.json` whose `producingAgentId` field matches the runbook's annotation.
+
+If a `producingAgentIdSignature` is present in the proposal AND the corresponding pubkey is bundled at `.instar/remediation/agent-pubkeys/<agentId>.pem`, the signature is verified before the commit lands. The pre-commit hook calls `skills/instar-dev/scripts/verify-proposal-derived-runbook.mjs` as Step 8 of its checks. This is the **commit-time** half of the promotion gate; the CI workflow at `.github/workflows/runbook-pr-gate.yml` (C-1) does the **PR-merge-time** half (different-principal verification + Telegram countersignature). Both are required by the spec — the commit-time gate catches author mistakes before a PR is pushed; the merge-time gate is the authoritative check.
+
+Human-authored changes that don't touch `src/remediation/runbooks/` (or that touch runbooks without the `__proposalDerivedFrom` const) pass straight through this gate.
 
 ### Phase 1 — Principle check
 

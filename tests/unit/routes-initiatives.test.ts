@@ -28,9 +28,13 @@ function mountRoutes(tr: InitiativeTracker): { server: Server; port: number } {
   // Mirror of the production handlers (kept in sync with src/server/routes.ts).
   router.get('/initiatives', (req, res) => {
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-    const items = status
+    const excludeKind = typeof req.query.excludeKind === 'string' ? req.query.excludeKind : undefined;
+    const excludeParented = req.query.excludeParented === 'true';
+    let items = status
       ? tr.list({ status: status as 'active' })
       : tr.list();
+    if (excludeKind) items = items.filter((i) => (i.kind ?? 'task') !== excludeKind);
+    if (excludeParented) items = items.filter((i) => !i.parentProjectId);
     res.json({ items, count: items.length });
   });
   router.get('/initiatives/digest', (_req, res) => res.json(tr.digest()));
@@ -40,41 +44,41 @@ function mountRoutes(tr: InitiativeTracker): { server: Server; port: number } {
     if (!i) return res.status(404).json({ error: 'not found' });
     res.json(i);
   });
-  router.post('/initiatives', (req, res) => {
+  router.post('/initiatives', async (req, res) => {
     const { id, title, description, phases } = req.body ?? {};
     if (typeof id !== 'string' || !initiativeIdRe.test(id)) return res.status(400).json({ error: 'bad id' });
     if (typeof title !== 'string' || !title.trim()) return res.status(400).json({ error: 'bad title' });
     if (typeof description !== 'string') return res.status(400).json({ error: 'bad description' });
     if (!Array.isArray(phases) || phases.length === 0) return res.status(400).json({ error: 'bad phases' });
     try {
-      const created = tr.create(req.body);
+      const created = await tr.create(req.body);
       res.status(201).json(created);
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
-  router.patch('/initiatives/:id', (req, res) => {
+  router.patch('/initiatives/:id', async (req, res) => {
     try {
-      res.json(tr.update(req.params.id, req.body ?? {}));
+      res.json(await tr.update(req.params.id, req.body ?? {}));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(msg.includes('not found') ? 404 : 400).json({ error: msg });
     }
   });
-  router.post('/initiatives/:id/phase/:phaseId', (req, res) => {
+  router.post('/initiatives/:id/phase/:phaseId', async (req, res) => {
     const { status } = req.body ?? {};
     if (!['pending', 'in-progress', 'done', 'blocked'].includes(status)) {
       return res.status(400).json({ error: 'bad status' });
     }
     try {
-      res.json(tr.setPhaseStatus(req.params.id, req.params.phaseId, status));
+      res.json(await tr.setPhaseStatus(req.params.id, req.params.phaseId, status));
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       res.status(msg.includes('not found') ? 404 : 400).json({ error: msg });
     }
   });
-  router.delete('/initiatives/:id', (req, res) => {
-    if (!tr.remove(req.params.id)) return res.status(404).json({ error: 'not found' });
+  router.delete('/initiatives/:id', async (req, res) => {
+    if (!(await tr.remove(req.params.id))) return res.status(404).json({ error: 'not found' });
     res.json({ id: req.params.id, deleted: true });
   });
 
@@ -215,5 +219,60 @@ describe('routes /initiatives — CRUD', () => {
     const archived = await req('GET', '/initiatives?status=archived');
     expect(active.json.items.map((i: { id: string }) => i.id)).toEqual(['demo']);
     expect(archived.json.items.map((i: { id: string }) => i.id)).toEqual(['demo2']);
+  });
+
+  // ── Phase 1b PR 5 — dashboard server-side filters ───────────────
+
+  it('GET ?excludeKind=project hides project-kind records', async () => {
+    // Create a task-kind initiative directly via the tracker so we
+    // don't have to extend the test's POST shape with `kind`.
+    await req('POST', '/initiatives', body);
+    await tracker.create({
+      id: 'a-project',
+      title: 'pr',
+      description: 'd',
+      phases: [{ id: 'p1', name: 'p1' }],
+      kind: 'project',
+    });
+    const filtered = await req('GET', '/initiatives?excludeKind=project');
+    const ids = (filtered.json.items as Array<{ id: string }>).map((i) => i.id);
+    expect(ids).toContain('demo');
+    expect(ids).not.toContain('a-project');
+  });
+
+  it('GET ?excludeParented=true hides children of any project', async () => {
+    await req('POST', '/initiatives', body); // no parent
+    await tracker.create({
+      id: 'child',
+      title: 'c',
+      description: 'd',
+      phases: [{ id: 'p1', name: 'p1' }],
+      parentProjectId: 'some-project',
+    });
+    const filtered = await req('GET', '/initiatives?excludeParented=true');
+    const ids = (filtered.json.items as Array<{ id: string }>).map((i) => i.id);
+    expect(ids).toContain('demo');
+    expect(ids).not.toContain('child');
+  });
+
+  it('combines excludeKind + excludeParented + status filters', async () => {
+    await req('POST', '/initiatives', body);
+    await tracker.create({
+      id: 'parented-task',
+      title: 'pt',
+      description: 'd',
+      phases: [{ id: 'p1', name: 'p1' }],
+      parentProjectId: 'p',
+    });
+    await tracker.create({
+      id: 'a-project',
+      title: 'pr',
+      description: 'd',
+      phases: [{ id: 'p1', name: 'p1' }],
+      kind: 'project',
+    });
+    const r = await req('GET', '/initiatives?status=active&excludeKind=project&excludeParented=true');
+    const ids = (r.json.items as Array<{ id: string }>).map((i) => i.id);
+    expect(ids).toEqual(['demo']);
   });
 });

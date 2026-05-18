@@ -12,10 +12,14 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import pc from 'picocolors';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { loadConfig, ensureStateDir, detectTmuxPath } from '../core/Config.js';
 import { SessionManager } from '../core/SessionManager.js';
 import { StateManager } from '../core/StateManager.js';
+import { StuckInputSentinel } from '../core/StuckInputSentinel.js';
 import { JobScheduler } from '../scheduler/JobScheduler.js';
 import { IntegrationGate } from '../scheduler/IntegrationGate.js';
 import { JobRunHistory } from '../scheduler/JobRunHistory.js';
@@ -39,6 +43,7 @@ import { UpgradeGuideProcessor } from '../core/UpgradeGuideProcessor.js';
 import { EvolutionManager } from '../core/EvolutionManager.js';
 import { TopicMemory } from '../memory/TopicMemory.js';
 import { SemanticMemory } from '../memory/SemanticMemory.js';
+import { WorkingMemoryAssembler } from '../memory/WorkingMemoryAssembler.js';
 import { QuotaTracker } from '../monitoring/QuotaTracker.js';
 import { AccountSwitcher } from '../monitoring/AccountSwitcher.js';
 import { QuotaNotifier } from '../monitoring/QuotaNotifier.js';
@@ -330,6 +335,11 @@ let _projectDir: string = process.cwd();
 let _sharedIntelligence: import('../core/types.js').IntelligenceProvider | null = null;
 let _selfKnowledgeTree: SelfKnowledgeTree | null = null;
 let _slackAdapter: import('../messaging/slack/SlackAdapter.js').SlackAdapter | null = null;
+// SessionRefresh — agent-initiated respawn. Module-scope so onRestartSession
+// (defined outside startServer) can delegate to it once startServer wires it.
+// Null until startServer constructs it; the Telegram /restart handler falls
+// back to the inline kill+respawn path when null (e.g. early in boot).
+let _sessionRefresh: import('../core/SessionRefresh.js').SessionRefresh | null = null;
 
 async function spawnSessionForTopic(
   sessionManager: SessionManager,
@@ -686,25 +696,28 @@ function wireTelegramCallbacks(
     }
   };
 
-  // /restart — kill session and respawn
+  // /restart — kill session and respawn. Delegates to SessionRefresh, the
+  // consolidated lifecycle owner: it routes the kill through
+  // sessionManager.killSession (which fires the kill hook so the UUID
+  // listener persists session.claudeSessionId), then spawns a fresh tmux
+  // running `claude --resume <uuid>`. Includes the rate guard against
+  // infinite-respawn loops.
+  //
+  // If SessionRefresh isn't wired yet (very narrow early-boot window
+  // before startServer reaches the construction point), we no-op with a
+  // warning instead of falling back to a broken inline path — the
+  // pre-PR inline kill bypassed sessionManager.killSession and so the
+  // kill hook never fired, meaning resume UUIDs were silently dropped.
+  // Routing exclusively through SessionRefresh fixes that latent issue.
   telegram.onRestartSession = async (sessionName: string, topicId: number): Promise<void> => {
-    // Save resume UUID before killing so the new session can --resume
-    if (_topicResumeMap) {
-      try {
-        const uuid = _topicResumeMap.findUuidForSession(sessionName);
-        if (uuid) {
-          _topicResumeMap.save(topicId, uuid, sessionName);
-        }
-      } catch { /* best effort */ }
+    if (!_sessionRefresh) {
+      console.warn(`[telegram /restart] SessionRefresh not yet wired; deferring restart for sessionName=${sessionName} topicId=${topicId}`);
+      return;
     }
-
-    // Kill existing session
-    try {
-      execFileSync(detectTmuxPath()!, ['kill-session', '-t', `=${sessionName}`], { stdio: 'ignore' });
-    } catch { /* may already be dead */ }
-
-    // Respawn with thread history
-    await respawnSessionForTopic(sessionManager, telegram, sessionName, topicId, undefined, topicMemory);
+    const result = await _sessionRefresh.refreshSession({ sessionName, reason: 'telegram-/restart' });
+    if (!result.ok) {
+      console.warn(`[telegram /restart] SessionRefresh refused sessionName=${sessionName} code=${result.code}`);
+    }
   };
 
   // /sessions — list running sessions
@@ -1646,7 +1659,7 @@ async function ensureSqliteBindings(): Promise<boolean> {
     try {
       // Use the bundled fix script which downloads correct prebuilds from GitHub.
       // This is more reliable than `npm rebuild` which fails with pnpm/asdf installs.
-      const fixScript = new URL('../../../scripts/fix-better-sqlite3.cjs', import.meta.url).pathname;
+      const fixScript = path.resolve(__dirname, '../../../scripts/fix-better-sqlite3.cjs');
       if (fs.existsSync(fixScript)) {
         execFileSync(process.execPath, [fixScript], { encoding: 'utf-8', timeout: 60000, stdio: 'pipe' });
       } else {
@@ -1655,7 +1668,7 @@ async function ensureSqliteBindings(): Promise<boolean> {
         // IMPORTANT: Use execFileSync (no shell) instead of execSync to avoid
         // "/bin/sh ENOENT" failures in minimal/containerized environments.
         const npmCli = findNpmCli();
-        const instarDir = new URL('../../..', import.meta.url).pathname;
+        const instarDir = path.resolve(__dirname, '../../..');
         const shadowBs3 = path.join(instarDir, 'node_modules', 'better-sqlite3');
         if (fs.existsSync(shadowBs3)) {
           execFileSync(process.execPath, [npmCli, 'rebuild', 'better-sqlite3'], {
@@ -1740,7 +1753,7 @@ function getInstalledVersion(): string {
  */
 function resolvePackageJsonPath(): string | null {
   try {
-    const pkgPath = path.resolve(new URL(import.meta.url).pathname, '../../../package.json');
+    const pkgPath = path.resolve(__dirname, '../../package.json');
     if (fs.existsSync(pkgPath)) return pkgPath;
   } catch {
     // @silent-fallback-ok — best-effort path resolution for package.json; null return is the documented default
@@ -1795,6 +1808,25 @@ export async function startServer(options: StartOptions): Promise<void> {
     watchPaths: ['updates.autoApply', 'sessions.maxSessions', 'monitoring'],
   });
   liveConfig.start();
+
+  // Threadline → Telegram bridge config — settings surface for the bridge
+  // module. Default-OFF auto-create ships from day one;
+  // see TelegramBridgeConfig for the policy.
+  const { TelegramBridgeConfig } = await import('../threadline/TelegramBridgeConfig.js');
+  const telegramBridgeConfig = new TelegramBridgeConfig(liveConfig);
+
+  // The actual bridge module is instantiated AFTER the Telegram adapter is
+  // wired (further down in this file). Held as a let so closures formed
+  // here can reference whatever instance ends up assigned. Bridge is
+  // RELAY-ONLY (signal-vs-authority compliant): emits no routing decisions,
+  // blocks nothing. Authority lives in TelegramBridgeConfig.
+  let telegramBridge: import('../threadline/TelegramBridge.js').TelegramBridge | null = null;
+
+  // Read-only observability layer over canonical inbox/outbox/bindings.
+  // Stateless — reads files at every query. Powers the dashboard
+  // Threadline tab via /threadline/observability/* endpoints.
+  const { ThreadlineObservability } = await import('../threadline/ThreadlineObservability.js');
+  const threadlineObservability = new ThreadlineObservability({ stateDir: config.stateDir });
 
   // NotificationBatcher: consolidate all Telegram notifications into tiered delivery.
   // IMMEDIATE = user needs to act NOW (quota exhausted, critical stall)
@@ -2182,7 +2214,9 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Direct calls to the Anthropic Messages API are forbidden per Rule 2 of the path
     // constraints (specs/provider-portability/04-anthropic-path-constraints.md). The old
     // `intelligenceProvider: "anthropic-api"` config field is no longer honored; if a stale
-    // agent config has it set, we warn loudly and proceed with the subscription path.
+    // agent config has it set (with or without the `intelligenceProviderConfirmed: true`
+    // opt-in flag that older versions accepted), we warn loudly and proceed with the
+    // subscription path.
     let sharedIntelligence: IntelligenceProvider | undefined;
     const staleApiProvider =
       (config as unknown as { intelligenceProvider?: string }).intelligenceProvider === 'anthropic-api';
@@ -2661,6 +2695,23 @@ export async function startServer(options: StartOptions): Promise<void> {
       await telegram.start();
       console.log(pc.green(`  Telegram connected (stall alerts: ${sharedIntelligence ? 'LLM-gated' : 'timer-only'})`));
 
+      // Threadline → Telegram bridge — mirrors inbound/outbound threadline
+      // messages into per-thread Telegram topics. Default-OFF; the relay
+      // handler below and the threadline_send tool consult bridge.mirror*
+      // unconditionally — TelegramBridgeConfig owns the gate.
+      try {
+        const { TelegramBridge } = await import('../threadline/TelegramBridge.js');
+        telegramBridge = new TelegramBridge({
+          stateDir: config.stateDir,
+          localAgentName: config.projectName,
+          config: telegramBridgeConfig,
+          telegram,
+        });
+        console.log(pc.dim(`  Threadline → Telegram bridge: armed (default ${telegramBridgeConfig.getSettings().enabled ? 'ENABLED' : 'OFF'})`));
+      } catch (err) {
+        console.warn(pc.yellow(`  Threadline → Telegram bridge init failed (non-fatal): ${err instanceof Error ? err.message : err}`));
+      }
+
       // Wire Prompt Gate callbacks — connect Telegram relay responses to sessions
       if (promptGateConfig?.enabled) {
         telegram.onPromptResponse = (sessionName, key) => {
@@ -2899,7 +2950,7 @@ export async function startServer(options: StartOptions): Promise<void> {
           if (!isBindingError) throw openErr;
 
           console.log(pc.yellow('  TopicMemory: native binding mismatch — auto-rebuilding better-sqlite3...'));
-          const fixScript = new URL('../../../scripts/fix-better-sqlite3.cjs', import.meta.url).pathname;
+          const fixScript = path.resolve(__dirname, '../../../scripts/fix-better-sqlite3.cjs');
           if (fs.existsSync(fixScript)) {
             execFileSync(process.execPath, [fixScript], { encoding: 'utf-8', timeout: 60000, stdio: 'pipe' });
           } else {
@@ -3452,6 +3503,28 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }
 
+    // Wire the topic-binding checker for the zombie-killer. Topic-bound sessions
+    // (live Telegram topic, Slack channel, iMessage thread) are *waiting* for the
+    // user; "idle at prompt" is healthy. Without this exemption, the killer cuts
+    // sessions at 15m of idle and the user's next message has to navigate a
+    // respawn-with-resume — which sometimes crashes — instead of going straight
+    // to a live agent.
+    sessionManager.setTopicBindingChecker((tmuxSession: string): string | number | null => {
+      if (telegram) {
+        const topicId = telegram.getTopicForSession(tmuxSession);
+        if (topicId != null) return topicId;
+      }
+      if (_slackAdapter) {
+        const channelId = _slackAdapter.getChannelForSession(tmuxSession);
+        if (channelId != null) return channelId;
+      }
+      if (imessageAdapter) {
+        const sender = imessageAdapter.getSenderForSession(tmuxSession);
+        if (sender != null) return sender;
+      }
+      return null;
+    });
+
     // Initialize SemanticMemory — the knowledge graph that unifies all memory systems.
     // Uses the same better-sqlite3 as TopicMemory; shares the rebuild path.
     let semanticMemory: SemanticMemory | undefined;
@@ -3510,6 +3583,26 @@ export async function startServer(options: StartOptions): Promise<void> {
       });
     }
 
+    // Pre-prompt memory recall (OpenClaw import T2.2). Bounded synchronous
+    // recall pass that runs before UserPromptSubmit injects context. Default
+    // off; opt in via config.promptBuildRecall.enabled.
+    const promptRecallCfg = (config as unknown as {
+      promptBuildRecall?: Partial<import('../core/PromptBuildRecall.js').PromptBuildRecallConfig>;
+    }).promptBuildRecall;
+    if (promptRecallCfg?.enabled && semanticMemory) {
+      const { PromptBuildRecall, DEFAULT_PROMPT_BUILD_RECALL_CONFIG } = await import('../core/PromptBuildRecall.js');
+      const recall = new PromptBuildRecall(
+        { semanticMemory },
+        { ...DEFAULT_PROMPT_BUILD_RECALL_CONFIG, ...promptRecallCfg },
+      );
+      (globalThis as Record<string, unknown>).__instarPromptBuildRecall = recall;
+      console.log(pc.green('  Pre-prompt memory recall enabled'));
+    }
+
+    // WorkingMemoryAssembler is initialized after activitySentinel (see below)
+    // so it can wire episodicMemory from the sentinel.
+    let workingMemory: WorkingMemoryAssembler | undefined;
+
     // Fast startup purge — remove session records for dead tmux sessions BEFORE
     // monitoring starts. Prevents the death spiral where stale sessions overwhelm
     // the health endpoint (synchronous tmux has-session calls) and cause the
@@ -3517,6 +3610,14 @@ export async function startServer(options: StartOptions): Promise<void> {
     await sessionManager.purgeDeadSessions();
 
     sessionManager.startMonitoring();
+
+    // StuckInputSentinel — persistent, restart-safe recovery for tmux prompts
+    // that hold text but never submitted Enter. Complements the in-process
+    // verifyInjection timers (PR #159) which die when the server crashes.
+    const stuckInputSentinel = new StuckInputSentinel(sessionManager, {
+      stateDir: config.stateDir,
+    });
+    stuckInputSentinel.start();
 
     // Proactive resume heartbeat: every 60s, update the topic→UUID mapping
     // for all active topic-linked sessions. Ensures crash recovery via --resume.
@@ -3615,6 +3716,31 @@ export async function startServer(options: StartOptions): Promise<void> {
       // Auto-respawn sessions that die with unanswered Telegram injections.
       // When a session crashes or is cleaned up before replying, re-forward the
       // user's message so it gets a fresh session and a response.
+      // Clear the bad resume UUID when --resume crashes during startup.
+      // SessionManager handles the fresh-spawn fallback itself; we only need to
+      // make sure the next user message doesn't try the same broken UUID.
+      //
+      // UUID-equality gate: only clear when the currently-stored UUID matches
+      // the failed one. The fresh-spawn fallback may save a *new* UUID via the
+      // proactive-save heartbeat between this event firing and the listener
+      // running. Clearing without checking would wipe the new, valid UUID and
+      // force a fresh spawn on every subsequent message.
+      sessionManager.on('resumeFailed', (info: { tmuxSession: string; resumeSessionId: string; telegramTopicId?: number; slackChannelId?: string }) => {
+        if (info.telegramTopicId != null && _topicResumeMap) {
+          try {
+            const stored = _topicResumeMap.get(info.telegramTopicId);
+            if (stored === info.resumeSessionId) {
+              _topicResumeMap.remove(info.telegramTopicId);
+              console.log(`[resumeFailed] Cleared bad resume UUID for topic ${info.telegramTopicId} (tmux: "${info.tmuxSession}", uuid: ${info.resumeSessionId})`);
+            } else {
+              console.log(`[resumeFailed] Skipping UUID clear for topic ${info.telegramTopicId} — stored UUID (${stored ?? 'none'}) no longer matches failed UUID (${info.resumeSessionId}); fresh spawn likely already saved a new one.`);
+            }
+          } catch (err) {
+            console.error(`[resumeFailed] Failed to clear resume UUID for topic ${info.telegramTopicId}:`, err);
+          }
+        }
+      });
+
       sessionManager.on('injectionDropped', (info: { topicId: number; sessionName: string; text: string; injectedAt: number }) => {
         const elapsed = Date.now() - info.injectedAt;
         // Only respawn if the injection is recent (< 10 minutes old).
@@ -3731,6 +3857,18 @@ export async function startServer(options: StartOptions): Promise<void> {
       });
 
       console.log(pc.green('  Episodic memory sentinel enabled (LLM-powered digestion)'));
+    }
+
+    // Initialize WorkingMemoryAssembler — token-budgeted context assembly for session-start hooks.
+    // Placed after activitySentinel so episodicMemory can be wired from the sentinel.
+    // Skipped in minimal-config setups where neither memory system is available.
+    if (semanticMemory || activitySentinel) {
+      workingMemory = new WorkingMemoryAssembler({
+        semanticMemory,
+        episodicMemory: activitySentinel?.getEpisodicMemory(),
+      });
+      const epStatus = activitySentinel ? 'yes' : 'no';
+      console.log(pc.green(`  WorkingMemoryAssembler: ready (semantic: ${semanticMemory ? 'yes' : 'no'}, episodic: ${epStatus})`));
     }
 
     // Session Watchdog — auto-remediation for stuck commands
@@ -4571,6 +4709,29 @@ export async function startServer(options: StartOptions): Promise<void> {
     });
     console.log(pc.green('  Compaction auto-resume wired (PreCompact hook event)'));
 
+    // Pre-compaction memory flush — write durable facts before compaction
+    // collapses working memory. Off by default; enable via config.preCompactionFlush.
+    // See docs/specs/OPENCLAW-IMPORT-PRE-COMPACTION-FLUSH-SPEC.md.
+    const preCompactFlushCfg = (config as unknown as {
+      preCompactionFlush?: Partial<import('../core/PreCompactionFlush.js').PreCompactionFlushConfig>;
+    }).preCompactionFlush;
+    if (preCompactFlushCfg?.enabled) {
+      const { PreCompactionFlush, DEFAULT_PRE_COMPACTION_FLUSH_CONFIG } = await import('../core/PreCompactionFlush.js');
+      const flush = new PreCompactionFlush(
+        {
+          intelligence: sharedIntelligence ?? null,
+          projectDir: config.projectDir,
+        },
+        { ...DEFAULT_PRE_COMPACTION_FLUSH_CONFIG, ...preCompactFlushCfg },
+      );
+      hookEventReceiver.on('PreCompact', (payload) => {
+        flush.handle(payload as Parameters<typeof flush.handle>[0]).catch(() => {
+          /* handle() owns its audit; never throws. */
+        });
+      });
+      console.log(pc.green('  Pre-compaction memory flush enabled'));
+    }
+
     // Trigger 2: Watchdog 'compaction-idle' polling — report to sentinel.
     if (watchdog) {
       watchdog.on('compaction-idle', (sessionName: string) => {
@@ -4858,16 +5019,22 @@ export async function startServer(options: StartOptions): Promise<void> {
     let presenceProxy: import('../monitoring/PresenceProxy.js').PresenceProxy | undefined;
     if (sharedIntelligence && telegram) {
       try {
-        const { PresenceProxy } = await import('../monitoring/PresenceProxy.js');
+        const { PresenceProxy, isBriefAck } = await import('../monitoring/PresenceProxy.js');
         const { execSync: shellExecSync } = await import('child_process');
 
         const messagesLogPath = path.join(config.stateDir, 'telegram-messages.jsonl');
         const slackMessagesLogPath = path.join(config.stateDir, 'slack-messages.jsonl');
 
-        // Shared helper: check a messages log file for agent responses after a timestamp.
-        // System/proxy-message filtering is delegated to isSystemOrProxyMessage so all
-        // three callsites (this one, PresenceProxy.isSystemMessage, and the compaction
-        // recoverFn) stay in sync.
+        // Shared helper: check a messages log file for SUBSTANTIVE agent
+        // responses after a timestamp. Filters out system/proxy messages via
+        // isSystemOrProxyMessage AND brief acks via isBriefAck — both kinds
+        // of messages are non-cancelling from PresenceProxy's perspective.
+        //
+        // The brief-ack filter is what closes the gap from PR #128: that PR
+        // taught the event path (recordAgentMessage) to ignore acks, but the
+        // log-reading race guard at PresenceProxy.fireTier didn't share the
+        // same classifier. The result was Tier 2 silently cancelling because
+        // the ack was on disk. Same isBriefAck export feeds both paths now.
         const checkLogForAgentResponse = (logPath: string, topicId: number, sinceIso: string): boolean => {
           try {
             const content = fs.readFileSync(logPath, 'utf-8');
@@ -4880,7 +5047,13 @@ export async function startServer(options: StartOptions): Promise<void> {
                 const matchesTopic = msg.topicId === topicId
                   || (topicId < 0 && msg.channelId && slackChannelToSyntheticId(String(msg.channelId)) === topicId);
                 if (matchesTopic && !msg.fromUser && msg.timestamp > sinceIso) {
-                  if (!isSystemOrProxyMessage(msg.text)) return true;
+                  // Non-cancelling agent message kinds: system/proxy
+                  // chrome, and brief acks ("On it"). Both leave tier
+                  // timers running.
+                  const isNonCancelling = isSystemOrProxyMessage(msg.text)
+                    || isBriefAck(msg.text);
+                  if (isNonCancelling) continue;
+                  return true;
                 }
               } catch { /* skip malformed lines */ }
             }
@@ -5067,6 +5240,69 @@ export async function startServer(options: StartOptions): Promise<void> {
           });
           promiseBeacon.start();
           (globalThis as Record<string, unknown>).__instarPromiseBeacon = promiseBeacon;
+
+          // ── "keep watching" resume detector ─────────────────────────────
+          // When a user replies on a topic that has any auto-paused beacons,
+          // a literal "keep watching" match resumes them. Brittle detector
+          // (regex) with no blocking authority — it only triggers the
+          // structurally-symmetric /resume endpoint. False-positive cost:
+          // one extra heartbeat that re-pauses on next idle cycle.
+          const KEEP_WATCHING_RE = /\bkeep[\s-]?watching\b/i;
+          const previousTelegramHook = telegram.onMessageLogged;
+          telegram.onMessageLogged = (entry) => {
+            if (previousTelegramHook) previousTelegramHook(entry);
+            if (!entry.fromUser) return;
+            if (!entry.topicId) return;
+            if (!entry.text || !KEEP_WATCHING_RE.test(entry.text)) return;
+            const topicId = entry.topicId;
+            const paused = commitmentTracker
+              .getActive()
+              .filter(c => c.topicId === topicId && c.beaconPaused);
+            if (paused.length === 0) return;
+            (async () => {
+              let resumed = 0;
+              for (const c of paused) {
+                try {
+                  const url = `http://localhost:${config.port}/commitments/${c.id}/resume`;
+                  const resp = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      'Authorization': `Bearer ${config.authToken}`,
+                    },
+                  });
+                  if (resp.ok) resumed += 1;
+                  else console.warn(`[PromiseBeacon] resume call returned ${resp.status} for ${c.id}`);
+                } catch (err) {
+                  console.warn(`[PromiseBeacon] resume call failed for ${c.id}:`, (err as Error).message);
+                }
+              }
+              let ackText: string;
+              if (resumed === paused.length && resumed > 0) {
+                ackText = `⏳ resumed ${resumed === 1 ? 'watcher' : `${resumed} watchers`} on this topic.`;
+              } else if (resumed > 0) {
+                ackText = `⏳ resumed ${resumed} of ${paused.length} watchers — ${paused.length - resumed} didn't resume. Try again or open the dashboard.`;
+              } else {
+                ackText = `⚠️ couldn't resume the watcher${paused.length === 1 ? '' : 's'} on this topic — try again or open the dashboard.`;
+              }
+              try {
+                const ackUrl = `http://localhost:${config.port}/telegram/reply/${topicId}`;
+                await fetch(ackUrl, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config.authToken}`,
+                  },
+                  body: JSON.stringify({
+                    text: ackText,
+                    metadata: { source: 'promise-beacon', isProxy: true, tier: 1 },
+                  }),
+                });
+              } catch (err) {
+                console.warn('[PromiseBeacon] resume ack send failed:', (err as Error).message);
+              }
+            })();
+          };
         } catch (err) {
           console.warn('[PromiseBeacon] init failed:', (err as Error).message);
         }
@@ -5222,12 +5458,28 @@ export async function startServer(options: StartOptions): Promise<void> {
         }, 2000);
       }
 
+      // Reap stuck job runs — sessions that were running when the host slept
+      // can't complete normally because their tmux process was suspended.
+      // Without this, runs leak as `pending` until the next claim TTL fires
+      // (or indefinitely, if the supervising scheduler tick is also missed).
+      let reapResult: { reaped: string[]; skipped: number } = { reaped: [], skipped: 0 };
+      try {
+        if (scheduler) {
+          reapResult = scheduler.reapStuckRuns(event);
+        }
+      } catch (err) {
+        console.error('[SleepWake][reaper] unexpected error:', err);
+      }
+
       // Notify via batcher — wake events are informational, not urgent
       // Only notify for long sleeps (>5 min) — short sleeps are routine and not worth mentioning
-      if (event.sleepDurationSeconds > 300) {
+      if (event.sleepDurationSeconds > 300 || reapResult.reaped.length > 0) {
         const mins = Math.round(event.sleepDurationSeconds / 60);
+        const reapNote = reapResult.reaped.length > 0
+          ? ` Reaped ${reapResult.reaped.length} stuck job(s): ${reapResult.reaped.join(', ')}.`
+          : '';
         notify('DIGEST', 'system',
-          `Machine woke up after ${mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`} of sleep. Everything's reconnected and running.`
+          `Machine woke up after ${mins > 60 ? `${Math.round(mins / 60)}h` : `${mins}m`} of sleep.${reapNote} Everything's reconnected and running.`
         );
       }
     });
@@ -5668,6 +5920,43 @@ export async function startServer(options: StartOptions): Promise<void> {
       messageDelivery, // PR-4: live-session injection path
     );
 
+    // Topic linkage handler — Per THREAD-TOPIC-LINKAGE-SPEC.md.
+    // Ties threadline conversations to the originating Telegram topic so
+    // replies route back to the topic session instead of a sibling worker.
+    // commitmentTracker + telegram are constructed earlier in this file and
+    // are guaranteed in scope by this point; the handler is wired into the
+    // router immediately.
+    const { SalienceGate } = await import('../threadline/SalienceGate.js');
+    const { TopicLinkageHandler } = await import('../threadline/TopicLinkageHandler.js');
+    const salienceGate = new SalienceGate(); // fallback-only for v1; spec §5.4
+    let topicLinkageHandler: import('../threadline/TopicLinkageHandler.js').TopicLinkageHandler | null = null;
+    if (commitmentTracker) {
+      topicLinkageHandler = new TopicLinkageHandler({
+        topicResumeMap: _topicResumeMap as import('../core/TopicResumeMap.js').TopicResumeMap,
+        threadResumeMap,
+        commitmentTracker,
+        salienceGate,
+        messageStore,
+        localAgent: config.projectName,
+        injectIntoSession: (sessionName: string, text: string) => {
+          try {
+            sessionManager.injectPasteNotification(sessionName, text);
+            return true;
+          } catch { return false; }
+        },
+        isSessionAlive: (sessionName: string) => {
+          try { return sessionManager.isSessionAlive(sessionName); } catch { return false; }
+        },
+        sendTelegramToTopic: telegram
+          ? (topicId: number, text: string) => telegram.sendToTopic(topicId, text)
+          : null,
+        getSessionForTopic: telegram
+          ? (topicId: number) => telegram.getSessionForTopic(topicId)
+          : undefined,
+      });
+      threadlineRouter.setTopicLinkageHandler(topicLinkageHandler);
+    }
+
     // Listener Session Manager — warm session for fast relay responses (Phase 2)
     const listenerManager = config.threadline?.relayEnabled
       ? new ListenerSessionManager(config.stateDir, config.authToken ?? '', config.threadline as Partial<import('../threadline/ListenerSessionManager.js').ListenerConfig>)
@@ -5937,6 +6226,43 @@ export async function startServer(options: StartOptions): Promise<void> {
             try {
               threadlineRelayClient!.sendPlaintext(senderFingerprint, config.threadline?.autoAckMessage ?? 'Message received. Composing response...', msg.threadId);
             } catch (ackErr) { console.error(`[relay] Auto-ack failed: ${ackErr instanceof Error ? ackErr.message : ackErr}`); }
+          }
+
+          // Canonical inbox write — single source of truth across all routing branches.
+          // Runs once at relay-ingest, BEFORE pipe / warm-listener / cold-spawn branching,
+          // so .instar/threadline/inbox.jsonl.active reflects every inbound message regardless
+          // of which path handles it. Read by the dashboard observability tab and the
+          // threadline → telegram bridge. Non-fatal on failure — routing continues either way.
+          if (listenerManager) {
+            try {
+              listenerManager.appendCanonicalInboxEntry({
+                from: senderFingerprint,
+                senderName,
+                trustLevel,
+                threadId: msg.threadId ?? getSyntheticThreadId(senderFingerprint),
+                text: textContent,
+                messageId: msg.messageId,
+              });
+            } catch (err) {
+              console.warn(`[relay] Canonical inbox append failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+            }
+          }
+
+          // Threadline → Telegram bridge: mirror inbound message into a per-thread
+          // Telegram topic so the user has visibility into agent-to-agent
+          // conversations. Relay-only — TelegramBridgeConfig owns the gate
+          // (default-OFF; allow/deny list determines auto-create). Async,
+          // non-awaited, and never blocks routing or throws to this handler.
+          if (telegramBridge) {
+            telegramBridge
+              .mirrorInbound({
+                threadId: msg.threadId ?? getSyntheticThreadId(senderFingerprint),
+                remoteAgent: senderFingerprint,
+                remoteAgentName: senderName,
+                text: textContent,
+                messageId: msg.messageId,
+              })
+              .catch(err => console.warn(`[tg-bridge] mirrorInbound: ${err instanceof Error ? err.message : err}`));
           }
 
           // Phase 2a: Pipe-mode session for simple queries (lightweight, auto-exit)
@@ -6253,8 +6579,225 @@ export async function startServer(options: StartOptions): Promise<void> {
     const { InitiativeTracker } = await import('../core/InitiativeTracker.js');
     const initiativeTracker = new InitiativeTracker(config.stateDir);
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, proxyCoordinator });
+    // Project-scope Phase 1.9 — wire the digest cache writer so every
+    // project mutation re-renders `.instar/projects-digest.cache`. The
+    // session-start + compaction-recovery hooks read this file directly
+    // (≤50ms budget, no HTTP). First-start writes the file unconditionally
+    // so the hooks always have something to read on a fresh install.
+    const { ProjectDigestCache } = await import('../core/ProjectDigestCache.js');
+    const projectDigestCache = new ProjectDigestCache(config.stateDir, initiativeTracker);
+    initiativeTracker.setDigestCacheInvalidator(() => projectDigestCache.writeDigestCache());
+    projectDigestCache.writeDigestCache();
+
+    // Project-scope Phase 1b PR 3 — round runner (single chokepoint for
+    // /advance, /halt, /ack, /accept-partial; lock-protected; future
+    // autonomous-delegating run loop).
+    const machineIdForProjects = coordinator.identity?.machineId ?? os.hostname();
+    const { ProjectRoundRunner } = await import('../core/ProjectRoundRunner.js');
+    const projectRoundRunner = new ProjectRoundRunner({
+      tracker: initiativeTracker,
+      stateDir: config.stateDir,
+      machineId: machineIdForProjects,
+    });
+
+    // Project-scope Phase 1b PR 4 — machine heartbeat + auto-advance poller.
+    // Heartbeat writes .instar/machine-health/<machineId>.json every 30 min
+    // (git-synced); the claim-ownership endpoint queries it for the >48h
+    // staleness check that spec § P5 requires. Auto-advance poller scans
+    // for project rounds whose autoAdvanceAt has elapsed and bookkeeps the
+    // next round.
+    const { MachineHeartbeat } = await import('../core/MachineHeartbeat.js');
+    const machineHeartbeatApi = new MachineHeartbeat({
+      stateDir: config.stateDir,
+      machineId: machineIdForProjects,
+    });
+    machineHeartbeatApi.start();
+    const machineHeartbeat = { api: machineHeartbeatApi, config: { machineId: machineIdForProjects } };
+    // Wire the run-round executor: fire-and-forget launch of
+    // ProjectRoundExecution.runRound() after a successful auto-advance.
+    // The executor itself acquires the lock + spawns + polls + cleans up.
+    // Errors are surfaced via the poller's result.executorErrors and
+    // logged to stderr; they don't take the server down.
+    const { runRound } = await import('../core/ProjectRoundExecution.js');
+    const { ProjectAutoAdvancePoller } = await import('../core/ProjectAutoAdvancePoller.js');
+    const projectAutoAdvancePoller = new ProjectAutoAdvancePoller({
+      tracker: initiativeTracker,
+      runner: projectRoundRunner,
+      machineId: machineIdForProjects,
+      executor: async ({ projectId, roundIndex }) => {
+        const proj = initiativeTracker.get(projectId);
+        if (!proj || !proj.targetRepoPath) return;
+        await runRound(
+          {
+            tracker: initiativeTracker,
+            projectId,
+            roundIndex,
+            targetRepoPath: proj.targetRepoPath,
+          },
+          { stateDir: config.stateDir }
+        );
+      },
+    });
+    // Tick once a minute; .unref() so the timer never keeps the process alive.
+    const projectAutoAdvanceTimer = setInterval(() => {
+      projectAutoAdvancePoller.tick().catch((err: unknown) => {
+        console.error('[ProjectAutoAdvancePoller] tick error:', err);
+      });
+    }, 60_000);
+    if (typeof projectAutoAdvanceTimer.unref === 'function') projectAutoAdvanceTimer.unref();
+
+    // Post-restore reconciler — downgrade any round still flagged
+    // in-progress to pending. The previous owner may have crashed or
+    // migrated, and no TaskFlow exists yet to detect an actually-live
+    // run. One-shot at startup.
+    try {
+      for (const proj of initiativeTracker.list({ kind: 'project', status: 'active' })) {
+        const rounds = proj.rounds ?? [];
+        let any = false;
+        const nextRounds = rounds.map((r) => {
+          if (r.status === 'in-progress') {
+            any = true;
+            return { ...r, status: 'pending' as const };
+          }
+          return r;
+        });
+        if (any) {
+          await initiativeTracker.update(proj.id, {
+            rounds: nextRounds,
+            ifMatch: proj.version,
+          }).catch(() => { /* OCC race or already gone — best-effort */ });
+        }
+      }
+    } catch (err) {
+      console.error('[ProjectAutoAdvancePoller] post-restore reconciler error:', err);
+    }
+
+    // Project drift checker — used by POST /projects/:id/drift-check.
+    // Reuses the shared IntelligenceProvider. Cache + ledger are optional
+    // and not wired here yet (the dashboard caller can pass per-call
+    // overrides); a follow-up can wire ProjectDriftCheckerCache + the
+    // DriftSpendLedger once spend telemetry is needed in prod.
+    const { ProjectDriftChecker } = await import('../core/ProjectDriftChecker.js');
+    const projectDriftChecker = new ProjectDriftChecker({
+      intelligence: sharedIntelligence,
+    });
+
+    // TaskFlow registry — opt-in via config.taskFlow.enabled (default: off in v1).
+    // Owns its own SQLite file under .instar/task-flows.db. The maintenance
+    // sweeper and due-waker start with the registry; both .unref() their timers
+    // so they never keep the process alive on shutdown.
+    let taskFlowRegistry: import('../tasks/TaskFlowRegistry.js').TaskFlowRegistry | undefined;
+    let taskFlowSweeper: import('../tasks/TaskFlowMaintenanceSweeper.js').TaskFlowMaintenanceSweeper | undefined;
+    let taskFlowDueWaker: import('../tasks/TaskFlowDueWaker.js').TaskFlowDueWaker | undefined;
+    let threadlineFlowBridge: import('../tasks/ThreadlineFlowBridge.js').ThreadlineFlowBridge | undefined;
+    let divergenceChecker: import('../tasks/DivergenceChecker.js').DivergenceChecker | undefined;
+    if ((config as any).taskFlow?.enabled) {
+      try {
+        const { TaskFlowStore } = await import('../tasks/task-flow-registry.store.sqlite.js');
+        const { TaskFlowRegistry } = await import('../tasks/TaskFlowRegistry.js');
+        const { TaskFlowMaintenanceSweeper } = await import('../tasks/TaskFlowMaintenanceSweeper.js');
+        const { TaskFlowDueWaker } = await import('../tasks/TaskFlowDueWaker.js');
+        const path = await import('node:path');
+        const dbPath = path.default.join(config.stateDir, 'task-flows.db');
+        const store = new TaskFlowStore({ dbPath });
+        await store.open();
+        taskFlowRegistry = new TaskFlowRegistry({
+          store,
+          ledger: sharedStateLedger ?? undefined,
+          thresholds: (config as any).taskFlow?.thresholds,
+          // Phase 5: rate limits + cache cap. Each field has a documented
+          // default in DEFAULT_RATE_LIMITS / DEFAULT_CACHE_CONFIG.
+          rateLimits: (config as any).taskFlow?.rateLimits,
+          cache: (config as any).taskFlow?.cache,
+        });
+        taskFlowSweeper = new TaskFlowMaintenanceSweeper({
+          registry: taskFlowRegistry,
+          store,
+          ledger: sharedStateLedger ?? undefined,
+        });
+        taskFlowDueWaker = new TaskFlowDueWaker({ registry: taskFlowRegistry });
+        taskFlowSweeper.start();
+        taskFlowDueWaker.start();
+        const { ThreadlineFlowBridge } = await import('../tasks/ThreadlineFlowBridge.js');
+        threadlineFlowBridge = new ThreadlineFlowBridge({ registry: taskFlowRegistry });
+
+        // Phase 3a — wire EvolutionManager dual-write + divergence checker.
+        const crypto = await import('node:crypto');
+        const controllerInstanceId = crypto.randomUUID();
+        evolution.setTaskFlowRegistry(taskFlowRegistry, controllerInstanceId);
+        // Backfill in-flight clusters into TaskFlow. Idempotent via
+        // `evolution-cluster-create-<id>` idempotency key.
+        try {
+          const migrationReport = await evolution.migrateExistingToTaskFlow();
+          console.log(
+            pc.green(
+              `  TaskFlow: backfilled evolution clusters created=${migrationReport.created} ` +
+              `existed=${migrationReport.alreadyExisted} advanced=${migrationReport.advanced} ` +
+              `skipped=${migrationReport.skipped}`
+            )
+          );
+        } catch (err) {
+          console.warn('[instar] taskflow evolution backfill failed (non-fatal):', err);
+        }
+        const { DivergenceChecker } = await import('../tasks/DivergenceChecker.js');
+        divergenceChecker = new DivergenceChecker({
+          registry: taskFlowRegistry,
+          evolutionManager: evolution,
+          ledger: sharedStateLedger ?? undefined,
+        });
+        divergenceChecker.start();
+
+        // Phase 4 — wire InitiativeTracker to TaskFlow as the single source of
+        // truth. Backfill any initiatives present in the legacy
+        // `initiatives.json` file. Idempotent via `findIdempotent` on
+        // `(controllerId="InitiativeTracker", ownerKey, idempotencyKey)`.
+        initiativeTracker.setTaskFlowRegistry(taskFlowRegistry, controllerInstanceId);
+        try {
+          const initiativeReport = await initiativeTracker.migrateExistingToTaskFlow();
+          console.log(
+            pc.green(
+              `  TaskFlow: backfilled initiatives created=${initiativeReport.created} ` +
+              `existed=${initiativeReport.alreadyExisted} advanced=${initiativeReport.advanced} ` +
+              `skipped=${initiativeReport.skipped}`
+            )
+          );
+        } catch (err) {
+          console.warn('[instar] taskflow initiative backfill failed (non-fatal):', err);
+        }
+      } catch (err) {
+        console.warn('[instar] task-flow init failed (non-fatal):', err);
+        taskFlowRegistry = undefined;
+        threadlineFlowBridge = undefined;
+        divergenceChecker = undefined;
+      }
+    }
+
+    // SessionRefresh — agent-initiated session respawn. Requires a Telegram
+    // adapter (v1 scope: Telegram-bound sessions only). The respawner closure
+    // captures `topicMemory` by reference, so even if topicMemory is wired up
+    // after this point it will be resolved at refresh-time.
+    if (telegram) {
+      const { SessionRefresh } = await import('../core/SessionRefresh.js');
+      const telegramRef = telegram; // narrow for closure
+      _sessionRefresh = new SessionRefresh({
+        sessionManager,
+        state,
+        telegram: telegramRef,
+        topicResumeMap: _topicResumeMap,
+        respawner: async (sessionName: string, topicId: number, followUpPrompt: string | undefined): Promise<string> => {
+          // killSession (called inside SessionRefresh) has already fired
+          // beforeSessionKill (UUID persisted) and destroyed the tmux
+          // session. respawnSessionForTopic spawns the new tmux running
+          // `claude --resume <uuid>` and registers the topic mapping.
+          await respawnSessionForTopic(sessionManager, telegramRef, sessionName, topicId, followUpPrompt, topicMemory);
+          return telegramRef.getSessionForTopic(topicId) ?? sessionName;
+        },
+      });
+    }
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, proxyCoordinator, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, workingMemory, taskFlowRegistry, threadlineFlowBridge });
     await server.start();
+    void taskFlowSweeper; void taskFlowDueWaker; void divergenceChecker;
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
     // Any degradation events queued during startup will drain to feedback + telegram.
@@ -6275,6 +6818,53 @@ export async function startServer(options: StartOptions): Promise<void> {
         // ops-pager output. See upgrades/side-effects/agent-health-alert-authority-routing.md.
         toneGate: messagingToneGate ?? null,
       });
+    }
+
+    // Tier-2 live-mode wire-up (SELF-HEALING-REMEDIATOR-V2-SPEC §A57).
+    //
+    // When `config.remediator.enabled === true`, construct the full F-1..F-8
+    // dispatch graph and register it with the DegradationReporter via the
+    // F-3 `setRemediator()` hook. Default is OFF — the legacy alert path
+    // + in-line healers (NativeModuleHealer.openWithHeal, supervisor
+    // preflightSelfHeal) remain the safety net regardless of Remediator
+    // state. See upgrades/side-effects/tier2-degradation-reporter-live-wire.md.
+    {
+      const remediatorEnabled = (config as { remediator?: { enabled?: boolean } })
+        .remediator?.enabled === true;
+      if (remediatorEnabled) {
+        try {
+          const { bootstrapRemediator } = await import(
+            '../remediation/RemediatorBootstrap.js'
+          );
+          const machineIdForRemediator =
+            coordinator.identity?.machineId ?? os.hostname();
+          const bootstrapResult = await bootstrapRemediator({
+            stateDir: config.stateDir,
+            machineId: machineIdForRemediator,
+            autonomyProfile: config.autonomyProfile,
+          });
+          if (bootstrapResult.disabled) {
+            console.log(
+              pc.yellow(
+                `  Remediator live-mode requested but disabled: ${bootstrapResult.reason} — legacy alert path active.`,
+              ),
+            );
+          } else {
+            degradationReporter.setRemediator(bootstrapResult.remediator);
+            console.log(
+              pc.green(
+                `  Remediator live-mode active (runbooks: ${bootstrapResult.registeredRunbookIds.join(', ') || 'none'}).`,
+              ),
+            );
+          }
+        } catch (err) {
+          console.error(
+            pc.red(
+              `  Remediator bootstrap failed: ${err instanceof Error ? err.message : String(err)}. Legacy alert path active.`,
+            ),
+          );
+        }
+      }
     }
 
     // Periodic housekeeping — calls orphaned cleanup methods every 6 hours.
@@ -6558,6 +7148,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       scheduler?.stop();
       if (telegram) await telegram.stop();
       sessionManager.stopMonitoring();
+      stuckInputSentinel.stop();
       // Close SQLite databases before exit — prevents "mutex lock failed" crash
       // when better-sqlite3 destructors fire during process teardown.
       topicMemory?.close();
@@ -6620,7 +7211,7 @@ export async function startServer(options: StartOptions): Promise<void> {
     }
 
     // Get the path to the CLI entry point
-    const cliPath = new URL('../cli.js', import.meta.url).pathname;
+    const cliPath = path.resolve(__dirname, '../cli.js');
 
     // Use shell-safe command construction: pass node + args as separate tokens
     // tmux new-session runs the remainder as a shell command, so we quote each arg

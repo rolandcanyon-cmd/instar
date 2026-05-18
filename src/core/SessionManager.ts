@@ -13,6 +13,9 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /** Diagnostics for a single running session */
 export interface SessionDiagnostic {
@@ -62,9 +65,20 @@ const DEFAULT_MAX_DURATION_MINUTES = 240;
 /** Minutes of idle-at-prompt before a non-protected session is killed */
 const IDLE_PROMPT_KILL_MINUTES = 15;
 
+/** Minutes of idle-at-prompt before a session bound to a live messaging topic is killed.
+ *  Topic-bound sessions are *waiting* for the user — idle is healthy.
+ *  Default 4h (240m): conservative balance between "conversational pauses through a
+ *  workday don't trigger respawn" and "memory/connection pressure from sessions held
+ *  indefinitely". Each held session retains a Claude TUI process (~200-500MB RSS)
+ *  and an Anthropic connection — multi-topic agents on smaller hosts could feel a
+ *  longer default. Operators with always-on conversations can override via
+ *  `idlePromptKillMinutesBoundToTopic` in config. */
+const IDLE_PROMPT_KILL_MINUTES_BOUND_TO_TOPIC = 240;
+
 /** Fallback constants — used when config values are not set */
 const FALLBACK_MAX_DURATION_MINUTES = DEFAULT_MAX_DURATION_MINUTES;
 const FALLBACK_IDLE_PROMPT_KILL_MINUTES = IDLE_PROMPT_KILL_MINUTES;
+const FALLBACK_IDLE_PROMPT_KILL_MINUTES_BOUND_TO_TOPIC = IDLE_PROMPT_KILL_MINUTES_BOUND_TO_TOPIC;
 
 /** Patterns that indicate Claude is sitting at its idle prompt (not actively working) */
 const IDLE_PROMPT_PATTERNS = [
@@ -135,6 +149,12 @@ export class SessionManager extends EventEmitter {
   /** Optional callback: is this session currently in active compaction recovery? If so, skip zombie kill. */
   private activeRecoveryChecker?: (session: Session) => boolean;
 
+  /** Optional callback: is this tmux session currently bound to a live messaging topic
+   *  (Telegram/Slack/iMessage)? Returns a stable identifier (e.g. topic ID or channel ID)
+   *  when bound, null otherwise. When bound, the zombie-kill threshold is extended via
+   *  `effectiveBoundIdleKillMinutes` since "idle at prompt" is the healthy waiting state. */
+  private topicBindingChecker?: (tmuxSession: string) => string | number | null;
+
   /** Prompt Gate InputDetector — monitors terminal output for interactive prompts */
   private promptDetector?: InputDetector;
 
@@ -153,6 +173,13 @@ export class SessionManager extends EventEmitter {
   /** Sessions where we've already retried Enter for stuck pasted text.
    *  Key = session ID. Prevents infinite retry loops — one retry per session. */
   private pasteRetried = new Set<string>();
+
+  /**
+   * Sessions that have been logged once for "over age limit but actively
+   * working." Tracked to avoid log spam — the deferred-kill warning fires
+   * once per session, not every tick.
+   */
+  private overAgeButActiveLogged = new Set<string>();
 
   /** Cached count of running sessions, updated asynchronously by the monitor tick.
    *  Used by the health endpoint to avoid synchronous tmux polling. */
@@ -174,6 +201,13 @@ export class SessionManager extends EventEmitter {
   /** Effective idle-at-prompt kill threshold (config override or hardcoded default) */
   private get effectiveIdleKillMinutes(): number {
     return this.config.idlePromptKillMinutes ?? FALLBACK_IDLE_PROMPT_KILL_MINUTES;
+  }
+
+  /** Effective idle-at-prompt kill threshold for sessions bound to a live messaging topic.
+   *  Much higher than the default — topic-bound sessions sit at the prompt waiting for the
+   *  next user message; that's the healthy state, not a zombie. */
+  private get effectiveBoundIdleKillMinutes(): number {
+    return this.config.idlePromptKillMinutesBoundToTopic ?? FALLBACK_IDLE_PROMPT_KILL_MINUTES_BOUND_TO_TOPIC;
   }
 
   /** Effective absolute max session duration (config override or hardcoded default) */
@@ -233,7 +267,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
 
   private resolveShimRunner(): string {
     // Walk from this file up to project root, then look for scripts/destructive-command-shim.js
-    let dir = path.dirname(new URL(import.meta.url).pathname);
+    let dir = __dirname;
     for (let i = 0; i < 6; i++) {
       const candidate = path.join(dir, 'scripts', 'destructive-command-shim.js');
       if (fs.existsSync(candidate)) return candidate;
@@ -261,6 +295,23 @@ rm()  { "${shimRunner}" rm  "$@"; }
    */
   setSubagentChecker(checker: (session: Session) => boolean): void {
     this.subagentChecker = checker;
+  }
+
+  /**
+   * Set the topic-binding checker — used by the zombie-kill loop to distinguish
+   * sessions that are waiting for the next message from a live conversation
+   * (healthy "idle at prompt") from sessions that have nothing to do (zombies).
+   *
+   * When the checker returns a non-null identifier for a session, the kill
+   * threshold is extended to {@link effectiveBoundIdleKillMinutes} (default 24h).
+   * This is a structural exemption — the binding is an authoritative fact, not a
+   * judgment call. If Claude truly dies inside the tmux pane, isSessionAlive in
+   * the bridge's message-routing path will detect it and trigger a clean respawn.
+   *
+   * Must be called after the messaging adapter is constructed.
+   */
+  setTopicBindingChecker(checker: (tmuxSession: string) => string | number | null): void {
+    this.topicBindingChecker = checker;
   }
 
   /**
@@ -429,38 +480,71 @@ rm()  { "${shimRunner}" rm  "$@"; }
         // Enforce session timeout (prevents zombie/stuck sessions)
         // Uses explicit maxDurationMinutes if set, otherwise falls back to
         // DEFAULT_MAX_DURATION_MINUTES as an absolute safety net.
+        //
+        // Activity-aware kill gate: a session that is over the age limit but
+        // demonstrably WORKING (terminal not at idle prompt, OR active
+        // non-baseline child processes) is deferred for kill. Wall-clock age
+        // alone is not sufficient — long-running autonomous flows (spec
+        // convergence + multi-phase builds, /loop tasks, multi-hour driving
+        // through several PRs to merge) routinely exceed 240m while producing
+        // tool calls every few seconds. The previous unconditional age-based
+        // kill reaped these sessions mid-build, taking their background agents
+        // with them. The idle-detection block below (the existing infrastructure)
+        // catches sessions that are genuinely stuck.
         if (session.startedAt) {
           const maxMinutes = session.maxDurationMinutes || this.effectiveMaxDurationMinutes;
           const elapsed = (Date.now() - new Date(session.startedAt).getTime()) / 60000;
           const buffer = Math.min(maxMinutes * 0.2, 60); // 20% buffer, max 60 min
           const limit = maxMinutes + buffer;
           if (elapsed > limit && !this.config.protectedSessions.includes(session.tmuxSession)) {
-            // Check for unanswered injection before timeout kill
-            const pendingInjection = this.pendingInjections.get(session.tmuxSession);
-            if (pendingInjection) {
-              console.warn(`[SessionManager] Timed-out session "${session.name}" had unanswered injection for topic ${pendingInjection.topicId}`);
-              this.pendingInjections.delete(session.tmuxSession);
-              this.emit('injectionDropped', {
-                topicId: pendingInjection.topicId,
-                sessionName: session.tmuxSession,
-                text: pendingInjection.text,
-                injectedAt: pendingInjection.injectedAt,
-              });
+            // Activity check — defer kill if the session is doing real work.
+            const ageGateOutput = this.captureOutput(session.tmuxSession, 5);
+            const ageGateIsIdle = ageGateOutput && IDLE_PROMPT_PATTERNS.some(p => ageGateOutput.includes(p));
+            const ageGateHasProcs = this.hasActiveProcesses(session.tmuxSession);
+            const ageGateTrulyIdle = ageGateIsIdle && !ageGateHasProcs;
+
+            if (!ageGateTrulyIdle) {
+              // Over age limit but actively working. Log once per session to
+              // avoid log spam, defer the kill. The idle-detection block below
+              // will catch the session once it genuinely stops working.
+              if (!this.overAgeButActiveLogged.has(session.id)) {
+                this.overAgeButActiveLogged.add(session.id);
+                console.warn(
+                  `[SessionManager] Session "${session.name}" is past the age limit (${Math.round(elapsed)}m > ${maxMinutes}m) ` +
+                  `but is actively working (procs=${ageGateHasProcs}, idleAtPrompt=${!!ageGateIsIdle}). Deferring kill; ` +
+                  `the idle-detection block will catch it once it stops producing work.`
+                );
+              }
+              // Fall through to the rest of the loop — do NOT skip idle detection,
+              // because if the session DOES go idle, we still want it killed.
+            } else {
+              // Check for unanswered injection before timeout kill
+              const pendingInjection = this.pendingInjections.get(session.tmuxSession);
+              if (pendingInjection) {
+                console.warn(`[SessionManager] Timed-out session "${session.name}" had unanswered injection for topic ${pendingInjection.topicId}`);
+                this.pendingInjections.delete(session.tmuxSession);
+                this.emit('injectionDropped', {
+                  topicId: pendingInjection.topicId,
+                  sessionName: session.tmuxSession,
+                  text: pendingInjection.text,
+                  injectedAt: pendingInjection.injectedAt,
+                });
+              }
+              console.warn(`[SessionManager] Session "${session.name}" exceeded timeout (${Math.round(elapsed)}m > ${maxMinutes}m) and is idle. Killing.`);
+              // Emit beforeSessionKill BEFORE destroying the tmux session so
+              // listeners (e.g. TopicResumeMap) can discover the Claude UUID.
+              this.emit('beforeSessionKill', session);
+              try {
+                await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
+              } catch {
+                // @silent-fallback-ok — tmux kill, session may be dead
+              }
+              session.status = 'killed';
+              session.endedAt = new Date().toISOString();
+              this.state.saveSession(session);
+              this.emit('sessionComplete', session);
+              continue;
             }
-            console.warn(`[SessionManager] Session "${session.name}" exceeded timeout (${Math.round(elapsed)}m > ${maxMinutes}m). Killing.`);
-            // Emit beforeSessionKill BEFORE destroying the tmux session so
-            // listeners (e.g. TopicResumeMap) can discover the Claude UUID.
-            this.emit('beforeSessionKill', session);
-            try {
-              await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
-            } catch {
-              // @silent-fallback-ok — tmux kill, session may be dead
-            }
-            session.status = 'killed';
-            session.endedAt = new Date().toISOString();
-            this.state.saveSession(session);
-            this.emit('sessionComplete', session);
-            continue;
           }
         }
 
@@ -523,7 +607,16 @@ rm()  { "${shimRunner}" rm  "$@"; }
               }
             } else {
               const idleMs = now - this.idlePromptSince.get(session.id)!;
-              if (idleMs > this.effectiveIdleKillMinutes * 60_000) {
+              // Topic-bound exemption: if this session is bound to a live messaging
+              // topic, "idle at prompt" is the *healthy* waiting state — the agent is
+              // waiting for the user's next message. Use a much longer threshold so
+              // we don't kill healthy idle sessions and force the user through a
+              // respawn-with-resume on every message after a pause.
+              const binding = this.topicBindingChecker?.(session.tmuxSession);
+              const killThresholdMinutes = binding != null
+                ? this.effectiveBoundIdleKillMinutes
+                : this.effectiveIdleKillMinutes;
+              if (idleMs > killThresholdMinutes * 60_000) {
                 // Veto: active compaction recovery in flight — skip kill and
                 // reset the idle clock so we don't race the recovery window.
                 if (this.activeRecoveryChecker && this.activeRecoveryChecker(session)) {
@@ -543,7 +636,8 @@ rm()  { "${shimRunner}" rm  "$@"; }
                     injectedAt: pendingInjection.injectedAt,
                   });
                 }
-                console.warn(`[SessionManager] Session "${session.name}" idle at prompt for ${Math.round(idleMs / 60_000)}m with no active processes. Killing zombie.`);
+                const bindingNote = binding != null ? ` (topic-bound, threshold ${killThresholdMinutes}m)` : ` (threshold ${killThresholdMinutes}m)`;
+                console.warn(`[SessionManager] Session "${session.name}" idle at prompt for ${Math.round(idleMs / 60_000)}m with no active processes${bindingNote}. Killing zombie.`);
                 this.emit('beforeSessionKill', session);
                 try {
                   await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${session.tmuxSession}`]);
@@ -617,6 +711,12 @@ rm()  { "${shimRunner}" rm  "$@"; }
      *  the spawned session uses `codex exec --oss --local-provider <p>`
      *  instead of OpenAI. Ignored for non-codex frameworks. */
     codexLocalProvider?: 'ollama' | 'lmstudio';
+    /** Optional Claude Code per-session tool allowlist
+     *  (mapped to `--allowedTools <comma-separated>`).
+     *  When omitted, the spawn runs with full tools (back-compat).
+     *  When an empty array, no `--allowedTools` flag is emitted —
+     *  callers must explicitly pass at least one tool name to scope. */
+    allowedTools?: string[];
   }): Promise<Session> {
     const runningSessions = this.listRunningSessions();
     if (runningSessions.length >= this.config.maxSessions) {
@@ -695,6 +795,27 @@ rm()  { "${shimRunner}" rm  "$@"; }
       model: options.model,
       ...(options.codexLocalProvider ? { codexLocalProvider: options.codexLocalProvider } : {}),
     });
+
+    // Per-job tool allowlist (INSTAR-JOBS-AS-AGENTMD spec §5): when the
+    // caller provides a non-empty `allowedTools` array, scope the spawned
+    // session. Currently Claude-only — `--allowedTools` is a Claude CLI
+    // flag with no Codex equivalent (Codex uses sandbox modes via the
+    // headless builder). For Codex spawns the allowlist is silently
+    // ignored; the spec's enforcement is via Codex sandbox flags upstream.
+    if (
+      headlessFramework === 'claude-code'
+      && options.allowedTools
+      && options.allowedTools.length > 0
+    ) {
+      // Insert --allowedTools <list> before the -p prompt positional so
+      // Claude CLI parses it correctly. The helper builds argv with
+      // structure [binary, --dangerously-skip-permissions, (--model X)?, -p, prompt]
+      // — splice right before -p.
+      const dashPIndex = headlessSpec.argv.indexOf('-p');
+      if (dashPIndex > 0) {
+        headlessSpec.argv.splice(dashPIndex, 0, '--allowedTools', options.allowedTools.join(','));
+      }
+    }
 
     // K9: build PATH env with shim prepended (when shim was installed)
     const inheritedPath = process.env.PATH ?? '';
@@ -1448,29 +1569,126 @@ rm()  { "${shimRunner}" rm  "$@"; }
     // large CLAUDE.md loading, and session-start hook execution.
     const readyTimeout = options?.resumeSessionId ? 120_000 : 90_000;
     if (initialMessage) {
-      this.waitForClaudeReadyWithRetry(tmuxSession, readyTimeout).then((ready) => {
-        if (ready) {
-          // Stabilization delay: Claude's TUI may redraw after loading large JONSLs,
-          // clearing any text injected too early. Wait for the redraw to settle.
-          const stabilizationMs = options?.resumeSessionId ? 5000 : 1000;
-          setTimeout(() => {
-            this.injectMessage(tmuxSession, initialMessage);
-            console.log(`[SessionManager] Injected initial message into "${tmuxSession}" (${initialMessage.length} chars${stabilizationMs ? ', after stabilization delay' : ''})`);
-          }, stabilizationMs);
-        } else {
-          console.error(`[SessionManager] Claude not ready in session "${tmuxSession}" — message NOT injected. Session may need manual intervention.`);
-          // Still try to inject — Claude might be ready but prompt detection failed
-          if (this.tmuxSessionExists(tmuxSession)) {
-            console.log(`[SessionManager] Session "${tmuxSession}" still alive — attempting injection anyway`);
-            this.injectMessage(tmuxSession, initialMessage);
-          }
-        }
-      }).catch((err) => {
-        console.error(`[SessionManager] Error waiting for Claude ready in "${tmuxSession}": ${err}`);
+      this.handleReadyAndInject(tmuxSession, name, initialMessage, readyTimeout, options).catch((err) => {
+        console.error(`[SessionManager] Error during ready-and-inject for "${tmuxSession}": ${err}`);
       });
     }
 
     return tmuxSession;
+  }
+
+  /**
+   * Wait for Claude to be ready, inject the initial message, and — when the
+   * resume path crashes during startup — fall back to a fresh spawn carrying
+   * the same message instead of silently dropping it.
+   *
+   * Why this exists: a stale --resume UUID can crash Claude during startup
+   * (`Session died during startup` in the logs). Without fallback, the user's
+   * first message after an idle pause vanishes; the presence proxy fires its
+   * "session appears stopped" 5 minutes later; the user must re-send to
+   * recover. The fallback closes that gap by retrying once without --resume.
+   *
+   * Single retry only — if the fresh-spawn also fails, we surface the error
+   * via the existing degradation reporter and the bridge's own respawn paths.
+   */
+  private async handleReadyAndInject(
+    tmuxSession: string,
+    originalName: string | undefined,
+    initialMessage: string,
+    readyTimeout: number,
+    options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string },
+  ): Promise<void> {
+    const ready = await this.waitForClaudeReadyWithRetry(tmuxSession, readyTimeout);
+    if (ready) {
+      const stabilizationMs = options?.resumeSessionId ? 5000 : 1000;
+      await new Promise(r => setTimeout(r, stabilizationMs));
+      this.injectMessage(tmuxSession, initialMessage);
+      console.log(`[SessionManager] Injected initial message into "${tmuxSession}" (${initialMessage.length} chars${stabilizationMs ? ', after stabilization delay' : ''})`);
+      return;
+    }
+
+    // Not ready. Two flavors:
+    //   (a) tmux is gone — startup crash. With --resume, the saved UUID is most
+    //       likely stale or corrupt. Fall back to a fresh spawn (no --resume)
+    //       carrying the same initial message.
+    //   (b) tmux is alive but readiness probe couldn't see the prompt. Best
+    //       effort: inject anyway, the original behavior.
+    const stillAlive = this.tmuxSessionExists(tmuxSession);
+    if (!stillAlive && options?.resumeSessionId) {
+      console.warn(`[SessionManager] Resume failed for "${tmuxSession}" (UUID ${options.resumeSessionId}) — tmux died during startup. Falling back to fresh spawn.`);
+
+      // Mark the failed session BEFORE emitting the event. A concurrent
+      // monitor tick that reads state in between would otherwise see a dead
+      // pane still flagged `running`. Also matters because some
+      // resumeFailed listeners may consult listRunningSessions to confirm
+      // the failure shape.
+      try {
+        const failed = this.listRunningSessions().find(s => s.tmuxSession === tmuxSession);
+        if (failed) {
+          failed.status = 'failed';
+          failed.endedAt = new Date().toISOString();
+          this.state.saveSession(failed);
+        }
+      } catch { /* state cleanup is best-effort */ }
+
+      this.emit('resumeFailed', {
+        tmuxSession,
+        resumeSessionId: options.resumeSessionId,
+        telegramTopicId: options.telegramTopicId,
+        slackChannelId: options.slackChannelId,
+      });
+
+      // Best-effort tmux cleanup in case a zombie pane survived.
+      try {
+        await execFileAsync(this.config.tmuxPath, ['kill-session', '-t', `=${tmuxSession}`]);
+      } catch { /* expected if tmux pane is already gone */ }
+
+      // Single fresh-spawn retry. Pass the original `name` parameter through
+      // so the recursive call reconstructs the same tmux name — important
+      // because the bridge's session→topic mapping was registered against
+      // that name. Stripping the project-base prefix from the tmux name
+      // would not preserve the auto-generated `interactive-${ts}` form.
+      // resumeSessionId is intentionally omitted to break the bad-UUID cycle.
+      try {
+        await this.spawnInteractiveSession(initialMessage, originalName, {
+          telegramTopicId: options.telegramTopicId,
+          slackChannelId: options.slackChannelId,
+        });
+        console.log(`[SessionManager] Fresh-spawn fallback succeeded for "${tmuxSession}".`);
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[SessionManager] Fresh-spawn fallback FAILED for "${tmuxSession}": ${errMsg}`);
+        DegradationReporter.getInstance().report({
+          feature: 'SessionManager.handleReadyAndInject',
+          primary: 'Resume failed → fresh-spawn fallback',
+          fallback: 'Both resume and fresh-spawn failed; message not delivered',
+          reason: `Why: ${errMsg}`,
+          impact: 'User message not delivered; bridge will respawn on next message',
+        });
+      }
+      return;
+    }
+
+    // Tmux still alive but readiness probe couldn't confirm — best-effort inject.
+    // (Preserves the original behavior for prompt-detection false negatives.)
+    if (stillAlive) {
+      console.error(`[SessionManager] Claude not ready in session "${tmuxSession}" — message NOT injected. Session may need manual intervention.`);
+      console.log(`[SessionManager] Session "${tmuxSession}" still alive — attempting injection anyway`);
+      this.injectMessage(tmuxSession, initialMessage);
+      return;
+    }
+
+    // tmux dead AND not a resume case — fresh spawn that crashed during startup.
+    // No fallback (no UUID to blame); surface as a degradation so the bridge can
+    // notice. The bridge already retries on the next inbound message.
+    console.error(`[SessionManager] Claude not ready in session "${tmuxSession}" — tmux died during fresh startup. Message NOT injected.`);
+    DegradationReporter.getInstance().report({
+      feature: 'SessionManager.handleReadyAndInject',
+      primary: 'Wait for Claude ready, inject initial message',
+      fallback: 'tmux died during startup with no --resume to fall back from',
+      reason: 'fresh-spawn crashed during startup; readiness probe could not verify prompt',
+      impact: 'Initial message dropped; bridge will respawn on next inbound message',
+    });
   }
 
   /**
@@ -1934,6 +2152,12 @@ rm()  { "${shimRunner}" rm  "$@"; }
             }
           }
         }
+        // Verify Enter actually submitted — on fresh Claude Code TUIs (v2.1.105+)
+        // the Enter after bracketed-paste-end is occasionally eaten, leaving the
+        // text sitting in the input box unsubmitted. verifyInjection captures the
+        // pane after a short delay and sends one extra Enter if the marker text
+        // is still visible at the ❯ prompt.
+        this.verifyInjection(tmuxSession, text);
         return true;
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -1959,6 +2183,120 @@ rm()  { "${shimRunner}" rm  "$@"; }
       }
     }
     return false;
+  }
+
+  /**
+   * Verify an injection actually submitted by polling for a marker snippet
+   * still present at the ❯ prompt. On Claude Code v2.1.105+, the Enter after
+   * bracketed-paste-end is occasionally eaten by a race with the paste-end
+   * sequence — and the recovery Enter can be eaten by the same race. Single-
+   * shot verification leaves the user stuck when recovery also misses.
+   *
+   * Polls at 500/1500/3500/6500ms from injection (markerCheckSchedule),
+   * stops as soon as the marker is no longer at ❯, and escalates the
+   * recovery action across attempts: Enter, Enter, C-m, Enter+sleep+Enter.
+   * Bounded — never more than 4 recovery actions. No-op when text submits
+   * normally. Reports a single Degradation entry on first recovery firing.
+   *
+   * Runs asynchronously via setTimeout. Does not block the caller.
+   */
+  private verifyInjection(tmuxSession: string, injectedText: string): void {
+    // Extract a distinguishing first-40-chars marker from the injected text.
+    // Strip leading whitespace/newlines so we match what's visible at the prompt.
+    const marker = injectedText.replace(/^\s+/, '').slice(0, 40).trim();
+    if (!marker || marker.length < 8) return; // too short to be a reliable marker
+
+    // Polling schedule in ms from injection. Each entry is the absolute
+    // time-from-injection at which that attempt fires. Stops on success
+    // (marker no longer at ❯) or after the last entry.
+    const markerCheckSchedule = [500, 1500, 3500, 6500];
+    let recoveryFiredOnce = false;
+
+    const runCheck = (attempt: number): void => {
+      try {
+        if (!this.tmuxSessionExists(tmuxSession)) return;
+        const pane = this.captureOutput(tmuxSession, 30) || '';
+        if (!this.isMarkerStuckAtPrompt(pane, marker)) {
+          // Submitted (or marker no longer at the input prompt) — stop polling.
+          return;
+        }
+
+        // Still stuck. Fire escalating recovery action.
+        this.fireStuckInputRecovery(tmuxSession, attempt);
+
+        if (!recoveryFiredOnce) {
+          recoveryFiredOnce = true;
+          console.warn(`[SessionManager] Injection stuck in "${tmuxSession}" — marker "${marker.slice(0, 30)}…" still at prompt. Auto-recovering (attempt ${attempt + 1}/${markerCheckSchedule.length}).`);
+          DegradationReporter.getInstance().report({
+            feature: 'SessionManager.verifyInjection',
+            primary: 'Bracketed paste + Enter submits injected message',
+            fallback: 'Auto-resent Enter after detecting stuck input',
+            reason: 'Enter eaten by paste-end race on fresh Claude Code TUI',
+            impact: 'Recovered without user intervention',
+          });
+        }
+
+        // Schedule next check if we have attempts remaining.
+        const nextIdx = attempt + 1;
+        if (nextIdx < markerCheckSchedule.length) {
+          const delay = markerCheckSchedule[nextIdx] - markerCheckSchedule[attempt];
+          setTimeout(() => runCheck(nextIdx), delay);
+        }
+      } catch (err) {
+        // Best-effort — never throw from a background verification
+        console.error(`[SessionManager] verifyInjection error for "${tmuxSession}" attempt ${attempt}: ${err instanceof Error ? err.message : err}`);
+      }
+    };
+
+    setTimeout(() => runCheck(0), markerCheckSchedule[0]);
+  }
+
+  /**
+   * Detect whether a marker snippet of injected text is still sitting at a
+   * `❯` prompt line in the captured pane. Matches the marker on the same
+   * line as `❯` or on the immediately-following line (Claude Code wraps
+   * long input across two visible rows).
+   *
+   * Exposed as a method so StuckInputSentinel and tests can reuse it.
+   */
+  isMarkerStuckAtPrompt(pane: string, marker: string): boolean {
+    if (!marker || marker.length < 8) return false;
+    const lines = pane.split('\n');
+    const shortMarker = marker.slice(0, 30);
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.includes('❯') && (line.includes(marker) || (lines[i + 1] && lines[i + 1].includes(shortMarker)))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Fire one recovery action for a stuck input. Escalates the action by
+   * attempt index — early attempts use plain Enter, later attempts use
+   * C-m (literal carriage return) or Enter+sleep+Enter to defeat tighter
+   * race windows. Bounded; called from verifyInjection's polling loop and
+   * from the persistent StuckInputSentinel after a server restart.
+   */
+  fireStuckInputRecovery(tmuxSession: string, attempt: number): void {
+    const target = `=${tmuxSession}:`;
+    const tmuxPath = this.config.tmuxPath;
+    try {
+      if (attempt === 0 || attempt === 1) {
+        execFileSync(tmuxPath, ['send-keys', '-t', target, 'Enter'], { encoding: 'utf-8', timeout: 5000 });
+      } else if (attempt === 2) {
+        // Escalate: literal carriage-return — bypasses any Enter-specific consumer.
+        execFileSync(tmuxPath, ['send-keys', '-t', target, 'C-m'], { encoding: 'utf-8', timeout: 5000 });
+      } else {
+        // Final attempt: Enter, brief sleep, Enter — covers sub-second consume races.
+        execFileSync(tmuxPath, ['send-keys', '-t', target, 'Enter'], { encoding: 'utf-8', timeout: 5000 });
+        try { execFileSync('/bin/sleep', ['0.15'], { timeout: 1000 }); } catch { /* @silent-fallback-ok — sleep is best-effort */ }
+        execFileSync(tmuxPath, ['send-keys', '-t', target, 'Enter'], { encoding: 'utf-8', timeout: 5000 });
+      }
+    } catch (err) {
+      console.error(`[SessionManager] fireStuckInputRecovery error for "${tmuxSession}" attempt ${attempt}: ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   /**

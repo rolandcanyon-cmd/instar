@@ -30,6 +30,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import pc from 'picocolors';
 import { randomUUID } from 'node:crypto';
 import { execFileSync, execSync } from 'node:child_process';
@@ -54,6 +57,7 @@ import {
 } from '../scaffold/templates.js';
 import type { InstarConfig } from '../core/types.js';
 import { SafeGitExecutor } from '../core/SafeGitExecutor.js';
+import { installBuiltinJobs } from '../scheduler/InstallBuiltinJobs.js';
 
 /**
  * Find a free port in the default range (4040-4099) by checking if anything
@@ -356,6 +360,18 @@ async function initFreshProject(projectName: string, options: InitOptions): Prom
   fs.mkdirSync(skillsDir, { recursive: true });
   installBuiltinSkills(skillsDir, port);
   console.log(`  ${pc.green('✓')} Created .claude/skills/ (with built-in evolution skills)`);
+
+  // Phase 2 — install built-in agentmd jobs (markdown templates + manifests).
+  // Legacy jobs.json continues to seed below; the loader handles overlap.
+  try {
+    const packageRoot = path.resolve(__dirname, '..', '..');
+    const installReport = installBuiltinJobs({ agentStateDir: stateDir, packageRoot, port });
+    if (installReport.installed.length > 0) {
+      console.log(`  ${pc.green('✓')} Installed ${installReport.installed.length} agentmd default job(s)`);
+    }
+  } catch (err) {
+    console.log(`  ${pc.yellow('!')} Built-in agentmd jobs install skipped: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   // Write CLAUDE.md (standalone version for fresh projects)
   const claudeMd = generateClaudeMd(projectName, identity.name, port, false);
@@ -2284,13 +2300,15 @@ Two parts: pipeline health AND active consumption.
 UNREPORTED=$(curl -s -H "Authorization: Bearer $AUTH" http://localhost:\${INSTAR_PORT:-${port}}/health/degradations | jq -c '.events[] | select(.reported == false)')
 \\\`\\\`\\\`
 
-For each unreported event, surface it to the attention queue using a stable id (so re-runs are idempotent):
+For each unreported event, surface it to the attention queue using a stable id (one feature = one topic, even across days):
 
 \\\`\\\`\\\`
 curl -X POST -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' \\\\
   http://localhost:\${INSTAR_PORT:-${port}}/attention \\\\
-  -d "{\\"id\\": \\"degradation:\${FEATURE}:\${TIMESTAMP}\\", \\"title\\": \\"Degradation: \${FEATURE}\\", \\"summary\\": \\"\${NARRATIVE}\\", \\"category\\": \\"degradation\\", \\"priority\\": \\"NORMAL\\"}"
+  -d "{\\"id\\": \\"degradation:\${FEATURE}\\", \\"title\\": \\"Degradation: \${FEATURE}\\", \\"summary\\": \\"\${NARRATIVE}\\", \\"category\\": \\"degradation\\", \\"priority\\": \\"NORMAL\\"}"
 \\\`\\\`\\\`
+
+The id deliberately omits a timestamp so repeated detections of the same feature collapse onto the existing attention item rather than spawning a new Telegram topic each pulse. (The attention endpoint also runs the message through the outbound tone gate as a health-alert, so jargon-heavy or no-call-to-action candidates are rejected before any topic gets created.)
 
 Then close the loop so next pulse doesn't re-surface the same event:
 
@@ -2644,7 +2662,7 @@ function installBuildSkill(skillsDir: string): void {
   if (fs.existsSync(skillFile) || fs.existsSync(path.join(buildDir, 'skill.md'))) return;
 
   // Try to copy from bundled .claude/skills/build/ first
-  const modDir = path.dirname(new URL(import.meta.url).pathname);
+  const modDir = __dirname;
   const bundledSkill = path.join(modDir, '..', '..', '.claude', 'skills', 'build', 'SKILL.md');
   if (fs.existsSync(bundledSkill)) {
     fs.mkdirSync(buildDir, { recursive: true });
@@ -2686,7 +2704,7 @@ function installAutonomousSkill(skillsDir: string): void {
   const scriptsDir = path.join(autonomousDir, 'scripts');
 
   // Copy from instar's bundled skill files if they exist
-  const modDir = path.dirname(new URL(import.meta.url).pathname);
+  const modDir = __dirname;
   const bundledDir = path.join(path.dirname(path.dirname(modDir)), '.claude', 'skills', 'autonomous');
 
   if (fs.existsSync(bundledDir)) {
@@ -2714,7 +2732,7 @@ function installAutonomousSkill(skillsDir: string): void {
   }
 }
 
-function getDefaultJobs(port: number): object[] {
+export function getDefaultJobs(port: number): object[] {
   return [
     {
       slug: 'health-check',
@@ -3432,7 +3450,7 @@ function refreshScripts(projectDir: string, stateDir: string): void {
  * PostUpdateMigrator.getTelegramReplyScript() uses the same loading pattern.
  */
 function loadRelayTemplate(filename: string, port: number): string {
-  const modDir = path.dirname(new URL(import.meta.url).pathname);
+  const modDir = __dirname;
   const candidates = [
     // dev: src/commands → ../templates/scripts
     path.resolve(modDir, '..', 'templates', 'scripts', filename),
@@ -4181,7 +4199,7 @@ function installSerendipityCapture(projectDir: string): void {
   // Resolve template from package directory
   // In dev: src/commands/ → ../../src/templates/scripts/serendipity-capture.sh
   // In dist: dist/commands/ → ../templates/scripts/serendipity-capture.sh
-  const modDir = path.dirname(new URL(import.meta.url).pathname);
+  const modDir = __dirname;
   const candidates = [
     path.resolve(modDir, '..', 'templates', 'scripts', 'serendipity-capture.sh'),
     path.resolve(modDir, '..', '..', 'src', 'templates', 'scripts', 'serendipity-capture.sh'),

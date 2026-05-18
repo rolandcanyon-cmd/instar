@@ -41,12 +41,24 @@ import { createFileRoutes } from './fileRoutes.js';
 import { mountWhatsAppWebhooks } from '../messaging/backends/WhatsAppWebhookRoutes.js';
 import { createMachineRoutes } from './machineRoutes.js';
 import { createWorktreeRoutes, createOidcWorktreeRoutes } from './worktreeRoutes.js';
+import { registerRemediationProposalsRoutes } from './routes/remediation-proposals.js';
+import { TrustElevationSource } from '../remediation/TrustElevationSource.js';
 import type { WorktreeManager } from '../core/WorktreeManager.js';
 import { corsMiddleware, authMiddleware, requestTimeout, errorHandler, dashboardSecurityHeaders } from './middleware.js';
 import { WebSocketManager } from './WebSocketManager.js';
 import { assertSqliteAvailable, PendingRelayStore } from '../messaging/pending-relay-store.js';
 import { getOrCreateBootId } from './boot-id.js';
 import { DeliveryFailureSentinel } from '../monitoring/delivery-failure-sentinel.js';
+import os from 'node:os';
+import { TokenLedger } from '../monitoring/TokenLedger.js';
+import { TokenLedgerPoller } from '../monitoring/TokenLedgerPoller.js';
+import { BurnDetector } from '../monitoring/BurnDetector.js';
+import { BurnThrottleRunbook } from '../monitoring/BurnThrottleRunbook.js';
+import { BurnVerifier } from '../monitoring/BurnVerifier.js';
+import { LlmRateGate } from '../monitoring/LlmRateGate.js';
+import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import { registerBurnDetectionSubscriber } from '../monitoring/BurnDetectionSubscriber.js';
+import { NativeModuleHealer } from '../memory/NativeModuleHealer.js';
 
 export class AgentServer {
   private app: Express;
@@ -61,6 +73,19 @@ export class AgentServer {
   private deliverySentinel: DeliveryFailureSentinel | null = null;
   private deliveryStore: PendingRelayStore | null = null;
   private toneGate: import('../core/MessagingToneGate.js').MessagingToneGate | null = null;
+  private tokenLedger: TokenLedger | null = null;
+  private tokenLedgerPoller: TokenLedgerPoller | null = null;
+  // Burn-detection-and-self-heal system (six-phase umbrella spec at
+  // docs/specs/token-burn-detection-and-self-heal.md). Lazy-initialised
+  // after the TokenLedger comes up — burn detection without a ledger is
+  // a no-op.
+  private burnDetector: BurnDetector | null = null;
+  private burnThrottleRunbook: BurnThrottleRunbook | null = null;
+  private burnVerifier: BurnVerifier | null = null;
+  // Stored from constructor options for use in start()'s listen callback.
+  // The burn-detection system needs this to route alerts; no other
+  // AgentServer code reads it (the route handlers go through routeCtx).
+  private telegramAdapter: TelegramAdapter | null = null;
 
   constructor(options: {
     config: InstarConfig;
@@ -106,6 +131,7 @@ export class AgentServer {
     selfKnowledgeTree?: import('../knowledge/SelfKnowledgeTree.js').SelfKnowledgeTree;
     coverageAuditor?: import('../knowledge/CoverageAuditor.js').CoverageAuditor;
     topicResumeMap?: import('../core/TopicResumeMap.js').TopicResumeMap;
+    sessionRefresh?: import('../core/SessionRefresh.js').SessionRefresh;
     autonomyManager?: import('../core/AutonomyProfileManager.js').AutonomyProfileManager;
     trustElevationTracker?: import('../core/TrustElevationTracker.js').TrustElevationTracker;
     autonomousEvolution?: import('../core/AutonomousEvolution.js').AutonomousEvolution;
@@ -121,6 +147,11 @@ export class AgentServer {
     subagentTracker?: import('../monitoring/SubagentTracker.js').SubagentTracker;
     instructionsVerifier?: import('../monitoring/InstructionsVerifier.js').InstructionsVerifier;
     threadlineRouter?: import('../threadline/ThreadlineRouter.js').ThreadlineRouter;
+    /** ThreadResumeMap — for topic-linkage outbound capture on /threadline/relay-send.
+     *  Per THREAD-TOPIC-LINKAGE-SPEC.md. */
+    threadResumeMap?: import('../threadline/ThreadResumeMap.js').ThreadResumeMap;
+    /** Topic-linkage handler that ties threadline sends to Telegram topic sessions. */
+    topicLinkageHandler?: import('../threadline/TopicLinkageHandler.js').TopicLinkageHandler;
     handshakeManager?: import('../threadline/HandshakeManager.js').HandshakeManager;
     threadlineRelayClient?: import('../threadline/client/ThreadlineClient.js').ThreadlineClient;
     threadlineReplyWaiters?: Map<string, { resolve: (reply: string) => void; threadId: string; senderAgent: string; timer: ReturnType<typeof setTimeout> }>;
@@ -153,8 +184,29 @@ export class AgentServer {
     stopGateDb?: import('../core/StopGateDb.js').StopGateDb;
     /** Initiative tracker — persisted record of multi-phase long-running work. */
     initiativeTracker?: import('../core/InitiativeTracker.js').InitiativeTracker;
+    /** Project-scope round runner (Phase 1b PR 3). */
+    projectRoundRunner?: import('../core/ProjectRoundRunner.js').ProjectRoundRunner;
+    /** Project drift checker (Phase 1b connect-the-dots). Optional —
+     *  when omitted, POST /projects/:id/drift-check returns 503. */
+    projectDriftChecker?: import('../core/ProjectDriftChecker.js').ProjectDriftChecker;
+    /** Multi-machine heartbeat + claim-ownership support (Phase 1b PR 4). */
+    machineHeartbeat?: {
+      api: import('../core/MachineHeartbeat.js').MachineHeartbeat;
+      config: { machineId: string };
+    };
+    /** Threadline → Telegram bridge config — toggles + allow/deny list. */
+    telegramBridgeConfig?: import('../threadline/TelegramBridgeConfig.js').TelegramBridgeConfig;
+    /** Threadline → Telegram bridge — relay-only mirror of threadline messages. */
+    telegramBridge?: import('../threadline/TelegramBridge.js').TelegramBridge;
+    /** Threadline observability — read-only views over inbox/outbox/bindings. */
+    threadlineObservability?: import('../threadline/ThreadlineObservability.js').ThreadlineObservability;
+    /** TaskFlow registry — durable multi-step job records (OpenClaw import). */
+    taskFlowRegistry?: import('../tasks/TaskFlowRegistry.js').TaskFlowRegistry;
+    /** ThreadlineFlowBridge — resumes flows on cross-agent-callback inbound. */
+    threadlineFlowBridge?: import('../tasks/ThreadlineFlowBridge.js').ThreadlineFlowBridge;
   }) {
     this.config = options.config;
+    this.telegramAdapter = options.telegram ?? null;
     this.startTime = new Date();
     this.sessionManager = options.sessionManager;
     this.state = options.state;
@@ -309,6 +361,40 @@ export class AgentServer {
       '/imessage/validate-send': OUTBOUND_MESSAGING_TIMEOUT_MS,
     }));
 
+    // ── Token Ledger ──────────────────────────────────────────────────
+    // Read-only token-usage observability. Reads Claude Code's per-session
+    // JSONL transcripts and rolls up into SQLite. Never mutates source files.
+    try {
+      if (options.config.stateDir) {
+        const serverDataDir = path.join(options.config.stateDir, 'server-data');
+        fs.mkdirSync(serverDataDir, { recursive: true });
+        // Configure the native-module healer so any rebuild events land in
+        // the agent's state directory rather than the system tmp fallback.
+        // TokenLedger constructor uses NativeModuleHealer.openWithHealSync
+        // for its better-sqlite3 open call — without this stateDir wiring,
+        // a NODE_MODULE_VERSION mismatch would still get healed but its
+        // observability log would be hard to find.
+        NativeModuleHealer.configure({ stateDir: options.config.stateDir });
+        const dbPath = path.join(serverDataDir, 'token-ledger.db');
+        const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+        // Bound the first-boot scan: with deep history (eg one local agent
+        // had 119k JSONLs / 12GB of transcripts), an unbounded synchronous
+        // scan blocks the event loop for minutes. We cap per-tick work and
+        // skip files older than the backfill window — the source JSONLs
+        // remain authoritative if the operator wants to widen the window.
+        this.tokenLedger = new TokenLedger({
+          dbPath,
+          claudeProjectsDir,
+          maxFileAgeMs: 30 * 24 * 60 * 60 * 1000, // 30 days
+          maxFilesPerScan: 500,
+          yieldEveryNFiles: 25,
+        });
+      }
+    } catch (err) {
+      console.warn('[instar] token-ledger init failed (non-fatal):', err);
+      this.tokenLedger = null;
+    }
+
     // Routes
     const routeCtx = {
       config: options.config,
@@ -354,6 +440,7 @@ export class AgentServer {
       selfKnowledgeTree: options.selfKnowledgeTree ?? null,
       coverageAuditor: options.coverageAuditor ?? null,
       topicResumeMap: options.topicResumeMap ?? null,
+      sessionRefresh: options.sessionRefresh ?? null,
       autonomyManager: options.autonomyManager ?? null,
       trustElevationTracker: options.trustElevationTracker ?? null,
       autonomousEvolution: options.autonomousEvolution ?? null,
@@ -366,6 +453,8 @@ export class AgentServer {
       subagentTracker: options.subagentTracker ?? null,
       instructionsVerifier: options.instructionsVerifier ?? null,
       threadlineRouter: options.threadlineRouter ?? null,
+      threadResumeMap: options.threadResumeMap ?? null,
+      topicLinkageHandler: options.topicLinkageHandler ?? null,
       handshakeManager: options.handshakeManager ?? null,
       threadlineRelayClient: options.threadlineRelayClient ?? null,
       listenerManager: options.listenerManager ?? null,
@@ -386,6 +475,15 @@ export class AgentServer {
       unjustifiedStopGate: options.unjustifiedStopGate ?? null,
       stopGateDb: options.stopGateDb ?? null,
       initiativeTracker: options.initiativeTracker ?? null,
+      projectRoundRunner: options.projectRoundRunner ?? null,
+      projectDriftChecker: options.projectDriftChecker ?? null,
+      machineHeartbeat: options.machineHeartbeat ?? null,
+      tokenLedger: this.tokenLedger,
+      telegramBridgeConfig: options.telegramBridgeConfig ?? null,
+      telegramBridge: options.telegramBridge ?? null,
+      threadlineObservability: options.threadlineObservability ?? null,
+      taskFlowRegistry: options.taskFlowRegistry ?? null,
+      threadlineFlowBridge: options.threadlineFlowBridge ?? null,
       startTime: this.startTime,
     };
     this.routeContext = routeCtx;
@@ -403,6 +501,28 @@ export class AgentServer {
         projectDir: options.config.projectDir,
       });
       this.app.use(worktreeRoutes);
+    }
+
+    // Remediation Proposals routes (Tier-3 S-2 of self-healing remediator v2).
+    // Mounted unconditionally — proposal files only exist once S-1 (the
+    // NovelFailureReviewer) has emitted them, and the list endpoint returns
+    // [] gracefully when no proposals-<machineId>/ directory is present.
+    // Trust source uses the agent's configured `autonomyProfile`; no
+    // approval channels are wired here since dismiss only consults
+    // `hasCollaborativeTrust()` per §A26.
+    try {
+      const profile = (options.config as { autonomyProfile?: import('../core/types.js').AutonomyProfileLevel }).autonomyProfile ?? 'supervised';
+      const trustSource = new TrustElevationSource({ profile, channels: [] });
+      registerRemediationProposalsRoutes({
+        app: this.app,
+        stateDir: options.config.stateDir,
+        trustSource,
+      });
+    } catch (err) {
+      // Non-fatal: a wiring error must not prevent the rest of the server
+      // from starting (matches the burn-detection-system convention).
+      // eslint-disable-next-line no-console
+      console.warn('[agent-server] failed to register remediation-proposals routes:', err);
     }
 
     // Error handler (must be last)
@@ -474,6 +594,53 @@ export class AgentServer {
         // Update route context with WebSocket manager (deferred — created after routes)
         if (this.routeContext) {
           this.routeContext.wsManager = this.wsManager;
+        }
+
+        // ── Token Ledger Poller ─────────────────────────────────────────
+        // 60s tick scans `~/.claude/projects/*/*.jsonl` and rolls up into
+        // the token_events table. Strictly read-only against source files.
+        if (this.tokenLedger) {
+          try {
+            this.tokenLedgerPoller = new TokenLedgerPoller({ ledger: this.tokenLedger });
+            this.tokenLedgerPoller.start();
+          } catch (err) {
+            console.warn('[instar] token-ledger poller start failed:', err);
+          }
+
+          // ── Burn-detection auto-heal system ──────────────────────────
+          // Wires the six phases together. Detector polls the ledger,
+          // emits degradation events; runbook subscribes via the existing
+          // DegradationReporter healer surface; verifier schedules the
+          // post-throttle re-sample. The full pipeline is signal-only on
+          // observation paths and Tier-2 Remediator authority on decision
+          // paths — see docs/specs/token-burn-detection-and-self-heal.md.
+          try {
+            const ledger = this.tokenLedger;
+            const reporter = DegradationReporter.getInstance();
+            const gate = LlmRateGate.instance();
+            const telegram = this.telegramAdapter;
+            const sendTelegram = telegram && typeof (telegram as { sendToTopic?: unknown }).sendToTopic === 'function'
+              ? (topicId: number, text: string) => {
+                  // Fire-and-forget — the runbook and verifier do not block on
+                  // alert delivery; failed sends are logged elsewhere.
+                  const send = (telegram as { sendToTopic: (t: number, s: string) => Promise<unknown> }).sendToTopic;
+                  void send.call(telegram, topicId, text).catch((err: unknown) => {
+                    console.warn(`[burn-detection] telegram send failed (non-fatal): ${(err as Error)?.message ?? err}`);
+                  });
+                }
+              : undefined;
+
+            this.burnThrottleRunbook = new BurnThrottleRunbook({ gate, sendTelegram });
+            this.burnVerifier = new BurnVerifier({ ledger, sendTelegram });
+            registerBurnDetectionSubscriber(reporter, this.burnThrottleRunbook, (outcome, event) => {
+              this.burnVerifier!.scheduleVerification(outcome, event);
+            });
+            this.burnDetector = new BurnDetector({ ledger, reporter });
+            this.burnDetector.start();
+            console.log('[instar] burn-detection auto-heal system started');
+          } catch (err) {
+            console.warn('[instar] burn-detection start failed (non-fatal):', err);
+          }
         }
 
         // ── Layer 3 DeliveryFailureSentinel — default-OFF feature flag ──
@@ -587,6 +754,38 @@ export class AgentServer {
         // best-effort
       }
       this.deliveryStore = null;
+    }
+
+    // Stop the burn-detector before the ledger closes — the detector's tick
+    // would otherwise hit a closed DB handle.
+    if (this.burnDetector) {
+      try {
+        this.burnDetector.stop();
+      } catch {
+        // best-effort
+      }
+      this.burnDetector = null;
+    }
+    // Drop references so any pending verifier timers can no-op gracefully.
+    this.burnThrottleRunbook = null;
+    this.burnVerifier = null;
+
+    // Stop the token-ledger poller and close its DB.
+    if (this.tokenLedgerPoller) {
+      try {
+        this.tokenLedgerPoller.stop();
+      } catch {
+        // best-effort
+      }
+      this.tokenLedgerPoller = null;
+    }
+    if (this.tokenLedger) {
+      try {
+        this.tokenLedger.close();
+      } catch {
+        // best-effort
+      }
+      this.tokenLedger = null;
     }
 
     // Shutdown WebSocket manager first

@@ -52,6 +52,12 @@
       padding: 12px 20px;
       border-bottom: 1px solid var(--border);
       background: var(--bg-panel);
+      position: relative;
+    }
+
+    /* Hamburger toggle — visible only on mobile, sits in the header row */
+    .nav-toggle {
+      display: none;
     }
 
     .header-left {
@@ -2206,9 +2212,26 @@
         font-size: 14px;
       }
 
+      /* Compact terminal action row — only essential keys inline,
+         rest collapse into an overflow scroll strip */
       .terminal-actions {
         gap: 4px;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+      .terminal-actions::-webkit-scrollbar { display: none; }
+
+      .terminal-actions .action-btn {
+        flex-shrink: 0;
+        min-height: 36px;  /* slightly smaller than 44 since these are arrow keys */
+      }
+
+      /* The arrow-key cluster compresses tighter to leave room */
+      .terminal-actions .action-btn.action-arrow {
+        padding: 6px 10px;
+        min-width: 36px;
       }
 
       .terminal-header {
@@ -2285,14 +2308,62 @@
         padding: 12px 14px;
       }
 
-      /* Tab bar compact */
-      .tab-bar {
+      /* Hamburger toggle — visible in header row on mobile */
+      .nav-toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
         margin-left: 12px;
+        padding: 8px 12px;
+        min-height: 40px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        color: var(--text);
+        font-size: 14px;
+        font-weight: 500;
+        cursor: pointer;
+      }
+      .nav-toggle:hover { background: var(--bg-hover); }
+      .nav-toggle[aria-expanded="true"] { background: var(--bg-active); border-color: var(--accent); }
+
+      /* On mobile the tab-bar becomes a vertical dropdown panel,
+         hidden by default and toggled via the .nav-open class on .app */
+      .tab-bar {
+        position: absolute;
+        top: 100%;  /* below the header row */
+        left: 0;
+        right: 0;
+        flex-direction: column;
+        margin-left: 0;
+        padding: 8px;
+        gap: 4px;
+        background: var(--bg-panel);
+        border-bottom: 1px solid var(--border);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        z-index: 100;
+        overflow-x: visible;
+        max-height: calc(100vh - 60px);
+        overflow-y: auto;
+        display: none;
+      }
+      .app.nav-open .tab-bar {
+        display: flex;
       }
 
       .tab-bar .tab {
-        padding: 5px 12px;
-        font-size: 12px;
+        width: 100%;
+        text-align: left;
+        border-radius: 6px;
+        padding: 12px 14px;
+        font-size: 15px;
+        min-height: 44px;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 0;
+      }
+      .tab-bar .tab.active {
+        background: var(--bg-active);
+        border-color: var(--accent);
       }
 
       /* File viewer mobile */
@@ -2385,6 +2456,41 @@
       .jobs-detail-content {
         padding: 14px;
       }
+
+      /* Filter chips and sort select were below 32px — bump to comfortable tap size */
+      .jobs-filter-chip {
+        padding: 8px 12px;
+        font-size: 12px;
+        min-height: 36px;
+      }
+      .jobs-sort {
+        font-size: 13px;
+        padding: 6px 8px;
+        min-height: 36px;
+      }
+
+      /* Modal — explicit mobile rule instead of relying on max-width: 90vw fallback */
+      .modal-dialog, .modal-content {
+        width: calc(100vw - 24px);
+        max-width: 100%;
+        margin: 12px;
+      }
+    }
+
+    @media (max-width: 480px) {
+      /* Even tighter — phone-only refinements */
+      .header h1 { font-size: 14px; }
+      .nav-toggle { padding: 6px 10px; font-size: 13px; }
+
+      /* Terminal action row — drop arrow keys to icon-only at very narrow widths */
+      .terminal-actions .action-btn.action-arrow {
+        padding: 6px 8px;
+        min-width: 30px;
+      }
+
+      /* Jobs summary cards stack tighter */
+      .jobs-summary-card { padding: 4px 2px; min-width: 40px; }
+      .jobs-summary-val { font-size: 14px; }
     }
   </style>
 </head>
@@ -2406,7 +2512,8 @@
       <div class="header-left">
         <img class="logo" src="/dashboard/logo.png" alt="Instar">
         <h1>Instar Dashboard</h1>
-        <nav class="tab-bar">
+        <button class="nav-toggle" id="navToggle" aria-label="Open navigation menu" aria-expanded="false" onclick="toggleNavMenu()">&#9776; <span id="navToggleLabel">Sessions</span></button>
+        <nav class="tab-bar" id="tabBar">
           <button class="tab active" data-tab="sessions" onclick="switchTab('sessions')">Sessions <span class="tab-count" id="tabSessionCount">0</span></button>
           <button class="tab" data-tab="files" onclick="switchTab('files')">Files</button>
           <button class="tab" data-tab="dropzone" onclick="switchTab('dropzone')">Send Content</button>
@@ -2416,8 +2523,12 @@
           <button class="tab" data-tab="systems" onclick="switchTab('systems')">Health</button>
           <button class="tab" data-tab="integrated-being" onclick="switchTab('integrated-being')">Integrated-Being</button>
           <button class="tab" data-tab="pr-pipeline" onclick="switchTab('pr-pipeline')">PR Pipeline</button>
+          <button class="tab" data-tab="projects" onclick="switchTab('projects')">Projects <span class="tab-count" id="tabProjectCount">0</span></button>
           <button class="tab" data-tab="initiatives" onclick="switchTab('initiatives')">Initiatives <span class="tab-count" id="tabInitiativeCount">0</span></button>
           <button class="tab" data-tab="commitments" onclick="switchTab('commitments')">Commitments <span class="tab-count" id="tabCommitmentCount">0</span></button>
+          <button class="tab" data-tab="tokens" onclick="switchTab('tokens')">Tokens</button>
+          <button class="tab" data-tab="threadline" onclick="switchTab('threadline')">Threadline</button>
+          <button class="tab" data-tab="evidence" onclick="switchTab('evidence')">Evidence</button>
         </nav>
       </div>
       <div class="vital-signs" id="vitalSigns">
@@ -2782,6 +2893,21 @@
       <div id="prPipelineList" style="display:flex;flex-direction:column;gap:12px"></div>
     </div>
 
+    <!-- Projects Tab — PROJECT-SCOPE-SPEC Phase 1.10 read-only view -->
+    <div id="projectsPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Projects</h2>
+        <button onclick="loadProjects()" style="padding:6px 12px">Refresh</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Multi-spec project plans. Each project bundles related child initiatives across rounds with structurally-gated round advance.
+      </div>
+      <div id="projectsEmpty" style="padding:40px;text-align:center;color:var(--text-dim);display:none">
+        No active projects. Create one via <code>POST /projects</code> with a plan-doc path.
+      </div>
+      <div id="projectsList" style="display:flex;flex-direction:column;gap:12px"></div>
+    </div>
+
     <!-- Initiatives Tab — multi-phase long-running work -->
     <div id="initiativesPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
       <div style="display:flex;justify-content:space-between;align-items:center">
@@ -2794,6 +2920,9 @@
             <option value="archived">Archived</option>
             <option value="abandoned">Abandoned</option>
           </select>
+          <label style="font-size:12px;color:var(--text-dim);display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="initiativesShowAll" onchange="loadInitiatives()"> Show projects + children
+          </label>
           <button onclick="loadInitiatives()" style="padding:6px 12px">Refresh</button>
         </div>
       </div>
@@ -2844,6 +2973,195 @@
         No open promises.
       </div>
       <div id="commitmentsList" style="display:flex;flex-direction:column;gap:12px"></div>
+    </div>
+
+    <!-- Tokens Tab — read-only token-usage observability -->
+    <div id="tokensPanel" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Tokens</h2>
+        <button onclick="loadTokens()" style="padding:6px 12px">Refresh</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Token usage rolled up from Claude Code session transcripts. Last 24 hours unless noted.
+      </div>
+
+      <!-- Summary card -->
+      <div id="tokensSummaryCard" style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-weight:600">Last 24h</div>
+        <div id="tokensSummaryBody" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;font-size:13px">
+          <div style="color:var(--text-dim)">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Top sessions -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-weight:600">Top Sessions</div>
+        <div id="tokensSessionsBody" style="font-size:13px">
+          <div style="color:var(--text-dim)">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Orphans -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-weight:600">Idle Sessions (&gt; 30 min)</div>
+        <div id="tokensOrphansBody" style="font-size:13px">
+          <div style="color:var(--text-dim)">Loading...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Evidence Tab (WikiClaim Phase 4) — per-entity evidence + reverse "what cites this?" view.
+         Spec: docs/specs/OPENCLAW-IMPORT-WIKICLAIM-EVIDENCE-SPEC.md § Phase 4 (line 343). -->
+    <div id="evidenceTab" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Evidence</h2>
+        <div style="font-size:12px;color:var(--text-dim)">Per-entity evidence + reverse citations</div>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Inspect the evidence trail behind any memory entity, or ask "what cites this?" given a kind + sourceId.
+        All results are viewer-scope filtered by SemanticMemory before they reach this view.
+      </div>
+
+      <!-- Viewer scope selector (default: private — agent's own data) -->
+      <div style="display:flex;align-items:center;gap:10px;font-size:13px">
+        <label for="evViewerScope" style="color:var(--text-dim)">Viewer scope:</label>
+        <select id="evViewerScope" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:4px 8px;border-radius:4px">
+          <option value="private" selected>private (full)</option>
+          <option value="shared-topic">shared-topic</option>
+          <option value="shared-project">shared-project</option>
+        </select>
+        <span style="color:var(--text-dim);font-size:12px">Narrowing-only — controls what a narrower viewer would see.</span>
+      </div>
+
+      <!-- Panel 1: Per-entity evidence lookup -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:10px">
+        <div style="font-weight:600">Evidence by entity</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <input id="evEntityId" type="text" placeholder="Entity ID (e.g. ent_abc123)"
+                 style="flex:1;min-width:240px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:4px;font-family:monospace" />
+          <button onclick="loadEvidenceByEntity()" style="padding:6px 12px">Lookup</button>
+        </div>
+        <div id="evEntityStatus" style="font-size:12px;color:var(--text-dim);min-height:1em"></div>
+        <div id="evEntityResults" style="display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+
+      <!-- Panel 2: Reverse citation lookup ("what cites this?") -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:10px">
+        <div style="font-weight:600">What cites this?</div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <select id="evCitationKind" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:4px">
+            <option value="feedback">feedback</option>
+            <option value="commit">commit</option>
+            <option value="session">session</option>
+            <option value="document">document</option>
+            <option value="message">message</option>
+            <option value="job-run">job-run</option>
+            <option value="ledger-entry">ledger-entry</option>
+            <option value="pattern-entity">pattern-entity</option>
+            <option value="external-url">external-url</option>
+            <option value="supersedes-evidence">supersedes-evidence</option>
+          </select>
+          <input id="evCitationSourceId" type="text" placeholder="sourceId (e.g. fb_abc123)"
+                 style="flex:1;min-width:240px;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:4px;font-family:monospace" />
+          <button onclick="loadEntitiesByEvidence()" style="padding:6px 12px">Find citing entities</button>
+        </div>
+        <div id="evCitationStatus" style="font-size:12px;color:var(--text-dim);min-height:1em"></div>
+        <div id="evCitationResults" style="display:flex;flex-direction:column;gap:8px"></div>
+      </div>
+    </div>
+
+    <!-- Threadline Tab — agent-to-agent conversations + Telegram bridge settings -->
+    <div id="threadlineTab" style="display:none;flex-direction:column;padding:20px;gap:16px;overflow-y:auto">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">Threadline</h2>
+        <button onclick="loadThreadlineBridgeConfig()" style="padding:6px 12px">Refresh</button>
+      </div>
+      <div style="font-size:12px;color:var(--text-dim);line-height:1.4">
+        Threadline is your agent's secure channel to other AI agents. The Telegram bridge mirrors those conversations into per-thread Telegram topics so you can watch every exchange. Quiet by default — flip the master switch below to opt in.
+      </div>
+
+      <!-- Bridge settings card -->
+      <div id="tlBridgeCard" style="border:1px solid var(--border);border-radius:8px;padding:16px;display:flex;flex-direction:column;gap:14px">
+        <div style="font-weight:600">Telegram bridge settings</div>
+        <div id="tlBridgeStatus" style="font-size:12px;color:var(--text-dim)">Loading…</div>
+
+        <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px">
+          <input type="checkbox" id="tlBridgeEnabled" style="margin-top:3px" />
+          <span>
+            <strong>Bridge enabled (master switch)</strong>
+            <div style="color:var(--text-dim);font-size:12px;margin-top:2px">When off, no threadline traffic reaches Telegram, regardless of the toggles below.</div>
+          </span>
+        </label>
+
+        <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px">
+          <input type="checkbox" id="tlBridgeAutoCreate" style="margin-top:3px" />
+          <span>
+            <strong>Auto-create Telegram topics for new threads</strong>
+            <div style="color:var(--text-dim);font-size:12px;margin-top:2px">Default off. When off, a brand-new agent reaching out won't spawn a Telegram topic unless you've allow-listed them below.</div>
+          </span>
+        </label>
+
+        <label style="display:flex;align-items:flex-start;gap:10px;font-size:13px">
+          <input type="checkbox" id="tlBridgeMirrorExisting" style="margin-top:3px" />
+          <span>
+            <strong>Mirror messages into existing topics</strong>
+            <div style="color:var(--text-dim);font-size:12px;margin-top:2px">Default on. Once a Telegram topic exists for a thread, both inbound and outbound messages on that thread show up there.</div>
+          </span>
+        </label>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div>
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Allow-list</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Always auto-create topics for these remote agents (overrides "auto-create off").</div>
+            <ul id="tlBridgeAllowList" style="list-style:none;padding:0;margin:0;font-size:13px;display:flex;flex-direction:column;gap:4px"></ul>
+            <div style="display:flex;gap:6px;margin-top:8px">
+              <input type="text" id="tlBridgeAllowInput" placeholder="agent fingerprint or name" style="flex:1;padding:6px 8px;font-size:12px" />
+              <button onclick="tlBridgeAddListEntry('allowList', 'tlBridgeAllowInput')" style="padding:6px 10px;font-size:12px">Add</button>
+            </div>
+          </div>
+          <div>
+            <div style="font-weight:600;font-size:13px;margin-bottom:6px">Deny-list</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Never auto-create topics for these remote agents (overrides "auto-create on").</div>
+            <ul id="tlBridgeDenyList" style="list-style:none;padding:0;margin:0;font-size:13px;display:flex;flex-direction:column;gap:4px"></ul>
+            <div style="display:flex;gap:6px;margin-top:8px">
+              <input type="text" id="tlBridgeDenyInput" placeholder="agent fingerprint or name" style="flex:1;padding:6px 8px;font-size:12px" />
+              <button onclick="tlBridgeAddListEntry('denyList', 'tlBridgeDenyInput')" style="padding:6px 10px;font-size:12px">Add</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="tlBridgeError" style="color:var(--err, #c44);font-size:12px;display:none"></div>
+      </div>
+
+      <!-- Conversation observability — threads list + message stream + search -->
+      <div style="border:1px solid var(--border);border-radius:8px;padding:0;display:flex;flex-direction:column;min-height:480px">
+        <!-- Toolbar -->
+        <div style="display:flex;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)">
+          <div style="font-weight:600">Conversations</div>
+          <div style="flex:1"></div>
+          <input type="search" id="tlObsSearchInput" placeholder="search messages…" style="padding:6px 8px;font-size:12px;width:220px" oninput="tlObsSearchDebounced(this.value)" />
+          <select id="tlObsHasTopicFilter" onchange="tlObsLoadThreads()" style="padding:6px 8px;font-size:12px">
+            <option value="">all threads</option>
+            <option value="yes">with Telegram topic</option>
+            <option value="no">without Telegram topic</option>
+          </select>
+          <input type="text" id="tlObsRemoteFilter" placeholder="agent filter" style="padding:6px 8px;font-size:12px;width:140px" oninput="tlObsLoadThreadsDebounced()" />
+          <button onclick="tlObsLoadThreads()" style="padding:6px 10px;font-size:12px">Refresh</button>
+        </div>
+
+        <!-- Two-pane: threads list + active thread -->
+        <div style="display:grid;grid-template-columns:280px 1fr;flex:1;min-height:420px">
+          <ul id="tlObsThreadsList" style="list-style:none;padding:0;margin:0;border-right:1px solid var(--border);overflow-y:auto;max-height:520px">
+            <li style="padding:16px;color:var(--text-dim);font-size:12px">Loading…</li>
+          </ul>
+          <div id="tlObsConversation" style="padding:16px;overflow-y:auto;max-height:520px;display:flex;flex-direction:column;gap:10px">
+            <div style="color:var(--text-dim);font-size:12px;font-style:italic">Select a thread on the left to view the conversation.</div>
+          </div>
+        </div>
+
+        <!-- Search results -->
+        <div id="tlObsSearchResults" style="display:none;border-top:1px solid var(--border);padding:12px 16px;max-height:280px;overflow-y:auto"></div>
+      </div>
     </div>
 
     <!-- Health Tab (was Systems) -->
@@ -3339,7 +3657,7 @@
           brightCyan: '#99f6e4',
           brightWhite: '#eee',
         },
-        fontSize: window.innerWidth <= 768 ? 11 : 13,
+        fontSize: window.innerWidth <= 480 ? 10 : window.innerWidth <= 768 ? 11 : 13,
         fontFamily: "'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace",
         cursorBlink: false,
         cursorStyle: 'underline',
@@ -3356,6 +3674,12 @@
         try { fitAddon.fit(); } catch {}
       });
       resizeObserver.observe(container);
+
+      // Refit on window resize / orientation change — phone rotation may not
+      // trigger ResizeObserver if the parent grid keeps its size.
+      window.addEventListener('resize', () => {
+        try { fitAddon.fit(); } catch {}
+      });
 
       // Initial fit after a tick (container needs to be visible)
       requestAnimationFrame(() => {
@@ -3881,6 +4205,13 @@
         onActivate: () => { if (typeof loadPrPipeline === 'function') loadPrPipeline(); },
       },
       {
+        id: 'projects',
+        panels: ['projectsPanel'],
+        display: ['flex'],
+        onActivate: () => { if (typeof loadProjects === 'function') loadProjects(); if (typeof startProjectsPoll === 'function') startProjectsPoll(); },
+        onDeactivate: () => { if (typeof stopProjectsPoll === 'function') stopProjectsPoll(); },
+      },
+      {
         id: 'initiatives',
         panels: ['initiativesPanel'],
         display: ['flex'],
@@ -3891,6 +4222,27 @@
         panels: ['commitmentsPanel'],
         display: ['flex'],
         onActivate: () => { if (typeof loadCommitments === 'function') loadCommitments(); },
+      },
+      {
+        id: 'tokens',
+        panels: ['tokensPanel'],
+        display: ['flex'],
+        onActivate: () => { if (typeof loadTokens === 'function') loadTokens(); },
+      },
+      {
+        id: 'threadline',
+        panels: ['threadlineTab'],
+        display: ['flex'],
+        onActivate: () => {
+          if (typeof loadThreadlineBridgeConfig === 'function') loadThreadlineBridgeConfig();
+          if (typeof tlObsLoadThreads === 'function') tlObsLoadThreads();
+        },
+      },
+      {
+        id: 'evidence',
+        panels: ['evidenceTab'],
+        display: ['flex'],
+        onActivate: null,
       },
       {
         id: 'secrets',
@@ -3906,6 +4258,51 @@
       },
     ];
 
+    function toggleNavMenu() {
+      const app = document.querySelector('.app');
+      const toggle = document.getElementById('navToggle');
+      const open = app.classList.toggle('nav-open');
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    function updateNavToggleLabel(tabName) {
+      // Read the tab name from the actual button so we don't drift when
+      // tabs get renamed in the registry. Strip the trailing count badge
+      // ("Jobs 3" → "Jobs") by ignoring child element text.
+      const labelEl = document.getElementById('navToggleLabel');
+      if (!labelEl) return;
+      const tabBtn = document.querySelector(`.tab-bar .tab[data-tab="${tabName}"]`);
+      let text = tabName;
+      if (tabBtn) {
+        // Clone the button, strip count badges, then read trimmed text.
+        const clone = tabBtn.cloneNode(true);
+        clone.querySelectorAll('.tab-count').forEach(el => el.remove());
+        text = clone.textContent.trim() || tabName;
+      }
+      labelEl.textContent = text;
+    }
+
+    function closeNavMenu() {
+      const app = document.querySelector('.app');
+      if (!app || !app.classList.contains('nav-open')) return;
+      app.classList.remove('nav-open');
+      const toggle = document.getElementById('navToggle');
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+    }
+
+    // Close the mobile menu on Escape or on tap outside the tab bar.
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeNavMenu();
+    });
+    document.addEventListener('click', (e) => {
+      const app = document.querySelector('.app');
+      if (!app || !app.classList.contains('nav-open')) return;
+      const tabBar = document.querySelector('.tab-bar');
+      const toggle = document.getElementById('navToggle');
+      if (tabBar?.contains(e.target) || toggle?.contains(e.target)) return;
+      closeNavMenu();
+    });
+
     function switchTab(tabName) {
       if (tabName === currentTab) return;
 
@@ -3919,6 +4316,11 @@
       document.querySelectorAll('.tab-bar .tab').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.tab === tabName);
       });
+
+      updateNavToggleLabel(tabName);
+      document.querySelector('.app').classList.remove('nav-open');
+      const navToggle = document.getElementById('navToggle');
+      if (navToggle) navToggle.setAttribute('aria-expanded', 'false');
 
       // Hide all panels
       for (const tab of TAB_REGISTRY) {
@@ -3995,6 +4397,518 @@
         throw new Error(data.error || `HTTP ${resp.status}`);
       }
       return resp.json();
+    }
+
+    // ── Tokens Tab ──────────────────────────────────────────────────
+    function fmtTokens(n) {
+      if (n == null) return '0';
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+      return String(n);
+    }
+    function fmtRelTime(ts) {
+      if (!ts) return '—';
+      const diff = Date.now() - ts;
+      const min = Math.floor(diff / 60000);
+      if (min < 1) return 'just now';
+      if (min < 60) return min + 'm ago';
+      const hr = Math.floor(min / 60);
+      if (hr < 24) return hr + 'h ago';
+      return Math.floor(hr / 24) + 'd ago';
+    }
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+
+    // ── Evidence Tab (WikiClaim Phase 4) ─────────────────────────────
+    //
+    // All evidence rendering MUST escape user-supplied strings (note,
+    // sourceId, path). The route already viewer-scope-filters via
+    // SemanticMemory — the dashboard never makes a visibility decision.
+
+    function evCurrentViewerScope() {
+      const sel = document.getElementById('evViewerScope');
+      return sel ? sel.value : 'private';
+    }
+
+    function evRenderTierBadge(tier) {
+      const v = tier == null ? 'inherited' : String(tier);
+      const colorMap = {
+        'public': '#4a9a4a',
+        'shared-project': '#7aa9d6',
+        'private': '#e27d3b',
+        'sensitive': '#c14a4a',
+        'inherited': 'var(--text-dim)',
+      };
+      const color = colorMap[v] || 'var(--text-dim)';
+      return `<span style="font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid ${color};color:${color}">${escapeHtml(v)}</span>`;
+    }
+
+    function evRenderEvidenceRow(ev) {
+      const kind = escapeHtml(ev?.kind ?? '');
+      const sourceId = escapeHtml(ev?.sourceId ?? '');
+      const path = ev?.path ? escapeHtml(ev.path) : '';
+      const lineStart = ev?.lineStart;
+      const lineEnd = ev?.lineEnd;
+      let fileLine = '';
+      if (path) {
+        let suffix = '';
+        if (Number.isFinite(lineStart)) {
+          suffix = ':' + escapeHtml(String(lineStart));
+          if (Number.isFinite(lineEnd) && lineEnd !== lineStart) {
+            suffix += '-' + escapeHtml(String(lineEnd));
+          }
+        } else if (typeof ev?.lines === 'string') {
+          suffix = ':' + escapeHtml(ev.lines);
+        }
+        fileLine = `<span style="font-family:monospace;font-size:12px;color:var(--text-dim)">${path}${suffix}</span>`;
+      }
+      const weight = (typeof ev?.weight === 'number') ? ev.weight.toFixed(2) : '—';
+      const confidence = (typeof ev?.confidence === 'number') ? ev.confidence.toFixed(2) : '—';
+      const note = ev?.note ? escapeHtml(ev.note) : '';
+      const updatedAt = escapeHtml(ev?.updatedAt ?? '');
+
+      return `
+        <div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;background:var(--bg-panel)">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-weight:600;font-size:13px">${kind}</span>
+            <span style="font-family:monospace;font-size:12px;color:var(--text-dim)">${sourceId}</span>
+            ${evRenderTierBadge(ev?.privacyTier)}
+          </div>
+          ${fileLine ? `<div>${fileLine}</div>` : ''}
+          <div style="font-size:12px;color:var(--text-dim);display:flex;gap:12px;flex-wrap:wrap">
+            <span>weight: ${escapeHtml(weight)}</span>
+            <span>confidence: ${escapeHtml(confidence)}</span>
+            <span>updated: ${updatedAt}</span>
+          </div>
+          ${note ? `<div style="font-size:13px;line-height:1.4;white-space:pre-wrap;word-break:break-word">${note}</div>` : ''}
+        </div>
+      `;
+    }
+
+    function evRenderEntityRow(entity) {
+      const id = escapeHtml(entity?.id ?? '');
+      const type = escapeHtml(entity?.type ?? '');
+      const name = escapeHtml(entity?.name ?? '');
+      const content = entity?.content ? escapeHtml(String(entity.content).slice(0, 240)) : '';
+      const scope = escapeHtml(entity?.privacyScope ?? 'shared-project');
+      const confidence = (typeof entity?.confidence === 'number') ? entity.confidence.toFixed(2) : '—';
+      return `
+        <div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;display:flex;flex-direction:column;gap:6px;background:var(--bg-panel)">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-weight:600;font-size:13px">${type}</span>
+            <span style="font-size:13px">${name}</span>
+            <span style="font-family:monospace;font-size:11px;color:var(--text-dim)">${id}</span>
+            <span style="font-size:11px;padding:2px 6px;border-radius:3px;border:1px solid var(--border);color:var(--text-dim)">${scope}</span>
+            <span style="font-size:11px;color:var(--text-dim)">confidence: ${escapeHtml(confidence)}</span>
+            <button class="ev-inspect-btn" data-entity-id="${id}" style="margin-left:auto;padding:2px 8px;font-size:11px">Inspect evidence</button>
+          </div>
+          ${content ? `<div style="font-size:12px;color:var(--text-dim);line-height:1.4">${content}</div>` : ''}
+        </div>
+      `;
+    }
+
+    async function loadEvidenceByEntity() {
+      const idInput = document.getElementById('evEntityId');
+      const status = document.getElementById('evEntityStatus');
+      const results = document.getElementById('evEntityResults');
+      if (!idInput || !status || !results) return;
+      const id = (idInput.value || '').trim();
+      if (!id) {
+        status.textContent = 'Enter an entity ID.';
+        results.innerHTML = '';
+        return;
+      }
+      status.textContent = 'Loading…';
+      results.innerHTML = '';
+      try {
+        const viewerScope = evCurrentViewerScope();
+        const url = '/memory/evidence/by-entity/' + encodeURIComponent(id)
+          + '?viewerScope=' + encodeURIComponent(viewerScope);
+        const data = await apiFetch(url);
+        const ev = Array.isArray(data.evidence) ? data.evidence : [];
+        if (ev.length === 0) {
+          status.textContent = 'No evidence visible at viewer scope "' + viewerScope + '".';
+          results.innerHTML = '';
+          return;
+        }
+        status.textContent = ev.length + ' evidence row(s) at scope "' + viewerScope + '".';
+        results.innerHTML = ev.map(evRenderEvidenceRow).join('');
+      } catch (err) {
+        const msg = (err && err.message) ? err.message : 'Lookup failed';
+        status.innerHTML = '<span style="color:var(--red)">' + escapeHtml(msg) + '</span>';
+        results.innerHTML = '';
+      }
+    }
+
+    function evLookupFromCitation(entityId) {
+      const idInput = document.getElementById('evEntityId');
+      if (idInput) idInput.value = entityId;
+      loadEvidenceByEntity();
+    }
+
+    async function loadEntitiesByEvidence() {
+      const kindEl = document.getElementById('evCitationKind');
+      const sourceIdEl = document.getElementById('evCitationSourceId');
+      const status = document.getElementById('evCitationStatus');
+      const results = document.getElementById('evCitationResults');
+      if (!kindEl || !sourceIdEl || !status || !results) return;
+      const kind = kindEl.value;
+      const sourceId = (sourceIdEl.value || '').trim();
+      if (!sourceId) {
+        status.textContent = 'Enter a sourceId.';
+        results.innerHTML = '';
+        return;
+      }
+      status.textContent = 'Loading…';
+      results.innerHTML = '';
+      try {
+        const viewerScope = evCurrentViewerScope();
+        const url = '/memory/entities/by-evidence'
+          + '?kind=' + encodeURIComponent(kind)
+          + '&sourceId=' + encodeURIComponent(sourceId)
+          + '&viewerScope=' + encodeURIComponent(viewerScope);
+        const data = await apiFetch(url);
+        const entities = Array.isArray(data.entities) ? data.entities : [];
+        if (entities.length === 0) {
+          status.textContent = 'No entities cite (' + kind + ', ' + sourceId + ') at scope "' + viewerScope + '".';
+          results.innerHTML = '';
+          return;
+        }
+        status.textContent = entities.length + ' entity(ies) cite this source at scope "' + viewerScope + '".';
+        results.innerHTML = entities.map(evRenderEntityRow).join('');
+        // Attach click handlers via data attribute (no inline onclick injection).
+        results.querySelectorAll('button.ev-inspect-btn').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const targetId = btn.getAttribute('data-entity-id') || '';
+            if (targetId) evLookupFromCitation(targetId);
+          });
+        });
+      } catch (err) {
+        const msg = (err && err.message) ? err.message : 'Lookup failed';
+        status.innerHTML = '<span style="color:var(--red)">' + escapeHtml(msg) + '</span>';
+        results.innerHTML = '';
+      }
+    }
+
+    async function loadTokens() {
+      const summaryEl = document.getElementById('tokensSummaryBody');
+      const sessionsEl = document.getElementById('tokensSessionsBody');
+      const orphansEl = document.getElementById('tokensOrphansBody');
+      try {
+        const [summaryResp, sessionsResp, orphansResp] = await Promise.all([
+          apiFetch('/tokens/summary'),
+          apiFetch('/tokens/sessions?limit=10'),
+          apiFetch('/tokens/orphans?idleMs=' + (30 * 60 * 1000)),
+        ]);
+        const s = summaryResp.summary || {};
+        summaryEl.innerHTML = `
+          <div><div style="color:var(--text-dim)">Total tokens</div><div style="font-size:18px;font-weight:600">${fmtTokens(s.totalTokens)}</div></div>
+          <div><div style="color:var(--text-dim)">Input</div><div>${fmtTokens(s.totalInput)}</div></div>
+          <div><div style="color:var(--text-dim)">Output</div><div>${fmtTokens(s.totalOutput)}</div></div>
+          <div><div style="color:var(--text-dim)">Cache read</div><div>${fmtTokens(s.totalCacheRead)}</div></div>
+          <div><div style="color:var(--text-dim)">Cache create</div><div>${fmtTokens(s.totalCacheCreate)}</div></div>
+          <div><div style="color:var(--text-dim)">Events</div><div>${fmtTokens(s.eventCount)}</div></div>
+          <div><div style="color:var(--text-dim)">Sessions</div><div>${fmtTokens(s.sessionsActive)}</div></div>
+        `;
+
+        const sessions = sessionsResp.sessions || [];
+        if (sessions.length === 0) {
+          sessionsEl.innerHTML = '<div style="color:var(--text-dim)">No sessions in window.</div>';
+        } else {
+          sessionsEl.innerHTML = `
+            <table style="width:100%;border-collapse:collapse;font-size:13px">
+              <thead><tr style="text-align:left;color:var(--text-dim)">
+                <th style="padding:6px 8px">Session</th>
+                <th style="padding:6px 8px">Project</th>
+                <th style="padding:6px 8px;text-align:right">Tokens</th>
+                <th style="padding:6px 8px;text-align:right">Events</th>
+                <th style="padding:6px 8px">Last activity</th>
+              </tr></thead>
+              <tbody>
+                ${sessions.map(r => `
+                  <tr style="border-top:1px solid var(--border)">
+                    <td style="padding:6px 8px;font-family:monospace">${escapeHtml((r.sessionId || '').slice(0, 8))}</td>
+                    <td style="padding:6px 8px">${escapeHtml(r.projectPath || '—')}</td>
+                    <td style="padding:6px 8px;text-align:right">${fmtTokens(r.totalTokens)}</td>
+                    <td style="padding:6px 8px;text-align:right">${fmtTokens(r.eventCount)}</td>
+                    <td style="padding:6px 8px">${fmtRelTime(r.lastTs)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          `;
+        }
+
+        const orphans = orphansResp.orphans || [];
+        if (orphans.length === 0) {
+          orphansEl.innerHTML = '<div style="color:var(--text-dim)">No idle sessions.</div>';
+        } else {
+          orphansEl.innerHTML = orphans.map(o => `
+            <div style="padding:6px 0;border-top:1px solid var(--border);display:flex;justify-content:space-between;font-family:monospace;font-size:12px">
+              <span>${escapeHtml((o.sessionId || '').slice(0, 12))}</span>
+              <span style="color:var(--text-dim)">${escapeHtml(o.projectPath || '—')}</span>
+              <span>${fmtRelTime(o.lastTs)}</span>
+            </div>
+          `).join('');
+        }
+      } catch (err) {
+        const msg = `<div style="color:var(--red)">Error: ${escapeHtml(err.message || String(err))}</div>`;
+        summaryEl.innerHTML = msg;
+        sessionsEl.innerHTML = '';
+        orphansEl.innerHTML = '';
+      }
+    }
+
+    // ── Threadline → Telegram bridge settings ──────────────────
+    let tlBridgeSettings = null;
+    let tlBridgeWiring = false;
+
+    async function loadThreadlineBridgeConfig() {
+      const statusEl = document.getElementById('tlBridgeStatus');
+      const errEl = document.getElementById('tlBridgeError');
+      if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+      try {
+        const resp = await apiFetch('/threadline/telegram-bridge/config');
+        tlBridgeSettings = resp;
+        renderThreadlineBridgeConfig();
+        if (statusEl) statusEl.textContent = `Bridge is ${resp.enabled ? 'ENABLED' : 'OFF'} · auto-create ${resp.autoCreateTopics ? 'on' : 'off'} · mirror existing ${resp.mirrorExisting ? 'on' : 'off'}.`;
+      } catch (err) {
+        if (statusEl) statusEl.textContent = '';
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = `Could not load bridge config: ${err.message || String(err)}`; }
+      }
+    }
+
+    function renderThreadlineBridgeConfig() {
+      if (!tlBridgeSettings) return;
+      tlBridgeWiring = true;
+      try {
+        document.getElementById('tlBridgeEnabled').checked = !!tlBridgeSettings.enabled;
+        document.getElementById('tlBridgeAutoCreate').checked = !!tlBridgeSettings.autoCreateTopics;
+        document.getElementById('tlBridgeMirrorExisting').checked = !!tlBridgeSettings.mirrorExisting;
+        renderTlBridgeListEntries('allowList', 'tlBridgeAllowList', tlBridgeSettings.allowList || []);
+        renderTlBridgeListEntries('denyList', 'tlBridgeDenyList', tlBridgeSettings.denyList || []);
+      } finally {
+        tlBridgeWiring = false;
+      }
+    }
+
+    function renderTlBridgeListEntries(field, listElId, entries) {
+      const ul = document.getElementById(listElId);
+      if (!ul) return;
+      if (entries.length === 0) {
+        ul.innerHTML = '<li style="color:var(--text-dim);font-size:12px;font-style:italic">(empty)</li>';
+        return;
+      }
+      ul.innerHTML = entries.map(e => `
+        <li style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-family:monospace;font-size:12px">
+          <span>${escapeHtml(e)}</span>
+          <button onclick="tlBridgeRemoveListEntry('${field}', ${JSON.stringify(e).replace(/'/g, "\\'")})" style="padding:2px 8px;font-size:11px">remove</button>
+        </li>
+      `).join('');
+    }
+
+    async function tlBridgePatchConfig(patch) {
+      const errEl = document.getElementById('tlBridgeError');
+      if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+      try {
+        const resp = await apiFetch('/threadline/telegram-bridge/config', {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(patch),
+        });
+        tlBridgeSettings = resp;
+        renderThreadlineBridgeConfig();
+        const statusEl = document.getElementById('tlBridgeStatus');
+        if (statusEl) statusEl.textContent = `Saved · bridge is ${resp.enabled ? 'ENABLED' : 'OFF'}.`;
+      } catch (err) {
+        if (errEl) { errEl.style.display = 'block'; errEl.textContent = `Update failed: ${err.message || String(err)}`; }
+        // Reload to roll back the optimistic UI
+        loadThreadlineBridgeConfig();
+      }
+    }
+
+    function tlBridgeAddListEntry(field, inputId) {
+      const input = document.getElementById(inputId);
+      const val = (input?.value || '').trim();
+      if (!val) return;
+      const current = (tlBridgeSettings?.[field] || []).slice();
+      if (!current.includes(val)) current.push(val);
+      tlBridgePatchConfig({ [field]: current });
+      if (input) input.value = '';
+    }
+
+    function tlBridgeRemoveListEntry(field, entry) {
+      const current = (tlBridgeSettings?.[field] || []).filter(x => x !== entry);
+      tlBridgePatchConfig({ [field]: current });
+    }
+
+    // Wire up toggle change-handlers once the panel exists
+    document.addEventListener('DOMContentLoaded', () => {
+      const wire = (id, field) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener('change', () => {
+          if (tlBridgeWiring) return;
+          tlBridgePatchConfig({ [field]: el.checked });
+        });
+      };
+      wire('tlBridgeEnabled', 'enabled');
+      wire('tlBridgeAutoCreate', 'autoCreateTopics');
+      wire('tlBridgeMirrorExisting', 'mirrorExisting');
+    });
+
+    // ── Threadline observability — threads list + conversation view ──
+    let tlObsActiveThreadId = null;
+    let tlObsLoadThreadsTimer = null;
+    let tlObsSearchTimer = null;
+
+    function tlObsLoadThreadsDebounced() {
+      if (tlObsLoadThreadsTimer) clearTimeout(tlObsLoadThreadsTimer);
+      tlObsLoadThreadsTimer = setTimeout(tlObsLoadThreads, 300);
+    }
+
+    function tlObsSearchDebounced(value) {
+      if (tlObsSearchTimer) clearTimeout(tlObsSearchTimer);
+      tlObsSearchTimer = setTimeout(() => tlObsRunSearch(value), 300);
+    }
+
+    async function tlObsLoadThreads() {
+      const list = document.getElementById('tlObsThreadsList');
+      if (!list) return;
+      const remoteAgent = document.getElementById('tlObsRemoteFilter')?.value?.trim() || '';
+      const hasTopic = document.getElementById('tlObsHasTopicFilter')?.value || '';
+      const params = new URLSearchParams();
+      if (remoteAgent) params.set('remoteAgent', remoteAgent);
+      if (hasTopic) params.set('hasTopic', hasTopic);
+      try {
+        const resp = await apiFetch('/threadline/observability/threads?' + params.toString());
+        const threads = resp.threads || [];
+        if (threads.length === 0) {
+          list.innerHTML = '<li style="padding:16px;color:var(--text-dim);font-size:12px;font-style:italic">No threads yet.</li>';
+          return;
+        }
+        list.innerHTML = threads.map(t => tlObsRenderThreadRow(t)).join('');
+      } catch (err) {
+        list.innerHTML = `<li style="padding:16px;color:var(--red)">Error: ${escapeHtml(err.message || String(err))}</li>`;
+      }
+    }
+
+    function tlObsRenderThreadRow(t) {
+      const lastSeen = t.lastSeen ? fmtRelTime(t.lastSeen) : '—';
+      const bridgeBadge = t.bridge
+        ? '<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:#3b82f6;color:#fff;font-size:10px;margin-left:6px">TG</span>'
+        : '';
+      const spawnBadge = t.hasSpawnedSession
+        ? '<span style="display:inline-block;padding:1px 6px;border-radius:8px;background:#16a34a;color:#fff;font-size:10px;margin-left:4px">S</span>'
+        : '';
+      const isActive = tlObsActiveThreadId === t.threadId ? 'background:rgba(59,130,246,0.08);' : '';
+      return `
+        <li onclick="tlObsLoadThread('${t.threadId.replace(/'/g, "\\'")}')"
+            style="padding:10px 12px;border-bottom:1px solid var(--border);cursor:pointer;${isActive}">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <div style="font-weight:600;font-size:13px">${escapeHtml(t.remoteAgentName)}${bridgeBadge}${spawnBadge}</div>
+            <div style="font-size:11px;color:var(--text-dim)">${escapeHtml(lastSeen)}</div>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:2px;font-family:monospace">
+            ${escapeHtml(t.threadId.slice(0, 16))}…
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:2px">
+            ${t.messageCount} msgs · ${t.inboundCount} in / ${t.outboundCount} out
+            ${typeof t.avgResponseLatencyMs === 'number' ? ' · ~' + Math.round(t.avgResponseLatencyMs / 1000) + 's reply' : ''}
+          </div>
+        </li>
+      `;
+    }
+
+    async function tlObsLoadThread(threadId) {
+      tlObsActiveThreadId = threadId;
+      tlObsLoadThreads(); // Re-render threads list to highlight active row
+      const conv = document.getElementById('tlObsConversation');
+      if (!conv) return;
+      conv.innerHTML = '<div style="color:var(--text-dim);font-size:12px">Loading…</div>';
+      try {
+        const detail = await apiFetch(`/threadline/observability/threads/${encodeURIComponent(threadId)}`);
+        conv.innerHTML = tlObsRenderConversation(detail);
+      } catch (err) {
+        conv.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${escapeHtml(err.message || String(err))}</div>`;
+      }
+    }
+
+    function tlObsRenderConversation(detail) {
+      const header = `
+        <div style="border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:10px">
+          <div style="font-weight:600;font-size:14px">${escapeHtml(detail.remoteAgentName)}</div>
+          <div style="font-family:monospace;font-size:11px;color:var(--text-dim)">${escapeHtml(detail.threadId)}</div>
+          <div style="display:flex;gap:14px;font-size:11px;color:var(--text-dim);margin-top:6px;flex-wrap:wrap">
+            <span>${detail.messageCount} messages</span>
+            <span>${detail.inboundCount} in / ${detail.outboundCount} out</span>
+            <span>first: ${escapeHtml(fmtRelTime(detail.firstSeen))}</span>
+            <span>last: ${escapeHtml(fmtRelTime(detail.lastSeen))}</span>
+            ${typeof detail.avgResponseLatencyMs === 'number' ? '<span>avg reply: ' + Math.round(detail.avgResponseLatencyMs/1000) + 's</span>' : ''}
+            ${detail.bridge ? '<span>📨 topic ' + detail.bridge.topicId + '</span>' : '<span style="color:var(--text-dim);font-style:italic">no Telegram topic</span>'}
+            ${detail.hasSpawnedSession ? '<span>🧵 spawn-session</span>' : ''}
+          </div>
+        </div>
+      `;
+      const messages = (detail.messages || []).map(m => tlObsRenderMessage(m)).join('');
+      return header + messages;
+    }
+
+    function tlObsRenderMessage(m) {
+      const isIn = m.direction === 'in';
+      const bg = isIn ? 'rgba(99,102,241,0.10)' : 'rgba(34,197,94,0.10)';
+      const border = isIn ? '#6366f1' : '#22c55e';
+      const arrow = isIn ? '←' : '→';
+      const meta = `${escapeHtml(m.timestamp)} · ${escapeHtml(m.id.slice(0, 8))}${m.outcome ? ' · ' + escapeHtml(m.outcome) : ''} · trust:${escapeHtml(m.trustLevel)}`;
+      return `
+        <div style="border-left:3px solid ${border};background:${bg};padding:8px 10px;border-radius:4px">
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px">
+            <div style="font-weight:600;font-size:12px">
+              ${arrow} ${escapeHtml(m.remoteAgentName)}
+            </div>
+            <div style="font-size:11px;color:var(--text-dim)">${escapeHtml(fmtRelTime(m.timestamp))}</div>
+          </div>
+          <div style="font-size:13px;white-space:pre-wrap;word-break:break-word;line-height:1.4">${escapeHtml(m.text)}</div>
+          <div style="font-family:monospace;font-size:10px;color:var(--text-dim);margin-top:4px">${meta}</div>
+        </div>
+      `;
+    }
+
+    async function tlObsRunSearch(query) {
+      const panel = document.getElementById('tlObsSearchResults');
+      if (!panel) return;
+      const q = (query || '').trim();
+      if (!q) { panel.style.display = 'none'; return; }
+      panel.style.display = 'block';
+      panel.innerHTML = '<div style="color:var(--text-dim);font-size:12px">Searching…</div>';
+      try {
+        const resp = await apiFetch('/threadline/observability/search?q=' + encodeURIComponent(q) + '&limit=30');
+        const hits = resp.hits || [];
+        if (hits.length === 0) {
+          panel.innerHTML = '<div style="color:var(--text-dim);font-size:12px">No matches.</div>';
+          return;
+        }
+        panel.innerHTML = `<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${hits.length} match${hits.length === 1 ? '' : 'es'} (click to open thread)</div>` +
+          hits.map(h => `
+            <div onclick="tlObsLoadThread('${h.message.threadId.replace(/'/g, "\\'")}')"
+                 style="padding:6px 8px;border-bottom:1px solid var(--border);cursor:pointer;font-size:12px">
+              <div style="display:flex;justify-content:space-between">
+                <span style="font-weight:600">${h.message.direction === 'in' ? '←' : '→'} ${escapeHtml(h.message.remoteAgentName)}</span>
+                <span style="font-size:11px;color:var(--text-dim)">${escapeHtml(fmtRelTime(h.message.timestamp))}</span>
+              </div>
+              <div style="margin-top:2px;line-height:1.4">${tlObsRenderSnippet(h.snippet)}</div>
+            </div>
+          `).join('');
+      } catch (err) {
+        panel.innerHTML = `<div style="color:var(--red);font-size:12px">Error: ${escapeHtml(err.message || String(err))}</div>`;
+      }
+    }
+
+    function tlObsRenderSnippet(s) {
+      // Server returns matches wrapped in «...» — render as <mark>
+      return escapeHtml(s).replace(/«/g, '<mark style="background:#fef08a;color:#000">').replace(/»/g, '</mark>');
     }
 
     async function loadFileTree() {
@@ -5794,6 +6708,216 @@
       }
     }
 
+    // ── Projects Tab (PROJECT-SCOPE-SPEC Phase 1.10) ─────────────
+    //
+    // Read-only project view. Per spec: progress bar per round +
+    // pipelineStage histogram, drift status badge per pending item
+    // (cached verdict only; clicking does NOT trigger a new check),
+    // halt + ack buttons, 15s poll, textContent rendering on every
+    // user/agent-authored string, 409 response silently refreshes.
+    let __projectsPollTimer = null;
+    function startProjectsPoll() {
+      if (__projectsPollTimer) return;
+      __projectsPollTimer = setInterval(() => { loadProjects().catch(() => {}); }, 15000);
+    }
+    function stopProjectsPoll() {
+      if (__projectsPollTimer) { clearInterval(__projectsPollTimer); __projectsPollTimer = null; }
+    }
+
+    function escapeText(s) {
+      // textContent assignment handles XSS for us; this is a no-op
+      // helper that documents the intent for future authors.
+      return typeof s === 'string' ? s : '';
+    }
+
+    async function loadProjects() {
+      const list = document.getElementById('projectsList');
+      const empty = document.getElementById('projectsEmpty');
+      const countBadge = document.getElementById('tabProjectCount');
+      if (!list || !empty) return;
+
+      let projRes = null;
+      try {
+        projRes = await apiFetch('/projects').catch(() => null);
+      } catch { /* handled by null check below */ }
+
+      while (list.firstChild) list.removeChild(list.firstChild);
+      empty.style.display = 'none';
+
+      if (!projRes || !Array.isArray(projRes.items)) {
+        empty.style.display = 'block';
+        empty.textContent = 'Projects endpoint unavailable.';
+        if (countBadge) countBadge.textContent = '0';
+        return;
+      }
+
+      const items = projRes.items.filter((p) => p.status === 'active');
+      if (countBadge) countBadge.textContent = String(items.length);
+      if (items.length === 0) {
+        empty.style.display = 'block';
+        return;
+      }
+
+      // We need each project's children for the progress bar; fetch
+      // them in parallel via /projects/:id (server returns children
+      // alongside the project record). Cap at 25 to avoid a flood.
+      const detailed = await Promise.all(items.slice(0, 25).map((p) =>
+        apiFetch('/projects/' + encodeURIComponent(p.id) + '?reconcile=false').catch(() => null)
+      ));
+
+      for (const detail of detailed) {
+        if (!detail || !detail.project) continue;
+        list.appendChild(renderProjectCard(detail.project, detail.children || []));
+      }
+    }
+
+    function renderProjectCard(project, children) {
+      const card = document.createElement('div');
+      card.style.padding = '14px';
+      card.style.border = '1px solid var(--border)';
+      card.style.borderRadius = '6px';
+      card.style.background = 'var(--bg-dim)';
+
+      const titleRow = document.createElement('div');
+      titleRow.style.display = 'flex';
+      titleRow.style.justifyContent = 'space-between';
+      titleRow.style.alignItems = 'baseline';
+      titleRow.style.gap = '12px';
+
+      const title = document.createElement('div');
+      title.style.fontWeight = '600';
+      title.style.fontSize = '15px';
+      title.textContent = project.title || project.id;
+      titleRow.appendChild(title);
+
+      const idEl = document.createElement('div');
+      idEl.style.fontSize = '11px';
+      idEl.style.color = 'var(--text-dim)';
+      idEl.style.fontFamily = 'monospace';
+      idEl.textContent = project.id + '  v' + project.version;
+      titleRow.appendChild(idEl);
+      card.appendChild(titleRow);
+
+      // Drift status badge.
+      const drift = project.rounds && project.rounds[0] ? project.rounds[0].lastDriftVerdict : null;
+      if (drift && drift.verdict) {
+        const badge = document.createElement('span');
+        badge.style.display = 'inline-block';
+        badge.style.marginTop = '4px';
+        badge.style.padding = '2px 8px';
+        badge.style.fontSize = '11px';
+        badge.style.borderRadius = '10px';
+        badge.style.border = '1px solid var(--border)';
+        const colors = {
+          'no-drift': '#4a9a4a',
+          'minor-drift': '#e2b94a',
+          'premise-violated': '#d65f5f',
+          'manual-review-required': '#888',
+        };
+        badge.style.color = colors[drift.verdict] || '#888';
+        badge.textContent = 'drift: ' + drift.verdict;
+        card.appendChild(badge);
+      }
+
+      // Rounds progress bars.
+      const rounds = Array.isArray(project.rounds) ? project.rounds : [];
+      const childById = new Map(children.map((c) => [c.id, c]));
+      for (let i = 0; i < rounds.length; i++) {
+        const r = rounds[i];
+        const wrap = document.createElement('div');
+        wrap.style.marginTop = '10px';
+
+        const rTitle = document.createElement('div');
+        rTitle.style.fontSize = '12px';
+        rTitle.style.color = 'var(--text-dim)';
+        rTitle.textContent = `Round ${i}: ${r.name} — ${r.status || 'pending'}`;
+        wrap.appendChild(rTitle);
+
+        // pipelineStage histogram counts.
+        const stages = {};
+        let total = 0;
+        for (const id of (r.itemIds || [])) {
+          const child = childById.get(id);
+          const stage = (child && child.pipelineStage) || 'outline';
+          stages[stage] = (stages[stage] || 0) + 1;
+          total++;
+        }
+        const merged = stages['merged'] || 0;
+        const bar = document.createElement('div');
+        bar.style.marginTop = '4px';
+        bar.style.height = '6px';
+        bar.style.borderRadius = '3px';
+        bar.style.background = 'var(--bg)';
+        bar.style.overflow = 'hidden';
+        const fill = document.createElement('div');
+        fill.style.height = '100%';
+        fill.style.background = '#4a9a4a';
+        fill.style.width = total > 0 ? `${Math.round((merged / total) * 100)}%` : '0%';
+        bar.appendChild(fill);
+        wrap.appendChild(bar);
+
+        const histo = document.createElement('div');
+        histo.style.fontSize = '11px';
+        histo.style.color = 'var(--text-dim)';
+        histo.style.marginTop = '4px';
+        histo.textContent = Object.entries(stages).map(([k, v]) => `${k}: ${v}`).join('  •  ') || 'no items';
+        wrap.appendChild(histo);
+        card.appendChild(wrap);
+      }
+
+      // Halt + ack buttons.
+      const actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '8px';
+      actions.style.marginTop = '12px';
+
+      const haltBtn = document.createElement('button');
+      haltBtn.textContent = 'Halt';
+      haltBtn.style.padding = '4px 10px';
+      haltBtn.style.fontSize = '12px';
+      haltBtn.addEventListener('click', () => projectHalt(project.id));
+      actions.appendChild(haltBtn);
+
+      const ackBtn = document.createElement('button');
+      ackBtn.textContent = 'Ack round 0';
+      ackBtn.style.padding = '4px 10px';
+      ackBtn.style.fontSize = '12px';
+      ackBtn.addEventListener('click', () => projectAck(project.id, 0));
+      actions.appendChild(ackBtn);
+      card.appendChild(actions);
+
+      return card;
+    }
+
+    async function projectHalt(projectId) {
+      try {
+        const res = await apiFetch('/projects/' + encodeURIComponent(projectId) + '/halt', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'user-halt-from-dashboard' }),
+        });
+        // 409 from a stale read → silent refresh, no error toast.
+        if (res && res.error && /version mismatch/.test(res.error)) {
+          await loadProjects();
+          return;
+        }
+        await loadProjects();
+      } catch { /* ignore — refresh on next poll */ }
+    }
+
+    async function projectAck(projectId, forRoundIndex) {
+      try {
+        const res = await apiFetch('/projects/' + encodeURIComponent(projectId) + '/ack', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ forRoundIndex }),
+        });
+        if (res && res.error && /version mismatch/.test(res.error)) {
+          await loadProjects();
+          return;
+        }
+        await loadProjects();
+      } catch { /* ignore — refresh on next poll */ }
+    }
+
     // ── Initiatives Tab (INITIATIVE-TRACKER-SPEC v1) ─────────────
     //
     // Fetches /initiatives and /initiatives/digest on panel activation.
@@ -5815,9 +6939,20 @@
       let itemsRes = null;
       let digestRes = null;
       try {
-        const statusQ = filter && filter.value ? `?status=${encodeURIComponent(filter.value)}` : '';
+        // PROJECT-SCOPE-SPEC Phase 1.10 — by default hide project-kind
+        // records (shown in the Projects tab) and parented children
+        // (shown inside their parent's card). Server-side filter so
+        // we don't ship them over the wire.
+        const showAll = document.getElementById('initiativesShowAll');
+        const params = [];
+        if (filter && filter.value) params.push(`status=${encodeURIComponent(filter.value)}`);
+        if (!showAll || !showAll.checked) {
+          params.push('excludeKind=project');
+          params.push('excludeParented=true');
+        }
+        const q = params.length ? '?' + params.join('&') : '';
         const [a, b] = await Promise.all([
-          apiFetch('/initiatives' + statusQ).catch(() => null),
+          apiFetch('/initiatives' + q).catch(() => null),
           apiFetch('/initiatives/digest').catch(() => null),
         ]);
         itemsRes = a;

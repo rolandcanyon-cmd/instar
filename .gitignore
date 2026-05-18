@@ -21,6 +21,11 @@ dist/
 .instar/shared-state.jsonl
 .instar/shared-state.jsonl.*
 
+# TaskFlow registry — local SQLite + WAL/SHM. May contain user PII in stateJson.
+# Cross-machine sync of flow state is not in v1 scope.
+.instar/task-flows.db
+.instar/task-flows.db-*
+
 # OS
 .DS_Store
 Thumbs.db
@@ -43,3 +48,7 @@ data/registry.db
 .mcpregistry_*
 demo.tape
 house-consciousness-framework/
+
+
+# Phase 1c-build — private signing key for instar-default lock-file (NEVER commit)
+.instar-release-keys/

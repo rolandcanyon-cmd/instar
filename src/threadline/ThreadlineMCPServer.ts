@@ -54,6 +54,33 @@ export interface RegistryClient {
   hasToken(): boolean;
 }
 
+/**
+ * Minimal interface for the relay client used by network-scope discover.
+ * Decouples ThreadlineMCPServer from the concrete ThreadlineClient so tests
+ * can inject a stub and so the dep is optional (offline agents still work).
+ */
+export interface RelayDiscoverer {
+  /** 'connected' when the relay WebSocket is live; anything else means cache fallback. */
+  readonly connectionState: string;
+  /**
+   * Ask the relay for its presence registry. Returns an empty array on timeout
+   * or if the relay rejects the request. Filter is best-effort — callers must
+   * still post-filter the result.
+   */
+  discover(filter?: {
+    capability?: string;
+    framework?: string;
+    name?: string;
+  }): Promise<Array<{
+    agentId: string;
+    name: string;
+    publicKey?: Buffer | string;
+    framework?: string;
+    capabilities?: string[];
+    lastSeen?: string;
+  }>>;
+}
+
 export interface ThreadlineMCPDeps {
   /** Agent discovery service */
   discovery: AgentDiscovery;
@@ -71,6 +98,12 @@ export interface ThreadlineMCPDeps {
   registry: RegistryClient | null;
   /** State directory (.instar path) for config access */
   stateDir?: string;
+  /**
+   * Relay client for live network-scope discover. Optional — when absent or
+   * disconnected, threadline_discover with scope=network falls back to the
+   * locally-cached known-agents file and marks the response source=cache.
+   */
+  relayClient?: RelayDiscoverer | null;
 }
 
 export interface SendMessageParams {
@@ -79,6 +112,10 @@ export interface SendMessageParams {
   message: string;
   waitForReply: boolean;
   timeoutSeconds: number;
+  /** Optional originating Telegram topic ID. Per THREAD-TOPIC-LINKAGE-SPEC.md. */
+  originTopicId?: number;
+  /** Optional intent string. Stored locally on the commitment, never sent over the wire. */
+  purpose?: string;
 }
 
 export interface SendMessageResult {
@@ -121,6 +158,44 @@ interface ParsedInstarConfig {
 }
 
 // ── Tool Result Builders ─────────────────────────────────────────────
+
+/**
+ * Convert a relay-discovered agent entry into the local ThreadlineAgentInfo
+ * shape so the rest of the discover pipeline (filtering, sanitizing) doesn't
+ * need to special-case the source. publicKey is hex-encoded — the relay may
+ * deliver it as a Buffer (KnownAgent from ThreadlineClient) or as a hex
+ * string (raw wire frame in older relays), so we normalize both.
+ */
+function relayAgentToInfo(ra: {
+  agentId: string;
+  name: string;
+  publicKey?: Buffer | string;
+  framework?: string;
+  capabilities?: string[];
+  lastSeen?: string;
+}): ThreadlineAgentInfo {
+  let pubHex: string | undefined;
+  if (ra.publicKey) {
+    pubHex = Buffer.isBuffer(ra.publicKey)
+      ? ra.publicKey.toString('hex')
+      : ra.publicKey;
+  } else if (ra.agentId) {
+    // Fall back to the agentId — which IS the fingerprint per relay protocol.
+    pubHex = ra.agentId;
+  }
+  return {
+    name: ra.name,
+    port: 0,
+    path: '',
+    status: 'unverified',
+    capabilities: ra.capabilities ?? [],
+    threadlineEnabled: true,
+    threadlineVersion: '1.0',
+    publicKey: pubHex,
+    framework: (ra.framework as ThreadlineAgentInfo['framework']) ?? 'instar',
+    lastVerified: ra.lastSeen,
+  };
+}
 
 function textResult(text: string) {
   return { content: [{ type: 'text' as const, text }] };
@@ -317,21 +392,53 @@ export class ThreadlineMCPServer {
 
         try {
           let agents: ThreadlineAgentInfo[];
+          // For network scope, track whether the result is live from the relay
+          // or fell back to the local cache, so callers can detect stale data.
+          let source: 'local' | 'relay' | 'cache' = 'local';
+          let staleReason: string | undefined;
 
           if (args.scope === 'local') {
             agents = await this.deps.discovery.discoverLocal();
           } else {
-            // Network discovery returns cached known agents
-            agents = this.deps.discovery.loadKnownAgents();
+            const relay = this.deps.relayClient;
+            if (relay && relay.connectionState === 'connected') {
+              try {
+                const relayAgents = await relay.discover(
+                  args.capability ? { capability: args.capability } : undefined,
+                );
+                agents = relayAgents.map(ra => relayAgentToInfo(ra));
+                source = 'relay';
+              } catch (err) {
+                // Relay round-trip failed — fall back to cache rather than error.
+                agents = this.deps.discovery.loadKnownAgents();
+                source = 'cache';
+                staleReason = `relay query failed: ${err instanceof Error ? err.message : 'unknown'}`;
+              }
+            } else {
+              agents = this.deps.discovery.loadKnownAgents();
+              source = 'cache';
+              staleReason = relay
+                ? `relay not connected (state=${relay.connectionState})`
+                : 'relay client not configured';
+            }
           }
 
-          // Filter by capability if specified
+          // Filter by capability if specified. (Relay already filters server-side
+          // when scope=network, but we re-apply to handle local scope and any
+          // relay servers that ignore the filter.)
           if (args.capability) {
             const capLower = args.capability.toLowerCase();
             agents = agents.filter(a =>
               a.capabilities.some(c => c.toLowerCase().includes(capLower))
             );
           }
+
+          // Trust levels are sensitive — only show to local operator or admin scope.
+          const showTrustLevels = this.requestContext.isLocal ||
+            (this.requestContext.tokenInfo && this.deps.auth?.hasScope(
+              this.requestContext.tokenInfo,
+              'threadline:admin',
+            ));
 
           // Sanitize output — include fingerprint prefix + machine for disambiguation
           const sanitized = agents.map(a => {
@@ -352,6 +459,19 @@ export class ThreadlineMCPServer {
             if (a.machine) {
               entry.machine = a.machine;
             }
+
+            // Surface granted trust level so consumers don't all read "unverified"
+            // when the operator has already trusted the agent. Visibility-gated
+            // identically to threadline_agents.
+            if (showTrustLevels) {
+              const fpFull = a.publicKey?.substring(0, 32);
+              const trustProfile = (fpFull && this.deps.trustManager.getProfile(fpFull))
+                || this.deps.trustManager.getProfile(a.name);
+              if (trustProfile) {
+                entry.trustLevel = trustProfile.level;
+                entry.trustSource = trustProfile.source;
+              }
+            }
             return entry;
           });
 
@@ -363,11 +483,16 @@ export class ThreadlineMCPServer {
             );
           }
 
-          return jsonResult({
+          const response: Record<string, unknown> = {
             scope: args.scope,
             count: sanitized.length,
             agents: sanitized,
-          });
+          };
+          if (args.scope === 'network') {
+            response.source = source;
+            if (staleReason) response.staleReason = staleReason;
+          }
+          return jsonResult(response);
         } catch (err) {
           return errorResult(`Discovery failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
         }
@@ -393,6 +518,18 @@ export class ThreadlineMCPServer {
         timeoutSeconds: z.number().default(120).describe(
           'Max seconds to wait for reply (only with waitForReply)'
         ),
+        originTopicId: z.number().int().positive().optional().describe(
+          'Optional: Telegram topic ID this send originated from. When set, ' +
+          'the reply (when it arrives) is routed back to that topic session ' +
+          'and the user gets a notification if the reply is user-visible. ' +
+          'Per THREAD-TOPIC-LINKAGE-SPEC.md.'
+        ),
+        purpose: z.string().max(1024).optional().describe(
+          'Optional: short free-text intent for this send (e.g. "ask ai-guy ' +
+          'for 2025 Stripe net+gross volume CSVs"). Stored on the local ' +
+          'commitment record for context when the reply lands; NEVER sent ' +
+          'over the wire to the remote agent.'
+        ),
       },
       async (args) => {
         const authError = this.checkAuth('threadline:send');
@@ -415,11 +552,19 @@ export class ThreadlineMCPServer {
             message: args.message,
             waitForReply: args.waitForReply,
             timeoutSeconds: args.timeoutSeconds,
+            originTopicId: args.originTopicId,
+            purpose: args.purpose,
           });
 
           if (!result.success) {
             return errorResult(result.error || 'Message delivery failed');
           }
+
+          // Outbound mirroring into the Telegram bridge happens server-side
+          // in the /threadline/relay-send route handler — the MCP server runs
+          // in a subprocess and the bridge instance lives in the main agent
+          // process. Single hook for both local-delivery and relay-delivery
+          // outbound paths. (See server/routes.ts /threadline/relay-send.)
 
           const response: Record<string, unknown> = {
             // `delivered` reflects whether the recipient actually accepted

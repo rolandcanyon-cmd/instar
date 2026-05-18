@@ -13,6 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateGuideContent } from './upgrade-guide-validator.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -21,13 +22,14 @@ const nextPath = path.join(ROOT, 'upgrades', 'NEXT.md');
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf-8'));
 const version = pkg.version;
 
+// Section list kept here only for the "no upgrade guide found" error
+// message. The full per-section validation now flows through
+// validateGuideContent (which has its own canonical REQUIRED_SECTIONS).
 const REQUIRED_SECTIONS = [
   '## What Changed',
   '## What to Tell Your User',
   '## Summary of New Capabilities',
 ];
-
-const MIN_LENGTH = 200;
 
 let errors = [];
 let warnings = [];
@@ -38,39 +40,28 @@ const versionedGuidePath = path.join(upgradesDir, `${version}.md`);
 const versionedGuideExists = fs.existsSync(versionedGuidePath);
 const nextExists = fs.existsSync(nextPath);
 
-if (versionedGuideExists) {
-  // Already finalized — validate the versioned guide instead
-  const content = fs.readFileSync(versionedGuidePath, 'utf-8');
-  for (const section of REQUIRED_SECTIONS) {
-    if (!content.includes(section)) {
-      errors.push(`${version}.md missing "${section}" section`);
-    }
-  }
-  if (content.length < MIN_LENGTH) {
-    errors.push(`${version}.md is too short (${content.length} chars, need ${MIN_LENGTH}+)`);
-  }
-} else if (nextExists) {
-  const content = fs.readFileSync(nextPath, 'utf-8');
+// Pick the active guide for this push. NEXT.md wins if present (in-flight
+// release notes); fall back to the versioned guide once NEXT.md has been
+// renamed during a publish.
+const activeGuidePath = nextExists
+  ? nextPath
+  : (versionedGuideExists ? versionedGuidePath : null);
+const activeGuideLabel = nextExists
+  ? 'NEXT.md'
+  : (versionedGuideExists ? `${version}.md` : null);
 
-  for (const section of REQUIRED_SECTIONS) {
-    if (!content.includes(section)) {
-      errors.push(`NEXT.md missing "${section}" section`);
-    }
-  }
+if (activeGuidePath && activeGuideLabel) {
+  const content = fs.readFileSync(activeGuidePath, 'utf-8');
 
-  if (content.length < MIN_LENGTH) {
-    errors.push(`NEXT.md is too short (${content.length} chars, need ${MIN_LENGTH}+)`);
-  }
-
-  // Check for unfilled template placeholders
-  if (content.includes('<!-- Describe what changed')) {
-    errors.push(`NEXT.md "What Changed" still has template placeholder`);
-  }
-  if (content.includes('[Feature name]') || content.includes('[Brief, friendly description')) {
-    errors.push(`NEXT.md "What to Tell Your User" still has template placeholder`);
-  }
-  if (content.includes('[Capability]') && content.includes('[Endpoint, command')) {
-    errors.push(`NEXT.md "Summary of New Capabilities" still has template placeholder`);
+  // Run the shared validator (same checks as check-upgrade-guide.js at publish
+  // time). This catches the publish-blocker bugs that previously slipped past
+  // pre-push: inline code / fenced blocks / camelCase config keys in "What to
+  // Tell Your User", and missing "## Evidence" when "What Changed" claims a fix.
+  // Before this gate, those defects only surfaced as silently-dropped publish
+  // runs on main — agents never received the merged code.
+  const validatorIssues = validateGuideContent(content);
+  for (const issue of validatorIssues) {
+    errors.push(`${activeGuideLabel}: ${issue}`);
   }
 } else {
   errors.push(
@@ -230,8 +221,13 @@ if (!process.env.CI) {
     /\bnew\b/i,
   ];
 
-  const guidePath = versionedGuideExists ? versionedGuidePath : nextPath;
-  if (fs.existsSync(guidePath)) {
+  // When NEXT.md exists, it represents the *next* shipment being prepared in
+  // this push — prefer it over the (frozen) versioned guide, which describes
+  // the already-released version and isn't what this PR is changing. This is
+  // the post-release-cut + new-PR state: both files coexist, but only NEXT.md
+  // is in flight. Falls back to the versioned guide when no NEXT.md is staged.
+  const guidePath = nextExists ? nextPath : (versionedGuideExists ? versionedGuidePath : null);
+  if (guidePath && fs.existsSync(guidePath)) {
     const guideContent = fs.readFileSync(guidePath, 'utf-8');
     // Extract "## What Changed" section
     const whatChangedMatch = guideContent.match(/## What Changed\s*([\s\S]*?)(?=\n##\s|$)/);
@@ -241,7 +237,10 @@ if (!process.env.CI) {
 
     if (qualifies) {
       const sideEffectsDir = path.join(ROOT, 'upgrades', 'side-effects');
-      const artifactName = versionedGuideExists ? `${version}.md` : null;
+      // If NEXT.md is the active guide, any fresh artifact (last 24h) counts —
+      // the versioned-filename requirement only applies when a versioned guide
+      // is being validated without an in-flight NEXT.md.
+      const artifactName = (!nextExists && versionedGuideExists) ? `${version}.md` : null;
       let artifactFound = false;
 
       if (fs.existsSync(sideEffectsDir)) {
@@ -293,6 +292,53 @@ try {
   }
 } catch (err) {
   warnings.push(`lint-no-direct-destructive failed to run: ${err.message}`);
+}
+
+// ── Direct-LLM-HTTP containment lint (full repo) ──────────────────────
+//
+// Phase 1 of docs/specs/token-burn-detection-and-self-heal.md: every LLM
+// HTTP call must go through src/core/{Anthropic,ClaudeCli}IntelligenceProvider
+// so the burn-detection system can attribute spend. New raw-HTTP-to-LLM
+// references outside that chokepoint fail the push.
+
+try {
+  const { spawnSync } = await import('node:child_process');
+  const result = spawnSync(
+    process.execPath,
+    [path.join(ROOT, 'scripts/lint-no-direct-llm-http.js')],
+    { cwd: ROOT, stdio: ['ignore', 'inherit', 'inherit'] },
+  );
+  if (result.status !== 0) {
+    errors.push('lint-no-direct-llm-http: violations detected (see output above)');
+  }
+} catch (err) {
+  warnings.push(`lint-no-direct-llm-http failed to run: ${err.message}`);
+}
+
+// ── 6. URL.pathname filesystem guard ──────────────────────────────────
+// new URL(..., import.meta.url).pathname preserves %20-encoded spaces,
+// breaking filesystem operations. Use __dirname (via fileURLToPath) instead.
+
+try {
+  const srcDir = path.join(ROOT, 'src');
+  const { execSync } = await import('node:child_process');
+  const matches = execSync(
+    `grep -rn "new URL(.*import\\.meta\\.url.*)\\.pathname" "${srcDir}" 2>/dev/null || true`,
+    { encoding: 'utf-8' }
+  ).trim();
+
+  if (matches) {
+    const lines = matches.split('\n').filter(Boolean);
+    errors.push(
+      `${lines.length} instance(s) of URL.pathname for filesystem paths found in src/.\n` +
+      `      This breaks when the project directory contains spaces (%20 encoding).\n` +
+      `      Use path.resolve(__dirname, '...') instead.\n` +
+      lines.slice(0, 5).map(l => `        • ${l.replace(srcDir + '/', 'src/')}`).join('\n') +
+      (lines.length > 5 ? `\n        • ...and ${lines.length - 5} more` : '')
+    );
+  }
+} catch {
+  // grep not available — skip gracefully
 }
 
 // ── Report ────────────────────────────────────────────────────────────

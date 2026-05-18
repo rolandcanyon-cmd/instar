@@ -21,6 +21,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { SafeGitExecutor } from './SafeGitExecutor.js';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +30,11 @@ import { TreeGenerator } from '../knowledge/TreeGenerator.js';
 import { HTTP_HOOK_TEMPLATES, buildHttpHookSettings } from '../data/http-hook-templates.js';
 import { getMigrationDefaults, applyDefaults } from '../config/ConfigDefaults.js';
 import { installBuiltinSkills } from '../commands/init.js';
+import { installBuiltinJobs } from '../scheduler/InstallBuiltinJobs.js';
+import { jobsMigrate } from '../commands/jobMigrate.js';
+import { snapshotUserNamespace, verifyMigrationInvariants } from '../scheduler/MigrationInvariants.js';
+import { appendMigrationEvent, normalizePerEntryAction, type MigrationEvent } from '../scheduler/MigrationLedger.js';
+import { randomUUID } from 'node:crypto';
 import {
   ELIGIBILITY_SCHEMA_SQL,
   ELIGIBILITY_SCHEMA_SQL_SHA256,
@@ -40,6 +47,11 @@ import {
 } from '../data/pr-gate-artifacts.js';
 import { SafeFsExecutor } from './SafeFsExecutor.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
+import {
+  MigratorStepEngine,
+  type MigratorStep,
+  type RunPendingStepsResult,
+} from './MigratorStepEngine.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -62,9 +74,54 @@ export interface MigratorConfig {
 
 export class PostUpdateMigrator {
   private config: MigratorConfig;
+  /**
+   * F-7 atomic-step engine. Lazily constructed on first access via
+   * `getStepEngine()` so existing callers that never touch atomic steps
+   * pay zero cost. See `src/core/MigratorStepEngine.ts` for the primitive
+   * docs; see `docs/specs/SELF-HEALING-REMEDIATOR-V2-SPEC.md` §A35/§A50
+   * for the spec.
+   */
+  private stepEngine: MigratorStepEngine | undefined;
 
   constructor(config: MigratorConfig) {
     this.config = config;
+  }
+
+  /**
+   * F-7 atomic-step primitive: register a step that will run once on
+   * the release boundary where `step.version <= toVersion`. Idempotent
+   * across runs — the engine records every step's outcome in
+   * `<stateDir>/migrator-steps-completed.json` keyed by
+   * `<version>:<step-name>`.
+   *
+   * Steps are atomic and self-contained: a failure in one step does not
+   * roll back prior steps and does not block subsequent steps.
+   *
+   * See `docs/specs/SELF-HEALING-REMEDIATOR-V2-SPEC.md` §A35 + §A50.
+   */
+  registerStep(step: MigratorStep): void {
+    this.getStepEngine().registerStep(step);
+  }
+
+  /**
+   * F-7 atomic-step primitive: execute every pending step. Pending =
+   * step.version <= toVersion AND no ledger entry recorded yet.
+   *
+   * Steps run in registration order. Failures are recorded (never
+   * thrown) and do not stop subsequent steps.
+   */
+  async runPendingSteps(
+    fromVersion: string,
+    toVersion: string,
+  ): Promise<RunPendingStepsResult> {
+    return this.getStepEngine().runPendingSteps(fromVersion, toVersion);
+  }
+
+  private getStepEngine(): MigratorStepEngine {
+    if (!this.stepEngine) {
+      this.stepEngine = new MigratorStepEngine(this.config.stateDir);
+    }
+    return this.stepEngine;
   }
 
   /**
@@ -87,12 +144,15 @@ export class PostUpdateMigrator {
     this.migrateBackupManifest(result);
     this.migrateGitignore(result);
     this.migrateBuiltinSkills(result);
+    this.migrateBuiltinJobs(result);
+    this.autoMigrateLegacyJobsJson(result);
     this.migrateSkillPortHardcoding(result);
     this.migrateSelfKnowledgeTree(result);
     this.migrateSoulMd(result);
     this.migrateAgentMdSections(result);
     this.migrateContextDeathAntiPattern(result);
     this.migrateProviderPortability(result);
+    this.migrateFleetWatchdog(result);
 
     return result;
   }
@@ -161,6 +221,116 @@ export class PostUpdateMigrator {
       result.upgraded.push(`provider-portability: v1.0.0 migration recorded. ${codexNote}`);
     } catch (err) {
       result.errors.push(`provider-portability: config.json write failed: ${err instanceof Error ? err.message : String(err)}`);
+  // ── Fleet watchdog (lifeline-shadow-install-self-heal spec) ──────────
+  //
+  // The user-machine fleet watchdog supervises ALL instar agents on the host.
+  // It used to be a hand-rolled script at ~/.instar/instar-watchdog.sh with no
+  // source-of-truth or migration path. It now ships from
+  // `src/templates/scripts/instar-watchdog.sh` and is overwritten on every
+  // update so existing agents pick up improvements (PATH fixes, peer
+  // escalation, etc.).
+  //
+  // This migration runs in every agent's PostUpdateMigrator pass, but the
+  // installation it performs is per-machine (singleton). Multiple agents
+  // updating concurrently will produce identical writes — acceptable.
+  //
+  // Skipped on non-darwin (launchd plist is macOS-specific).
+  private migrateFleetWatchdog(result: MigrationResult): void {
+    if (process.platform !== 'darwin') {
+      result.skipped.push('fleet-watchdog: non-darwin platform');
+      return;
+    }
+
+    const scriptPath = path.join(os.homedir(), '.instar', 'instar-watchdog.sh');
+    const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'ai.instar.watchdog.plist');
+
+    // Locate the template (dev: src/core/ → ../../src/templates/...
+    //                     dist: dist/core/ → ../templates/...)
+    const candidates = [
+      path.resolve(__dirname, '..', 'templates', 'scripts', 'instar-watchdog.sh'),
+      path.resolve(__dirname, '..', '..', 'src', 'templates', 'scripts', 'instar-watchdog.sh'),
+    ];
+    let scriptBody = '';
+    for (const cand of candidates) {
+      if (fs.existsSync(cand)) { scriptBody = fs.readFileSync(cand, 'utf-8'); break; }
+    }
+    if (!scriptBody) {
+      result.skipped.push('fleet-watchdog: template not found in dist or src');
+      return;
+    }
+
+    const launchdPath = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+    const stdoutPath = path.join(os.homedir(), '.instar', 'watchdog-launchd.log');
+    const stderrPath = path.join(os.homedir(), '.instar', 'watchdog-launchd.err');
+
+    const escapeXml = (s: string): string =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+       .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+    const plistBody = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.instar.watchdog</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>/bin/bash</string>
+      <string>${escapeXml(scriptPath)}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${escapeXml(stdoutPath)}</string>
+    <key>StandardErrorPath</key>
+    <string>${escapeXml(stderrPath)}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${escapeXml(launchdPath)}</string>
+    </dict>
+</dict>
+</plist>`;
+
+    try {
+      // Compare against current contents to avoid noisy re-installs.
+      const scriptCurrent = fs.existsSync(scriptPath) ? fs.readFileSync(scriptPath, 'utf-8') : '';
+      const plistCurrent = fs.existsSync(plistPath) ? fs.readFileSync(plistPath, 'utf-8') : '';
+      const scriptChanged = scriptCurrent !== scriptBody;
+      const plistChanged = plistCurrent !== plistBody;
+      if (!scriptChanged && !plistChanged) {
+        result.skipped.push('fleet-watchdog: already up to date');
+        return;
+      }
+
+      fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+      fs.mkdirSync(path.dirname(plistPath), { recursive: true });
+      if (scriptChanged) fs.writeFileSync(scriptPath, scriptBody, { mode: 0o755 });
+      if (plistChanged) fs.writeFileSync(plistPath, plistBody);
+
+      // Validate plist before triggering launchd
+      try {
+        execFileSync('plutil', ['-lint', plistPath], { stdio: 'pipe' });
+      } catch (err) {
+        const stderr = err instanceof Error && 'stderr' in err ? String((err as any).stderr) : '';
+        result.errors.push(`fleet-watchdog: plist validation failed: ${stderr}`);
+        return;
+      }
+
+      // Reload only if plist changed (script-only changes don't need launchd touch).
+      if (plistChanged) {
+        const uid = process.getuid?.() ?? 501;
+        try { execFileSync('launchctl', ['bootout', `gui/${uid}`, plistPath], { stdio: 'ignore' }); } catch { /* not loaded */ }
+        try { execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plistPath], { stdio: 'ignore' }); } catch { /* non-fatal */ }
+      }
+
+      result.upgraded.push(
+        `fleet-watchdog: updated (script=${scriptChanged}, plist=${plistChanged})`
+      );
+    } catch (err) {
+      result.errors.push(`fleet-watchdog: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -330,6 +500,215 @@ export class PostUpdateMigrator {
       result.skipped.push('built-in skills: checked (non-destructive)');
     } catch (err) {
       result.errors.push(`built-in skills: ${err}`);
+    }
+  }
+
+  /**
+   * Phase 2 — install/refresh built-in agentmd jobs. Copies the shipped
+   * markdown templates into `.instar/jobs/instar/` and writes their
+   * per-slug manifests. Honors operator-disabled state (preserves
+   * `enabled: false` + `disabledAtBodyHash` across updates). Retires
+   * jobs that are no longer shipped.
+   *
+   * The `.instar/jobs/user/` namespace is structurally untouched (Seamless
+   * Migration Guarantee invariant 4).
+   */
+  private migrateBuiltinJobs(result: MigrationResult): void {
+    try {
+      // The package root is two levels up from this compiled module (dist/core/),
+      // which puts us at the installed npm package root in production or the
+      // repo root in dev.
+      const packageRoot = path.resolve(__dirname, '..', '..');
+      const report = installBuiltinJobs({
+        agentStateDir: this.config.stateDir,
+        packageRoot,
+        port: this.config.port,
+      });
+      if (report.installed.length > 0) {
+        result.upgraded.push(`built-in agentmd jobs: ${report.installed.length} installed/refreshed`);
+      } else if (report.errors.length === 0) {
+        result.skipped.push('built-in agentmd jobs: nothing to install');
+      }
+      for (const slug of report.retired) {
+        result.upgraded.push(`built-in agentmd jobs: retired "${slug}"`);
+      }
+      for (const e of report.errors) {
+        result.errors.push(`built-in agentmd jobs${e.slug ? ` [${e.slug}]` : ''}: ${e.reason}`);
+      }
+    } catch (err) {
+      result.errors.push(`built-in agentmd jobs: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Phase 5 — auto-run `instar jobs migrate` for pre-spec agents on update.
+   *
+   * Behavior:
+   *   - SKIP entirely if `.instar/jobs/.migration-complete.json` exists
+   *     (operator already confirmed completion via Dashboard).
+   *   - SKIP entirely if `.instar/jobs/.migration-abandoned.json` exists
+   *     (operator explicitly chose to roll back).
+   *   - SKIP if `.instar/jobs.json` is absent (nothing to migrate).
+   *   - Otherwise, invoke `jobsMigrate({ defaultAction: 'fork' })` —
+   *     fork policy preserves the operator's customized body in user/
+   *     namespace, never silently drops content. This is the
+   *     spec-mandated default for the auto-run path.
+   *   - Emit a Dashboard banner event via the migration result so the
+   *     operator sees "migration ran on update — confirm in Dashboard."
+   *
+   * Seamless Migration Guarantee invariants enforced at this layer
+   * (PR #180 §Seamless Migration Guarantee):
+   *   #6 in-flight protection — JobScheduler.activeRuns() check is
+   *      currently a defensive no-op until Phase 4 wires the scheduler
+   *      back-reference; the migration runs at update time, before the
+   *      new scheduler instance comes up, so by construction nothing is
+   *      in flight.
+   *   #7 transactional safety on interrupt — `jobsMigrate` is structurally
+   *      safe (backup-first, idempotent, rollback via --abandon).
+   *   #8 telemetry — outcome is appended to result.upgraded/errors.
+   */
+  private autoMigrateLegacyJobsJson(result: MigrationResult): void {
+    const runId = randomUUID();
+    const startedAt = new Date().toISOString();
+    try {
+      const stateDir = this.config.stateDir;
+      const jobsJsonPath = path.join(stateDir, 'jobs.json');
+      const jobsRoot = path.join(stateDir, 'jobs');
+      const completedMarker = path.join(jobsRoot, '.migration-complete.json');
+      const abandonedMarker = path.join(jobsRoot, '.migration-abandoned.json');
+
+      if (!fs.existsSync(jobsJsonPath)) {
+        return; // nothing to migrate
+      }
+      if (fs.existsSync(completedMarker)) {
+        result.skipped.push('legacy jobs.json migration: already complete (operator-confirmed)');
+        return;
+      }
+      if (fs.existsSync(abandonedMarker)) {
+        result.skipped.push('legacy jobs.json migration: explicitly abandoned by operator');
+        return;
+      }
+
+      // Snapshot pre-migration state so the runtime invariant gate has
+      // ground truth to compare against. Per spec §Gate wiring:
+      // "Before performing any destructive write, the migrator re-verifies
+      //  invariants 1, 2, 4, and 6 against the staged state. Failure aborts
+      //  to fail-closed (invariant 9)."
+      let preMigrationJobs: any[] = [];
+      try {
+        preMigrationJobs = JSON.parse(fs.readFileSync(jobsJsonPath, 'utf-8'));
+        if (!Array.isArray(preMigrationJobs)) preMigrationJobs = [];
+      } catch {
+        preMigrationJobs = [];
+      }
+      const preMigrationUserSnapshot = snapshotUserNamespace(stateDir);
+
+      const packageRoot = path.resolve(__dirname, '..', '..');
+      const instarVersion = this.readBundledInstarVersion(packageRoot);
+      const outcome = jobsMigrate({
+        agentStateDir: stateDir,
+        packageRoot,
+        defaultAction: 'fork',
+      });
+
+      if (outcome.status === 'completed') {
+        // Runtime invariant gate. Spec §Seamless Migration Guarantee #1, #2, #4.
+        // Invariant 6 (in-flight) is structurally satisfied at update-apply
+        // time because no jobs run mid-update.
+        const verification = verifyMigrationInvariants({
+          agentStateDir: stateDir,
+          preMigrationJobs,
+          preMigrationUserSnapshot,
+        });
+
+        if (!verification.ok) {
+          // Fail-closed (invariant 9): roll back via abandon.
+          try {
+            jobsMigrate({ agentStateDir: stateDir, packageRoot, abandon: true });
+          } catch (rollbackErr) {
+            result.errors.push(
+              `legacy jobs.json migration: invariant verification failed AND rollback errored — ` +
+                `${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
+            );
+          }
+          result.errors.push(`legacy jobs.json migration: ${verification.summary} — rolled back to pre-migration state`);
+          return;
+        }
+
+        const migratedCount = outcome.perEntry.filter((e: { action: string }) => e.action === 'migrated-instar').length;
+        const forkedCount = outcome.perEntry.filter((e: { action: string }) => e.action === 'forked-user' || e.action === 'kept-user').length;
+        const renamedCount = outcome.perEntry.filter((e: { action: string }) => e.action === 'renamed-user').length;
+        result.upgraded.push(
+          `legacy jobs.json migration: auto-ran on update — ${migratedCount} migrated to instar, ${forkedCount} preserved in user namespace, ${renamedCount} renamed. Invariants verified. Confirm via Dashboard to allow jobs.json removal.`,
+        );
+        if (outcome.backupPath) {
+          result.upgraded.push(`legacy jobs.json migration: backup at ${path.basename(outcome.backupPath)}`);
+        }
+        // Spec invariant 8: telemetry write is the LAST action of a
+        // successful migration. Append the migration.completed event.
+        this.appendMigrationTelemetry({
+          kind: 'migration.completed',
+          runId,
+          startedAt,
+          completedAt: new Date().toISOString(),
+          trigger: 'post-update',
+          perEntry: outcome.perEntry.map((e) => ({
+            slug: e.slug,
+            action: normalizePerEntryAction(e.action),
+            reason: e.reason,
+          })),
+          backupPath: outcome.backupPath,
+          instarVersion,
+        });
+      } else if (outcome.status === 'aborted') {
+        result.errors.push(`legacy jobs.json migration: aborted — ${outcome.errors.join('; ')}`);
+        this.appendMigrationTelemetry({
+          kind: 'migration.aborted',
+          runId,
+          startedAt,
+          completedAt: new Date().toISOString(),
+          trigger: 'post-update',
+          perEntry: outcome.perEntry.map((e) => ({
+            slug: e.slug,
+            action: normalizePerEntryAction(e.action),
+            reason: e.reason,
+          })),
+          abortReason: outcome.errors.join('; '),
+          instarVersion,
+        });
+      }
+    } catch (err) {
+      result.errors.push(`legacy jobs.json migration: ${err instanceof Error ? err.message : String(err)}`);
+      this.appendMigrationTelemetry({
+        kind: 'migration.aborted',
+        runId,
+        startedAt,
+        completedAt: new Date().toISOString(),
+        trigger: 'post-update',
+        perEntry: [],
+        abortReason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** Read the installed package's version, for the migration event's
+   *  `instarVersion` field. Best-effort — returns undefined on failure. */
+  private readBundledInstarVersion(packageRoot: string): string | undefined {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8'));
+      return typeof pkg.version === 'string' ? pkg.version : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Best-effort telemetry write. Missing telemetry is degradation, not a
+   *  release-blocker, so failures are swallowed. */
+  private appendMigrationTelemetry(event: MigrationEvent): void {
+    try {
+      appendMigrationEvent(this.config.stateDir, event);
+    } catch {
+      // @silent-fallback-ok — telemetry is non-load-bearing
     }
   }
 
@@ -1415,7 +1794,7 @@ The user has been talking to you (possibly for days). A generic greeting like "H
 - **Generate a file link**: \`curl -H "Authorization: Bearer $AUTH" "http://localhost:${port}/api/files/link?path=.claude/CLAUDE.md"\`
 - **Download a file**: \`curl -H "Authorization: Bearer $AUTH" "http://localhost:${port}/api/files/download?path=.claude/CLAUDE.md" -O\`
 - **Default config**: Browsing and editing enabled for the entire project directory (\`./\`) by default.
-- **Never editable**: \`.claude/hooks/\`, \`.claude/scripts/\`, \`node_modules/\` are always read-only regardless of config.
+- **Never editable**: \`.claude/hooks/\`, \`.claude/scripts/\`, \`node_modules/\`, \`.instar/jobs/instar/\` are always read-only regardless of config.
 `;
       // Insert after Dashboard section
       const dashboardIdx = content.indexOf('**Dashboard**');
@@ -3978,7 +4357,7 @@ process.stdin.on('end', async () => {
    * a healthy install). The caller is responsible for handling the null case.
    */
   private loadRelayTemplate(filename: string): string | null {
-    const modDir = path.dirname(new URL(import.meta.url).pathname);
+    const modDir = __dirname;
     const candidates = [
       path.resolve(modDir, '..', 'templates', 'scripts', filename),
       path.resolve(modDir, '..', '..', 'src', 'templates', 'scripts', filename),
@@ -4058,12 +4437,11 @@ echo "[\$(date -Iseconds)] Server restart initiated"
   private getConvergenceCheck(): string {
     // Read the convergence check template from the templates directory.
     // This file is the heuristic quality gate that runs before external messaging.
-    const modDir = path.dirname(new URL(import.meta.url).pathname);
     // In dev: src/core/ → ../../src/templates/scripts/convergence-check.sh
     // In dist: dist/core/ → ../templates/scripts/convergence-check.sh
     const candidates = [
-      path.resolve(modDir, '..', 'templates', 'scripts', 'convergence-check.sh'),
-      path.resolve(modDir, '..', '..', 'src', 'templates', 'scripts', 'convergence-check.sh'),
+      path.resolve(__dirname, '..', 'templates', 'scripts', 'convergence-check.sh'),
+      path.resolve(__dirname, '..', '..', 'src', 'templates', 'scripts', 'convergence-check.sh'),
     ];
     for (const candidate of candidates) {
       if (fs.existsSync(candidate)) {
@@ -4342,7 +4720,7 @@ process.stdin.on('end', async () => {
   private getFreeTextGuardHook(): string {
     // Read the hook from the templates directory instead of inline generation.
     // This avoids multi-layer escaping issues (TypeScript -> bash -> Python -> regex).
-    const hookPath = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'templates', 'hooks', 'free-text-guard.sh');
+    const hookPath = path.join(__dirname, '..', 'templates', 'hooks', 'free-text-guard.sh');
     return fs.readFileSync(hookPath, 'utf-8');
   }
 
