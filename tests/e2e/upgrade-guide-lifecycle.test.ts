@@ -170,8 +170,8 @@ Version ${version} adds exciting new features including improved search and bett
     const notifyResult = await manager.notify();
 
     expect(notifyResult.success).toBe(true);
-    expect(notifyResult.model).toBe('haiku');
-    expect(spawnedModels).toEqual(['haiku']);
+    expect(notifyResult.model).toBe('fast');
+    expect(spawnedModels).toEqual(['fast']);
     expect(activityLog.some(e => e.type === 'upgrade_notify_success')).toBe(true);
 
     // Step 3: Pending guide is gone
@@ -328,7 +328,7 @@ New stuff.
   });
 
   // 8. Model escalation works end-to-end
-  it('escalates from haiku to sonnet when haiku fails', async () => {
+  it('escalates from fast to balanced when fast tier fails', async () => {
     cleanState();
     writeVersionedGuide('0.9.86');
 
@@ -359,7 +359,7 @@ New stuff.
         spawnedModels.push(model);
         sessionsComplete.add(id);
 
-        // Only acknowledge on second attempt (sonnet)
+        // Only acknowledge on second attempt (balanced tier)
         if (attempt >= 2 && fs.existsSync(pendingPath())) {
           SafeFsExecutor.safeUnlinkSync(pendingPath(), { operation: 'tests/e2e/upgrade-guide-lifecycle.test.ts:369' });
         }
@@ -382,7 +382,7 @@ New stuff.
     const result = await manager.notify();
 
     expect(result.success).toBe(true);
-    expect(result.model).toBe('sonnet');
-    expect(spawnedModels).toEqual(['haiku', 'sonnet']);
+    expect(result.model).toBe('balanced');
+    expect(spawnedModels).toEqual(['fast', 'balanced']);
   });
 });
