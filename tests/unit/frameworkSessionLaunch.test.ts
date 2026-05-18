@@ -279,3 +279,63 @@ describe('frameworkSessionLaunch.resolveModelForFramework', () => {
     expect(balanced.argv).not.toContain('balanced');
   });
 });
+
+describe('frameworkSessionLaunch — Phase 6 local-provider (codex --oss)', () => {
+  it('headless: emits --oss + --local-provider <p> when codexLocalProvider set', () => {
+    const spec = buildHeadlessLaunch('codex-cli', {
+      binaryPath: '/usr/local/bin/codex',
+      prompt: 'hello',
+      model: 'llama3.2:latest',
+      codexLocalProvider: 'ollama',
+    });
+    expect(spec.argv).toContain('--oss');
+    expect(spec.argv).toContain('--local-provider');
+    expect(spec.argv).toContain('ollama');
+    expect(spec.argv).toContain('llama3.2:latest');
+    // local-provider mode does NOT run the OpenAI tier resolver
+    expect(spec.argv).not.toContain('gpt-5.3-codex');
+  });
+
+  it('headless: defaults to llama3.2:latest when model omitted and local provider set', () => {
+    const spec = buildHeadlessLaunch('codex-cli', {
+      binaryPath: '/usr/local/bin/codex',
+      prompt: 'p',
+      codexLocalProvider: 'ollama',
+    });
+    expect(spec.argv).toContain('llama3.2:latest');
+  });
+
+  it('headless: lmstudio provider also accepted', () => {
+    const spec = buildHeadlessLaunch('codex-cli', {
+      binaryPath: '/usr/local/bin/codex',
+      prompt: 'p',
+      model: 'qwen2.5-coder:7b',
+      codexLocalProvider: 'lmstudio',
+    });
+    expect(spec.argv).toContain('lmstudio');
+    expect(spec.argv).toContain('qwen2.5-coder:7b');
+  });
+
+  it('interactive: emits --oss + --local-provider on the interactive launch path', () => {
+    const spec = buildInteractiveLaunch('codex-cli', {
+      binaryPath: '/usr/local/bin/codex',
+      codexLocalProvider: 'ollama',
+      defaultModel: 'llama3.2:latest',
+    });
+    expect(spec.argv).toContain('--oss');
+    expect(spec.argv).toContain('--local-provider');
+    expect(spec.argv).toContain('ollama');
+    expect(spec.argv).toContain('llama3.2:latest');
+  });
+
+  it('headless: claude-code framework ignores codexLocalProvider (Codex-only flag)', () => {
+    const spec = buildHeadlessLaunch('claude-code', {
+      binaryPath: '/x/claude',
+      prompt: 'p',
+      // @ts-expect-error — codexLocalProvider isn't valid for claude-code
+      codexLocalProvider: 'ollama',
+    });
+    expect(spec.argv).not.toContain('--oss');
+    expect(spec.argv).not.toContain('--local-provider');
+  });
+});

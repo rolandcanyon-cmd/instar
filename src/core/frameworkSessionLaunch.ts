@@ -88,6 +88,12 @@ export interface InteractiveLaunchOptions {
    * ('balanced' for Codex; Claude inherits its CLI's account default).
    */
   defaultModel?: string;
+  /**
+   * Phase 6 local-model adapter — when set on a codex-cli launch, emits
+   * `--oss --local-provider <provider>` so the interactive session
+   * talks to a local Ollama/LM Studio instance.
+   */
+  codexLocalProvider?: 'ollama' | 'lmstudio';
 }
 
 export interface InteractiveLaunchSpec {
@@ -145,11 +151,21 @@ const codexCliBuilder: Builder = (options) => {
   // tier OR a raw model id from config. Default to the subscription-
   // safe 'balanced' tier when nothing is specified — matches the prior
   // hardcoded 'gpt-5.3-codex' behavior but now reads from config.
-  const resolvedModel = resolveModelForFramework('codex-cli', options.defaultModel) ?? 'gpt-5.3-codex';
+  // Phase 6: when codexLocalProvider is set, skip the tier resolver
+  // (local models like 'llama3.2:latest' don't share OpenAI's
+  // vocabulary) and pass the model verbatim. Builder also appends
+  // --oss --local-provider <p> below.
+  const isLocal = options.codexLocalProvider !== undefined;
+  const resolvedModel = isLocal
+    ? (options.defaultModel ?? 'llama3.2:latest')
+    : (resolveModelForFramework('codex-cli', options.defaultModel) ?? 'gpt-5.3-codex');
   const argv: string[] = [
     options.binaryPath,
     '--model', resolvedModel,
   ];
+  if (isLocal) {
+    argv.push('--oss', '--local-provider', options.codexLocalProvider!);
+  }
   if (options.codexSandboxMode) {
     argv.push('--sandbox', options.codexSandboxMode, '--ask-for-approval', 'never');
   } else {
@@ -245,6 +261,16 @@ export interface HeadlessLaunchOptions {
    * `--dangerously-skip-permissions` parity) when absent.
    */
   codexSandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /**
+   * Phase 6 local-model adapter — when set, the codex-cli builder
+   * emits `--oss --local-provider <provider>` so the spawn talks to a
+   * local Ollama/LM Studio instance instead of OpenAI. The model field
+   * becomes the local model id (e.g. `llama3.2:latest`,
+   * `qwen2.5-coder:7b`). The `defaultModel` (for raw tier resolution)
+   * is bypassed since local models don't share OpenAI's tier
+   * vocabulary.
+   */
+  codexLocalProvider?: 'ollama' | 'lmstudio';
 }
 
 export interface HeadlessLaunchSpec {
@@ -283,16 +309,26 @@ const codexCliHeadlessBuilder: HeadlessBuilder = (options) => {
   // instead of TUI output — same data the agenticSessionHeadless path
   // already consumes for normalization.
   const sandbox = options.codexSandboxMode ?? 'workspace-write';
-  const model = resolveModelForFramework('codex-cli', options.model) ?? 'gpt-5.3-codex';
+  // Phase 6 local-provider branch — when codexLocalProvider is set,
+  // emit `--oss --local-provider <p>` and pass the model verbatim
+  // (local models like `llama3.2:latest` don't map through the
+  // OpenAI tier vocabulary). Otherwise, the OpenAI/ChatGPT-subscription
+  // path with the standard tier resolver.
+  const isLocal = options.codexLocalProvider !== undefined;
+  const model = isLocal
+    ? (options.model ?? 'llama3.2:latest')
+    : (resolveModelForFramework('codex-cli', options.model) ?? 'gpt-5.3-codex');
   const argv: string[] = [
     options.binaryPath,
     'exec',
     '--json',
     '--skip-git-repo-check',
     '-s', sandbox,
-    '-m', model,
-    options.prompt,
   ];
+  if (isLocal) {
+    argv.push('--oss', '--local-provider', options.codexLocalProvider!);
+  }
+  argv.push('-m', model, options.prompt);
   return {
     argv,
     envOverrides: {

@@ -323,6 +323,88 @@ These three families are NOT covered by Nate B Jones's analysis — his Western-
 
 ---
 
+## Local-model adapter via Codex CLI (Phase 6 path)
+
+**Status:** Live as of v1.0.0. Empirically verified 2026-05-18.
+
+### How to read this section
+
+Phase 6 of provider-portability ships as a **passthrough** rather than a
+new adapter. Instar reuses the Codex CLI's `--oss --local-provider`
+flags to route through a locally-running Ollama or LM Studio backend.
+This trades a dedicated adapter (more code, more surface area) for
+zero-new-code shipping (Codex CLI handles the local-API translation).
+
+### Routing flag
+
+The `frameworkSessionLaunch` builders accept a `codexLocalProvider`
+option (`'ollama' | 'lmstudio'`). When set, both interactive and
+headless Codex launches emit `--oss --local-provider <provider>` and
+pass the model field as the local model id rather than mapping it
+through the OpenAI tier vocabulary.
+
+`SessionManager.spawnSession` and `SessionManager.spawnInteractiveSession`
+forward the option through, so per-topic or per-call routing decisions
+can select local-model mode without code changes elsewhere.
+
+### Verified backends (2026-05-18, Codex CLI 0.50.x, Echo dev machine)
+
+| Backend | Provider flag | Model tested | Result |
+|---|---|---|---|
+| Ollama (port 11434) | `--local-provider ollama` | `llama3.2:latest` (2.0GB) | ✓ JSON event stream produced; PONG smoke returned in ~3s |
+| LM Studio | `--local-provider lmstudio` | not yet | covered structurally; smoke pending |
+
+The smoke test path is:
+
+```
+codex exec --oss --local-provider ollama --model llama3.2:latest \
+  --json --skip-git-repo-check -s read-only "Reply ONLY with: PONG"
+```
+
+Produces the same `thread.started` → `turn.started` → `item.completed` →
+`turn.completed` event sequence that `agenticSessionHeadless` consumes
+for normalization. No event-normalizer change needed.
+
+### Fitness ratings — `llama3.2:latest`
+
+- **Coding (general):** PROVISIONAL — small (3B params); suitable for
+  classification and simple refactors, not for complex multi-file
+  changes. Not a routing default for non-trivial coding tasks.
+- **Routing/classification:** confidence MEDIUM — small models excel at
+  short-decision tasks; suitable replacement for `'fast'` tier when
+  the agent prefers local privacy over capability.
+- **Long-running agentic loops:** PROVISIONAL low — small context
+  window relative to GPT-5.x; suitable for tightly-scoped tasks.
+- **Subscription/cost:** N/A — no API spend. Local CPU/GPU only.
+- **Privacy:** strong — prompt never leaves the machine.
+
+### Recipe
+
+See `docs/local-model-recipe.md` for the operator-facing setup guide
+(install Ollama, pull a model, switch a topic via /route, configure
+per-topic local-provider). The recipe doc also covers the failure
+modes Ollama hits when it's not running, when the model isn't pulled,
+and when context-window limits exceed.
+
+### Caveats
+
+1. **No subscription cost-aware routing.** `CostAwareRoutingPolicy`
+   doesn't have a local-model state — it routes between Agent SDK
+   credit and subscription. Local-provider sessions sidestep the
+   policy entirely (no credit pot to drain). Future Phase 5d work
+   could add a `LocalProviderRoutingPolicy` that prefers local for
+   privacy-tagged tasks.
+2. **Spec 12 Rule 1 still applies.** The `--oss` flag tells Codex CLI
+   not to contact OpenAI, but the Rule 1 credential validator still
+   inspects env + auth.json. Operators who want a clean local-only
+   profile should `unset OPENAI_API_KEY` before starting the agent.
+3. **Sandbox modes work identically.** `-s read-only`, `-s
+   workspace-write`, `-s danger-full-access` all behave the same on
+   the local provider — sandbox is enforced by Codex CLI, not by the
+   model.
+
+---
+
 ## Cross-model routing heuristics
 
 These are the routing intuitions that emerge from the per-model assessments. The selection layer (Phase 5b) implements them; the benchmark layer (Phase 5d) validates them.

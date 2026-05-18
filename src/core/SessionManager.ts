@@ -613,6 +613,10 @@ rm()  { "${shimRunner}" rm  "$@"; }
     worktreeSlug?: string;
     /** Per-call framework override; falls back to INSTAR_FRAMEWORK env, then claude-code. */
     framework?: IntelligenceFramework;
+    /** Phase 6 local-model adapter — when set on a codex-cli launch,
+     *  the spawned session uses `codex exec --oss --local-provider <p>`
+     *  instead of OpenAI. Ignored for non-codex frameworks. */
+    codexLocalProvider?: 'ollama' | 'lmstudio';
   }): Promise<Session> {
     const runningSessions = this.listRunningSessions();
     if (runningSessions.length >= this.config.maxSessions) {
@@ -689,6 +693,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
       binaryPath: headlessBinaryPath,
       prompt: options.prompt,
       model: options.model,
+      ...(options.codexLocalProvider ? { codexLocalProvider: options.codexLocalProvider } : {}),
     });
 
     // K9: build PATH env with shim prepended (when shim was installed)
@@ -1306,7 +1311,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
    * Used for Telegram-driven conversational sessions.
    * Optionally sends an initial message after Claude is ready.
    */
-  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string; framework?: IntelligenceFramework }): Promise<string> {
+  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string; framework?: IntelligenceFramework; codexLocalProvider?: 'ollama' | 'lmstudio' }): Promise<string> {
     const sanitized = name
       ? name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
       : null;
@@ -1359,6 +1364,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
       binaryPath,
       ...(options?.resumeSessionId ? { resumeSessionId: options.resumeSessionId } : {}),
       ...(defaultModel ? { defaultModel } : {}),
+      ...(options?.codexLocalProvider ? { codexLocalProvider: options.codexLocalProvider } : {}),
     });
 
     // Spawn the framework CLI in tmux — no bash -c shell intermediary.
