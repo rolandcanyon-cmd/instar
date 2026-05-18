@@ -3,17 +3,26 @@
  *
  * Codex CLI auth modes (per `codex --help`, `codex login --help`):
  *   - ChatGPT subscription: OAuth token stored in `~/.codex/auth.json`,
- *     refreshed by the CLI. Subscription path (analog of Anthropic's
- *     CLAUDE_CODE_OAUTH_TOKEN / interactive-pool subscription path).
+ *     refreshed by the CLI. **THIS IS THE ONLY ALLOWED PATH** per spec
+ *     12 (specs/provider-portability/12-openai-path-constraints.md
+ *     Rule 1). Mandatory for all Codex-stack work.
  *   - API key: `OPENAI_API_KEY` env var, or `codex login --with-api-key`.
- *     Direct-API path. Per Rule 2 (specs/provider-portability/04-anthropic-
- *     path-constraints.md) the corresponding Anthropic mode is forbidden;
- *     for OpenAI we treat API-key mode as the "Agent SDK credit pot
- *     analog" — usage-priced but acceptable because there's no
- *     subscription-equivalent flat-rate path at OpenAI to compete with.
+ *     **FORBIDDEN as a routine path** per spec 12 Rule 1. A runaway
+ *     loop on the raw API drains real money fast; the subscription path
+ *     has a session-limit envelope. There is no OpenAI equivalent of
+ *     Anthropic's Agent SDK credit pot — no prepaid middle tier — so
+ *     unlike Anthropic, there is nothing to drain first.
  *
- * Both auth paths are surfaced through `codex exec`; the CLI internally
- * routes. The adapter doesn't need to discriminate at the call site.
+ * Phase A migration (this release): `configFromEnv` no longer reads
+ * `OPENAI_API_KEY` into the config. The `apiKey` field remains in the
+ * type for one release paired with `@deprecated` + `@internal` JSDoc
+ * tags so external callers see warnings while still compiling. The
+ * `openai-codex` adapter's `credentials.ts` emits a structured warning
+ * at construction when API-key auth is detected (via env OR auth.json).
+ *
+ * Phase B migration (next release): the `apiKey` field is narrowed to
+ * `apiKey?: never` and adapter construction refuses when API-key auth
+ * is detected. See spec 12's Migration section for the full sequencing.
  */
 
 import { detectCodexPath, detectTmuxPath } from '../../../core/Config.js';
@@ -26,7 +35,7 @@ export interface OpenAiCodexConfig {
   /**
    * Default model name. Codex resolves model selection via `--model <name>`,
    * `--profile <name>`, or `config.toml`. Adapter passes through to CLI.
-   * Examples: `gpt-5.2-codex`, `gpt-5-codex`, `gpt-4o`, `o3`.
+   * Examples: `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.2`.
    */
   defaultModel?: string;
   /**
@@ -40,8 +49,13 @@ export interface OpenAiCodexConfig {
    */
   defaultProfile?: string;
   /**
-   * OPENAI_API_KEY (sk-...). If omitted, the adapter relies on the
-   * CLI's stored OAuth token in ~/.codex/auth.json.
+   * @deprecated v1.0.0 Phase A — Rule 1 of spec 12 forbids API-key auth
+   * on Codex. This field is retained for one release so external callers
+   * see a `@typescript-eslint/no-deprecated` warning while their code
+   * keeps compiling. `configFromEnv` no longer populates it. In Phase B
+   * (next release) this becomes `apiKey?: never` and the field is
+   * deleted in the release after that.
+   * @internal — not part of the public API; do not consume.
    */
   apiKey?: string;
   /** Optional CODEX_HOME override (defaults to `~/.codex`). */
@@ -65,6 +79,13 @@ export interface OpenAiCodexConfig {
  * `detectCodexPath()` which searches standard install locations
  * (npm global, Homebrew, nvm, PATH). NEVER hardcode developer-specific
  * paths here — they leak across installs and break every other machine.
+ *
+ * Phase A migration (spec 12): this function no longer reads
+ * `OPENAI_API_KEY` into the config. The credential validator
+ * (`credentials.ts`) emits a structured warning at adapter construction
+ * if `OPENAI_API_KEY` is observed in env or if `~/.codex/auth.json` is
+ * API-key-shape. Phase B (next release) escalates that warning to
+ * adapter refusal.
  */
 export function configFromEnv(env: NodeJS.ProcessEnv = process.env): OpenAiCodexConfig {
   return {
@@ -76,7 +97,11 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): OpenAiCodex
     defaultModel: env['CODEX_DEFAULT_MODEL'],
     defaultSandboxMode: 'read-only',
     defaultProfile: env['CODEX_DEFAULT_PROFILE'],
-    apiKey: env['OPENAI_API_KEY'],
+    // Intentionally NOT reading env['OPENAI_API_KEY'] per spec 12 Rule 1
+    // (Phase A migration). The subscription path is the only allowed
+    // path; API-key auth is forbidden as a routine path. The credential
+    // validator surfaces a structured warning at adapter init when
+    // API-key auth is detected. See header.
     codexHome: env['CODEX_HOME'],
     defaultOneShotTimeoutMs: 60_000,
     defaultSessionTimeoutMs: 30_000,

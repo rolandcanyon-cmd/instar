@@ -21,10 +21,11 @@
 
 import type { CapabilityFlag } from '../../capabilities.js';
 import type { ProviderAdapter } from '../../registry.js';
-import { UnsupportedCapabilityError } from '../../errors.js';
+import { UnsupportedCapabilityError, AuthError } from '../../errors.js';
 import { openAiCodexCapabilities } from './capabilities.js';
 import { OPENAI_CODEX_ID } from './errors.js';
 import { configFromEnv, type OpenAiCodexConfig } from './config.js';
+import { checkAndWarn as rule1CheckAndWarn, resolveEnforcementMode as rule1ResolveMode } from './credentials.js';
 
 import { createOneShotCompletion } from './transport/oneShotCompletion.js';
 import { createStructuredOneShot } from './transport/structuredOneShot.js';
@@ -76,6 +77,25 @@ export function createOpenAiCodexAdapter(
     ...configFromEnv(),
     ...partialConfig,
   };
+
+  // Spec 12 Rule 1 enforcement at adapter init. Phase A default is
+  // 'warn' — surfaces the violation but does not refuse. 'hard' mode
+  // (set INSTAR_RULE1_ENFORCE=hard) throws AuthError to block routing.
+  // 'disabled' mode (INSTAR_DISABLE_RULE1_OPENAI=1) suppresses entirely
+  // and sunsets on RULE1_KILLSWITCH_SUNSET_DATE.
+  const rule1Result = rule1CheckAndWarn({
+    stateDir: partialConfig.defaultWorkingDirectory
+      ? `${partialConfig.defaultWorkingDirectory}/.instar`
+      : undefined,
+  });
+  const rule1Mode = rule1ResolveMode();
+  if (!rule1Result.ok && rule1Mode === 'hard') {
+    // Phase B (opt-in for v1.0.0; default in v1.1) — hard refuse.
+    throw new AuthError(
+      `[codex.rule1] Adapter refused: ${rule1Result.code} (${rule1Result.detail ?? 'no detail'}). Set INSTAR_RULE1_ENFORCE=warn to downgrade to warning-only (Phase A behavior), or fix the underlying credential.`,
+      OPENAI_CODEX_ID,
+    );
+  }
 
   const impls = new Map<CapabilityFlag, unknown>();
 
