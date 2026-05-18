@@ -5,7 +5,6 @@
  *   - attribution_key column on token_events (idempotent migration + write-side)
  *   - LlmRateGate primitive (no-op + self-attribution exempt)
  *   - attributionKey helper (fingerprint composition + fallbacks)
- *   - IntelligenceOptions.attribution flows through AnthropicIntelligenceProvider
  *   - TokenLedger.recordEvent writes attribution_key + is idempotent on requestId
  *   - lint-no-direct-llm-http catches new violations + respects allowlist
  */
@@ -20,7 +19,6 @@ import { fileURLToPath } from 'node:url';
 import { LlmRateGate } from '../../src/monitoring/LlmRateGate.js';
 import { buildAttributionKey } from '../../src/monitoring/attributionKey.js';
 import { TokenLedger } from '../../src/monitoring/TokenLedger.js';
-import { AnthropicIntelligenceProvider } from '../../src/core/AnthropicIntelligenceProvider.js';
 import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -161,90 +159,13 @@ describe('TokenLedger Phase 1 schema', () => {
 });
 
 // ── AnthropicIntelligenceProvider wiring ───────────────────────────────
-
-describe('AnthropicIntelligenceProvider Phase 1 wiring', () => {
-  type RecordedCall = Parameters<NonNullable<ConstructorParameters<typeof AnthropicIntelligenceProvider>[1]>['ledger']>[0];
-  let recorded: any[];
-  let fakeLedger: { recordEvent: (e: any) => { inserted: boolean } };
-  let originalFetch: typeof globalThis.fetch;
-
-  beforeEach(() => {
-    recorded = [];
-    fakeLedger = {
-      recordEvent: (e) => { recorded.push(e); return { inserted: true }; },
-    };
-    originalFetch = globalThis.fetch;
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  function stubFetch(payload: any) {
-    globalThis.fetch = (async () => ({
-      ok: true,
-      status: 200,
-      json: async () => payload,
-      text: async () => '',
-    })) as any;
-  }
-
-  it('records ledger event with composed attribution_key when attribution.component is set', async () => {
-    stubFetch({
-      id: 'msg_1',
-      model: 'claude-haiku',
-      content: [{ type: 'text', text: 'no' }],
-      usage: { input_tokens: 42, output_tokens: 1 },
-    });
-    const provider = new AnthropicIntelligenceProvider('fake-key', { ledger: fakeLedger });
-    const out = await provider.evaluate('is this stuck?', { attribution: { component: 'InputDetector' } });
-    expect(out).toBe('no');
-    expect(recorded).toHaveLength(1);
-    expect(recorded[0].attributionKey).toMatch(/^InputDetector::[0-9a-f]{8}$/);
-    expect(recorded[0].inputTokens).toBe(42);
-    expect(recorded[0].outputTokens).toBe(1);
-    expect(recorded[0].requestId).toBe('msg_1');
-  });
-
-  it('falls back to unknown::<fp> when attribution.component is missing', async () => {
-    stubFetch({
-      id: 'msg_2',
-      content: [{ type: 'text', text: 'ok' }],
-      usage: { input_tokens: 1, output_tokens: 1 },
-    });
-    const provider = new AnthropicIntelligenceProvider('fake-key', { ledger: fakeLedger });
-    await provider.evaluate('hello');
-    expect(recorded[0].attributionKey).toMatch(/^unknown::[0-9a-f]{8}$/);
-  });
-
-  it('still returns LLM result if ledger write throws (ledger never breaks user path)', async () => {
-    stubFetch({
-      id: 'msg_3',
-      content: [{ type: 'text', text: 'survived' }],
-      usage: { input_tokens: 1, output_tokens: 1 },
-    });
-    const brokenLedger = { recordEvent: () => { throw new Error('disk full'); } };
-    const provider = new AnthropicIntelligenceProvider('fake-key', { ledger: brokenLedger });
-    const out = await provider.evaluate('foo', { attribution: { component: 'Foo' } });
-    expect(out).toBe('survived');
-  });
-
-  it('consults the rate gate; throws when gate refuses', async () => {
-    stubFetch({ id: 'never', content: [{ type: 'text', text: '' }], usage: {} });
-    const refusingGate = {
-      shouldFire: () => false,
-      decide: () => ({ allowed: false, decidedAt: '', reason: 'throttle-active' as const }),
-      reset: () => {},
-    };
-    const provider = new AnthropicIntelligenceProvider('fake-key', {
-      rateGate: refusingGate as unknown as LlmRateGate,
-      ledger: fakeLedger,
-    });
-    await expect(provider.evaluate('any', { attribution: { component: 'X' } }))
-      .rejects.toThrow(/throttled/);
-    expect(recorded).toHaveLength(0);
-  });
-});
+//
+// Phase 1 of the burn-detection spec wired attribution through
+// AnthropicIntelligenceProvider as the chokepoint. Provider-portability
+// v1.0.0 deleted that file per Rule 2 — the new chokepoint is the
+// anthropic-headless adapter under src/providers/adapters/anthropic-headless/,
+// which has its own dedicated test suite. This section is intentionally
+// empty in the v1.0.0 line.
 
 // ── lint-no-direct-llm-http ────────────────────────────────────────────
 
@@ -277,12 +198,12 @@ describe('lint-no-direct-llm-http', () => {
     }
   });
 
-  it('accepts the IntelligenceProvider files (allowlist works)', () => {
+  it('accepts the IntelligenceProvider chokepoint files (allowlist works)', () => {
     const result = spawnSync(
       process.execPath,
       [path.join(ROOT, 'scripts/lint-no-direct-llm-http.js'),
-       path.join(ROOT, 'src/core/AnthropicIntelligenceProvider.ts'),
-       path.join(ROOT, 'src/core/ClaudeCliIntelligenceProvider.ts')],
+       path.join(ROOT, 'src/core/ClaudeCliIntelligenceProvider.ts'),
+       path.join(ROOT, 'src/providers/adapters/anthropic-headless/transport/oneShotCompletion.ts')],
       { cwd: ROOT, encoding: 'utf-8' },
     );
     expect(result.status).toBe(0);
