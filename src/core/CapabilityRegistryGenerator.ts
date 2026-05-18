@@ -45,7 +45,7 @@ export interface StoredCapabilityRegistry extends CapabilityRegistry {
 const SECRET_KEY_MAP: Record<string, { tool: string; platforms: string[] }> = {
   'telegram.token': { tool: 'telegram-bot-api', platforms: ['telegram.org'] },
   'telegram.botToken': { tool: 'telegram-bot-api', platforms: ['telegram.org'] },
-  'anthropic.apiKey': { tool: 'anthropic-api', platforms: ['api.anthropic.com'] },
+  'anthropic.apiKey': { tool: 'anthropic-cli', platforms: ['api.anthropic.com (subscription path via claude CLI)'] },
   'google.clientId': { tool: 'google-oauth', platforms: ['google.com'] },
   'google.clientSecret': { tool: 'google-oauth', platforms: ['google.com'] },
   'github.token': { tool: 'github-api', platforms: ['github.com'] },

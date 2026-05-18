@@ -212,25 +212,22 @@ describe('pasted text stuck pattern', () => {
 // ── rawInject paste delay ─────────────────────────────────────────────
 
 describe('rawInject paste delay', () => {
-  it('uses 0.5s delay (not 0.1s) for bracketed paste mode', async () => {
-    // This is a source-code verification test: read the actual source and
-    // verify the sleep duration was bumped from 0.1 to 0.5.
+  it('uses 0.5s delay (not 0.1s) for bracketed paste mode on claude-code', async () => {
+    // Source-code verification: the post-paste delay for the claude-code
+    // framework must be 0.5s (was 0.1s before the paste-stuck fix). The
+    // value now lives in a framework-aware ternary (codex-cli takes longer
+    // to commit a paste); assert against that ternary directly.
     const source = fs.readFileSync(
       path.join(__dirname, '../../src/core/SessionManager.ts'),
       'utf-8'
     );
 
-    // The bracketed paste section should use 0.5s sleep
-    const pasteSection = source.match(
-      /bracketed paste[\s\S]{0,500}sleep.*?(['"])(\d+\.?\d*)\1/
+    const ternaryMatch = source.match(
+      /postPasteDelaySec\s*=\s*framework\s*===\s*['"]codex-cli['"]\s*\?\s*['"](\d+\.?\d*)['"]\s*:\s*['"](\d+\.?\d*)['"]/
     );
-    expect(pasteSection).not.toBeNull();
-    expect(pasteSection![2]).toBe('0.5');
-
-    // Ensure the old 0.1 value is NOT present in the paste context
-    const oldPasteDelay = source.match(
-      /bracketed paste[\s\S]{0,500}sleep.*?(['"])0\.1\1/
-    );
-    expect(oldPasteDelay).toBeNull();
+    expect(ternaryMatch).not.toBeNull();
+    // [2] is the claude-code branch (falsy side of the ternary).
+    expect(ternaryMatch![2]).toBe('0.5');
+    expect(ternaryMatch![2]).not.toBe('0.1');
   });
 });

@@ -1,0 +1,127 @@
+/**
+ * McpToolRegistry implementation for openai-codex.
+ *
+ * Codex stores MCP server definitions in `~/.codex/config.toml` under
+ * `[mcp_servers.<id>]` tables (or the project-scope `.codex/config.toml`).
+ * Identity match (command path or URL) is part of the allowlist key, not
+ * just name — required for security.
+ *
+ * Phase 4 baseline: simple TOML read/write of `[mcp_servers.*]` tables.
+ * This adapter doesn't pull in a TOML parser dependency; it serializes
+ * by hand for the limited shapes we need. A richer TOML round-trip can
+ * land in Phase 5 when the application layer actually consumes this.
+ */
+
+import { promises as fs } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
+import type { CancellationOptions } from '../../../types.js';
+import type {
+  McpToolRegistry,
+  McpRegistryOptions,
+  McpServerSpec,
+} from '../../../primitives/integration/mcpToolRegistry.js';
+import { CapabilityFlag } from '../../../capabilities.js';
+
+function configPath(scope: 'user' | 'project' | undefined, projectRoot?: string): string {
+  if (scope === 'project' && projectRoot) {
+    return path.join(projectRoot, '.codex', 'config.toml');
+  }
+  return path.join(process.env['CODEX_HOME'] || path.join(homedir(), '.codex'), 'config.toml');
+}
+
+function tomlEscape(s: string): string {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function specToToml(spec: McpServerSpec): string {
+  const lines: string[] = [`[mcp_servers."${tomlEscape(spec.name)}"]`];
+  if (spec.kind === 'stdio') {
+    lines.push(`kind = "stdio"`);
+    lines.push(`command = "${tomlEscape(spec.command)}"`);
+    if (spec.args && spec.args.length) {
+      lines.push(`args = [${spec.args.map((a) => `"${tomlEscape(a)}"`).join(', ')}]`);
+    }
+    if (spec.env) {
+      lines.push(`[mcp_servers."${tomlEscape(spec.name)}".env]`);
+      for (const [k, v] of Object.entries(spec.env)) {
+        lines.push(`${k} = "${tomlEscape(v)}"`);
+      }
+    }
+  } else {
+    lines.push(`kind = "http"`);
+    lines.push(`url = "${tomlEscape(spec.url)}"`);
+    if (spec.headers) {
+      lines.push(`[mcp_servers."${tomlEscape(spec.name)}".headers]`);
+      for (const [k, v] of Object.entries(spec.headers)) {
+        lines.push(`${k} = "${tomlEscape(v)}"`);
+      }
+    }
+  }
+  return lines.join('\n');
+}
+
+async function readExistingConfig(filePath: string): Promise<string> {
+  try {
+    return await fs.readFile(filePath, 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+function removeMcpServerSection(content: string, name: string): string {
+  const headerRe = new RegExp(`\\[mcp_servers\\."${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"(\\.[^\\]]+)?\\][\\s\\S]*?(?=\\n\\[|$)`, 'g');
+  return content.replace(headerRe, '').replace(/\n{3,}/g, '\n\n');
+}
+
+class OpenAiCodexMcpToolRegistry implements McpToolRegistry {
+  readonly capability = CapabilityFlag.McpToolRegistry;
+
+  async register(spec: McpServerSpec, options?: McpRegistryOptions): Promise<void> {
+    const file = configPath(options?.scope);
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const existing = await readExistingConfig(file);
+    const cleaned = removeMcpServerSection(existing, spec.name);
+    const next = `${cleaned.trimEnd()}\n\n${specToToml(spec)}\n`;
+    await fs.writeFile(file, next, 'utf-8');
+  }
+
+  async unregister(name: string, options?: McpRegistryOptions): Promise<void> {
+    const file = configPath(options?.scope);
+    const existing = await readExistingConfig(file);
+    if (!existing) return;
+    await fs.writeFile(file, removeMcpServerSection(existing, name), 'utf-8');
+  }
+
+  async list(_options?: CancellationOptions): Promise<ReadonlyArray<McpServerSpec>> {
+    const file = configPath('user');
+    const existing = await readExistingConfig(file);
+    if (!existing) return [];
+    const out: McpServerSpec[] = [];
+    const re = /\[mcp_servers\."([^"]+)"\]\s*\n([\s\S]*?)(?=\n\[|$)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(existing)) !== null) {
+      const name = m[1] ?? '';
+      const body = m[2] ?? '';
+      const kindMatch = body.match(/kind\s*=\s*"(stdio|http)"/);
+      if (!kindMatch) continue;
+      if (kindMatch[1] === 'stdio') {
+        const commandMatch = body.match(/command\s*=\s*"([^"]*)"/);
+        out.push({ kind: 'stdio', name, command: commandMatch?.[1] ?? '' });
+      } else {
+        const urlMatch = body.match(/url\s*=\s*"([^"]*)"/);
+        out.push({ kind: 'http', name, url: urlMatch?.[1] ?? '' });
+      }
+    }
+    return out;
+  }
+
+  async isRegistered(name: string, options?: CancellationOptions): Promise<boolean> {
+    const all = await this.list(options);
+    return all.some((s) => s.name === name);
+  }
+}
+
+export function createMcpToolRegistry(): McpToolRegistry {
+  return new OpenAiCodexMcpToolRegistry();
+}

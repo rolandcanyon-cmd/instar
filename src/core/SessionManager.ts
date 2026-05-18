@@ -48,6 +48,13 @@ import type { InputDetector } from '../monitoring/PromptGate.js';
 
 const execFileAsync = promisify(execFile);
 import type { Session, SessionManagerConfig, SessionStatus, ModelTier } from './types.js';
+import type { IntelligenceFramework } from './intelligenceProviderFactory.js';
+import {
+  buildInteractiveLaunch,
+  buildHeadlessLaunch,
+  resolveInteractiveFramework,
+} from './frameworkSessionLaunch.js';
+import { frameworkFromEnv } from './intelligenceProviderFactory.js';
 import { StateManager } from './StateManager.js';
 import { buildInjectionTag } from '../types/pipeline.js';
 import { sanitizeSenderName, sanitizeTopicName } from '../utils/sanitize.js';
@@ -687,13 +694,23 @@ rm()  { "${shimRunner}" rm  "$@"; }
   async spawnSession(options: {
     name: string;
     prompt: string;
-    model?: ModelTier;
+    /** Either a Claude tier name, a generic tier ('fast'|'balanced'|'capable'),
+     *  or a raw model id. Resolution happens inside the framework's headless
+     *  builder via resolveModelForFramework, so generic tiers work uniformly
+     *  across Claude and Codex. */
+    model?: ModelTier | string;
     jobSlug?: string;
     triggeredBy?: string;
     maxDurationMinutes?: number;
     topicId?: number | 'platform';
     worktreeMode?: 'dev' | 'read-only' | 'doc-fix' | 'platform';
     worktreeSlug?: string;
+    /** Per-call framework override; falls back to INSTAR_FRAMEWORK env, then claude-code. */
+    framework?: IntelligenceFramework;
+    /** Phase 6 local-model adapter — when set on a codex-cli launch,
+     *  the spawned session uses `codex exec --oss --local-provider <p>`
+     *  instead of OpenAI. Ignored for non-codex frameworks. */
+    codexLocalProvider?: 'ollama' | 'lmstudio';
     /** Optional Claude Code per-session tool allowlist
      *  (mapped to `--allowedTools <comma-separated>`).
      *  When omitted, the spawn runs with full tools (back-compat).
@@ -751,49 +768,91 @@ rm()  { "${shimRunner}" rm  "$@"; }
       }
     }
 
-    // Build Claude CLI arguments — no shell intermediary.
-    // tmux new-session executes the command directly (no bash -c needed)
-    // when given as separate arguments after the session options.
-    // Use -e CLAUDECODE= to unset the CLAUDECODE env var in spawned sessions,
-    // preventing nested Claude Code detection when instar runs inside Claude Code.
+    // Build the CLI argv via the framework-aware headless-launch helper
+    // so Codex agents (and future frameworks) spawn correctly through
+    // this same path. The helper returns argv (binary + flags + prompt)
+    // and env overrides (CLAUDECODE clear, etc.) — caller merges the
+    // env overrides into the tmux -e block alongside the universal
+    // INSTAR_* / DATABASE_URL clears.
     //
+    // Framework resolution: the per-call options.framework wins, falling
+    // back to the agent's configured sessions.framework and then to the
+    // INSTAR_FRAMEWORK env. Defaults to claude-code for back-compat.
+    const headlessFramework = resolveInteractiveFramework({
+      perCall: options.framework,
+      // SessionManagerConfig has no top-level framework field; agent-level
+      // default lives in INSTAR_FRAMEWORK env (set at server boot from
+      // the agent's intelligence config). Per-call wins; env is fallback.
+      configFramework: undefined,
+      envFramework: frameworkFromEnv(),
+    });
+    const headlessBinaryPath =
+      this.config.frameworkBinaryPaths?.[headlessFramework]
+      ?? this.config.claudePath;
+    const headlessSpec = buildHeadlessLaunch(headlessFramework, {
+      binaryPath: headlessBinaryPath,
+      prompt: options.prompt,
+      model: options.model,
+      ...(options.codexLocalProvider ? { codexLocalProvider: options.codexLocalProvider } : {}),
+    });
+
     // Per-job tool allowlist (INSTAR-JOBS-AS-AGENTMD spec §5): when the
     // caller provides a non-empty `allowedTools` array, scope the spawned
-    // session to that set via `--allowedTools <comma-separated>`. Omitting
-    // the flag preserves the legacy "full tools" behavior — back-compat
-    // for every non-agentmd code path.
-    const claudeArgs = ['--dangerously-skip-permissions'];
-    if (options.allowedTools && options.allowedTools.length > 0) {
-      claudeArgs.push('--allowedTools', options.allowedTools.join(','));
+    // session. Currently Claude-only — `--allowedTools` is a Claude CLI
+    // flag with no Codex equivalent (Codex uses sandbox modes via the
+    // headless builder). For Codex spawns the allowlist is silently
+    // ignored; the spec's enforcement is via Codex sandbox flags upstream.
+    if (
+      headlessFramework === 'claude-code'
+      && options.allowedTools
+      && options.allowedTools.length > 0
+    ) {
+      // Insert --allowedTools <list> before the -p prompt positional so
+      // Claude CLI parses it correctly. The helper builds argv with
+      // structure [binary, --dangerously-skip-permissions, (--model X)?, -p, prompt]
+      // — splice right before -p.
+      const dashPIndex = headlessSpec.argv.indexOf('-p');
+      if (dashPIndex > 0) {
+        headlessSpec.argv.splice(dashPIndex, 0, '--allowedTools', options.allowedTools.join(','));
+      }
     }
-    if (options.model) {
-      claudeArgs.push('--model', options.model);
-    }
-    claudeArgs.push('-p', options.prompt);
 
     // K9: build PATH env with shim prepended (when shim was installed)
     const inheritedPath = process.env.PATH ?? '';
     const shimmedPath = shimDir ? `${shimDir}:${inheritedPath}` : inheritedPath;
+
+    // Merge the framework-specific env overrides into the tmux -e block.
+    // Anthropic-only env vars (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY,
+    // ANTHROPIC_BASE_URL) only apply when the framework is claude-code;
+    // for Codex, the env-allowlist enforcement happens inside Codex CLI's
+    // process tree via Spec 12 Rule 1a, not via tmux -e flags (which
+    // would be unscrubbed parent inheritance).
+    const frameworkEnvFlags: string[] = [];
+    for (const [k, v] of Object.entries(headlessSpec.envOverrides)) {
+      frameworkEnvFlags.push('-e', `${k}=${v}`);
+    }
+    const anthropicEnvFlags: string[] = headlessFramework === 'claude-code'
+      ? [
+          ...((this.config.anthropicApiKey ?? '').startsWith('sk-ant-oat')
+            ? ['-e', `CLAUDE_CODE_OAUTH_TOKEN=${this.config.anthropicApiKey}`, '-e', 'ANTHROPIC_API_KEY=']
+            : ['-e', `ANTHROPIC_API_KEY=${this.config.anthropicApiKey ?? ''}`, '-e', 'CLAUDE_CODE_OAUTH_TOKEN=']),
+          '-e', `ANTHROPIC_BASE_URL=${this.config.anthropicBaseUrl ?? ''}`,
+        ]
+      : [];
 
     try {
       execFileSync(this.config.tmuxPath, [
         'new-session', '-d',
         '-s', tmuxSession,
         '-c', resolvedCwd,
-        '-e', 'CLAUDECODE=', // Prevent nested Claude Code detection
+        ...frameworkEnvFlags,
         '-e', `INSTAR_SESSION_ID=${sessionId}`, // Expose instar session ID to hook events
         '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
         '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
         ...(workTreeFencingToken ? ['-e', `INSTAR_FENCING_TOKEN=${workTreeFencingToken}`] : []),
         ...(workTreeFencingToken ? ['-e', `INSTAR_WORKTREE_PATH=${resolvedCwd}`] : []),
         ...(shimDir ? ['-e', `PATH=${shimmedPath}`, '-e', `BASH_ENV=${path.join(shimDir, '.shellrc')}`] : []),
-        // OAuth tokens (sk-ant-oat01-...) go in CLAUDE_CODE_OAUTH_TOKEN to enable
-        // interactive mode auth via subscription. API keys (sk-ant-api03-...) go in
-        // ANTHROPIC_API_KEY for direct API billing.
-        ...((this.config.anthropicApiKey ?? '').startsWith('sk-ant-oat')
-          ? ['-e', `CLAUDE_CODE_OAUTH_TOKEN=${this.config.anthropicApiKey}`, '-e', 'ANTHROPIC_API_KEY=']
-          : ['-e', `ANTHROPIC_API_KEY=${this.config.anthropicApiKey ?? ''}`, '-e', 'CLAUDE_CODE_OAUTH_TOKEN=']),
-        '-e', `ANTHROPIC_BASE_URL=${this.config.anthropicBaseUrl ?? ''}`,
+        ...anthropicEnvFlags,
         // Isolate database credentials — spawned sessions must never inherit production
         // database URLs from the parent shell. This prevents accidental schema changes
         // or data operations against the wrong database. (Learned from Portal incident 2026-02-22)
@@ -802,7 +861,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
         '-e', 'DATABASE_URL_PROD=',
         '-e', 'DATABASE_URL_DEV=',
         '-e', 'DATABASE_URL_TEST=',
-        this.config.claudePath, ...claudeArgs,
+        ...headlessSpec.argv,
       ], { encoding: 'utf-8' });
 
       // Increase tmux scrollback buffer for dashboard history support
@@ -1033,6 +1092,10 @@ rm()  { "${shimRunner}" rm  "$@"; }
   captureOutput(tmuxSession: string, lines: number = 100): string | null {
     try {
       // Note: use `=session:` (trailing colon) for pane-level tmux commands
+      // RULE 3: EXEMPT — primitive output capture, not state detection. The
+      // raw bytes returned here are consumed by callers (sentinels, watchdog)
+      // that own the actual state-detection patterns and their canary/registry
+      // coverage. This method is the transport layer.
       return execFileSync(
         this.config.tmuxPath,
         ['capture-pane', '-t', `=${tmuxSession}:`, '-p', '-S', `-${lines}`],
@@ -1042,6 +1105,43 @@ rm()  { "${shimRunner}" rm  "$@"; }
       // @silent-fallback-ok — capture output, null handled by caller
       return null;
     }
+  }
+
+  /**
+   * Resolve the IntelligenceFramework a tmux session was spawned under
+   * by reading the INSTAR_FRAMEWORK env we set in its tmux env block.
+   * Cached so repeated injections don't re-shell out. Returns null when
+   * the env isn't present (legacy sessions, non-instar tmux sessions).
+   */
+  private readonly sessionFrameworkCache = new Map<string, IntelligenceFramework | null>();
+  /** Invalidate cached framework for a tmux name. Call after killing or
+   *  respawning a session whose name may be reused under a different
+   *  framework — e.g., after a /route switch. */
+  clearSessionFrameworkCache(tmuxSession: string): void {
+    this.sessionFrameworkCache.delete(tmuxSession);
+  }
+  private getSessionFramework(tmuxSession: string): IntelligenceFramework | null {
+    if (this.sessionFrameworkCache.has(tmuxSession)) {
+      return this.sessionFrameworkCache.get(tmuxSession) ?? null;
+    }
+    let resolved: IntelligenceFramework | null = null;
+    try {
+      const out = execFileSync(
+        this.config.tmuxPath,
+        ['show-environment', '-t', `=${tmuxSession}`, 'INSTAR_FRAMEWORK'],
+        { encoding: 'utf-8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] },
+      ).trim();
+      const value = out.startsWith('INSTAR_FRAMEWORK=') ? out.slice('INSTAR_FRAMEWORK='.length) : '';
+      if (value === 'claude-code' || value === 'codex-cli') {
+        resolved = value;
+      }
+    } catch {
+      // @silent-fallback-ok — framework lookup is advisory; injection
+      // falls back to the Claude path which is correct for the default
+      // and conservative for unknown frameworks.
+    }
+    this.sessionFrameworkCache.set(tmuxSession, resolved);
+    return resolved;
   }
 
   /**
@@ -1332,7 +1432,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
    * Used for Telegram-driven conversational sessions.
    * Optionally sends an initial message after Claude is ready.
    */
-  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string }): Promise<string> {
+  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string; framework?: IntelligenceFramework; codexLocalProvider?: 'ollama' | 'lmstudio' }): Promise<string> {
     const sanitized = name
       ? name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
       : null;
@@ -1369,22 +1469,44 @@ rm()  { "${shimRunner}" rm  "$@"; }
     // Generate session ID before tmux spawn so we can pass it as env var
     const interactiveSessionId = this.generateId();
 
-    // Spawn Claude in tmux — no bash -c shell intermediary.
+    // Resolve which framework this session runs under (per-call override
+    // wins; otherwise default to claude-code). Pick the right binary
+    // path; fall back to the legacy claudePath when the framework-binary
+    // map isn't populated.
+    const framework: IntelligenceFramework = options?.framework ?? 'claude-code';
+    const binaryPath =
+      this.config.frameworkBinaryPaths?.[framework]
+      ?? this.config.claudePath;
+    if (!binaryPath) {
+      throw new Error(`No binary path available for framework "${framework}"`);
+    }
+    const defaultModel = this.config.frameworkDefaultModels?.[framework];
+    const launchSpec = buildInteractiveLaunch(framework, {
+      binaryPath,
+      ...(options?.resumeSessionId ? { resumeSessionId: options.resumeSessionId } : {}),
+      ...(defaultModel ? { defaultModel } : {}),
+      ...(options?.codexLocalProvider ? { codexLocalProvider: options.codexLocalProvider } : {}),
+    });
+
+    // Spawn the framework CLI in tmux — no bash -c shell intermediary.
     // Uses tmux -e flags to set/unset env vars directly, matching spawnSession pattern.
-    // This avoids shell injection risks and handles claudePath with spaces.
+    // This avoids shell injection risks and handles binary paths with spaces.
     try {
       const tmuxArgs = [
         'new-session', '-d',
         '-s', tmuxSession,
         '-c', this.config.projectDir,
         '-x', '200', '-y', '50',
-        '-e', 'CLAUDECODE=', // Prevent nested Claude Code detection
         '-e', `INSTAR_SESSION_ID=${interactiveSessionId}`, // Expose instar session ID to hook events
         '-e', `INSTAR_SERVER_URL=http://localhost:${this.config.port}`,
         '-e', `INSTAR_AUTH_TOKEN=${this.config.authToken}`,
+        '-e', `INSTAR_FRAMEWORK=${framework}`,
+        // Framework-specific env additions/clears (e.g., CLAUDECODE=)
+        ...Object.entries(launchSpec.envOverrides).flatMap(([k, v]) => ['-e', `${k}=${v}`]),
         // OAuth tokens (sk-ant-oat01-...) go in CLAUDE_CODE_OAUTH_TOKEN to enable
         // interactive mode auth via subscription. API keys (sk-ant-api03-...) go in
-        // ANTHROPIC_API_KEY for direct API billing.
+        // ANTHROPIC_API_KEY for direct API billing. Codex reads its own
+        // OPENAI_API_KEY but harmless to pass these — Codex ignores them.
         ...((this.config.anthropicApiKey ?? '').startsWith('sk-ant-oat')
           ? ['-e', `CLAUDE_CODE_OAUTH_TOKEN=${this.config.anthropicApiKey}`, '-e', 'ANTHROPIC_API_KEY=']
           : ['-e', `ANTHROPIC_API_KEY=${this.config.anthropicApiKey ?? ''}`, '-e', 'CLAUDE_CODE_OAUTH_TOKEN=']),
@@ -1406,11 +1528,12 @@ rm()  { "${shimRunner}" rm  "$@"; }
         tmuxArgs.push('-e', `INSTAR_SLACK_CHANNEL=${options.slackChannelId}`);
       }
 
-      tmuxArgs.push(this.config.claudePath, '--dangerously-skip-permissions');
+      tmuxArgs.push(...launchSpec.argv);
 
       if (options?.resumeSessionId) {
-        tmuxArgs.push('--resume', options.resumeSessionId);
-        console.log(`[SessionManager] Resuming session: ${options.resumeSessionId}`);
+        console.log(`[SessionManager] Resuming session: ${options.resumeSessionId} (framework: ${framework})`);
+      } else {
+        console.log(`[SessionManager] Spawning interactive session "${tmuxSession}" (framework: ${framework})`);
       }
 
       execFileSync(this.config.tmuxPath, tmuxArgs, { encoding: 'utf-8' });
@@ -1977,6 +2100,18 @@ rm()  { "${shimRunner}" rm  "$@"; }
     }
 
     const exactTarget = `=${tmuxSession}:`;
+    // Framework-specific submit semantics. Claude Code's readline buffers
+    // the bracketed paste and accepts a single Enter ~500ms later to
+    // submit. Codex's TUI takes longer to commit a paste into its
+    // input state and silently discards the first Enter that arrives
+    // before the commit is done — observed live: messages stacked up
+    // in the input box because the post-paste Enter landed too early.
+    // For codex we wait longer and send Enter twice (the second one
+    // submits if the first was eaten; if both land, the second is a
+    // harmless no-op against an empty buffer).
+    const framework = this.getSessionFramework(tmuxSession);
+    const postPasteDelaySec = framework === 'codex-cli' ? '1.5' : '0.5';
+    const enterPresses = framework === 'codex-cli' ? 2 : 1;
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
@@ -1994,24 +2129,28 @@ rm()  { "${shimRunner}" rm  "$@"; }
           execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, '\x1b[201~'], {
             encoding: 'utf-8', timeout: 5000,
           });
-          // Delay to let the terminal fully process the bracketed paste.
-          // 100ms was too short — Claude Code needs time to parse the paste end
-          // sequence and buffer the content before Enter can submit it.
-          // 500ms is conservative but prevents the "[Pasted text #1]" stuck state.
-          execFileSync('/bin/sleep', ['0.5'], { timeout: 2000 });
-          // Send Enter to submit
-          execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
-            encoding: 'utf-8', timeout: 5000,
-          });
+          execFileSync('/bin/sleep', [postPasteDelaySec], { timeout: 4000 });
+          for (let i = 0; i < enterPresses; i++) {
+            execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
+              encoding: 'utf-8', timeout: 5000,
+            });
+            if (i < enterPresses - 1) {
+              try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }); } catch { /* ignore */ }
+            }
+          }
         } else {
           // Single-line: simple send-keys
           execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, '-l', text], {
             encoding: 'utf-8', timeout: 10000,
           });
-          // Send Enter separately
-          execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
-            encoding: 'utf-8', timeout: 5000,
-          });
+          for (let i = 0; i < enterPresses; i++) {
+            execFileSync(this.config.tmuxPath, ['send-keys', '-t', exactTarget, 'Enter'], {
+              encoding: 'utf-8', timeout: 5000,
+            });
+            if (i < enterPresses - 1) {
+              try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }); } catch { /* ignore */ }
+            }
+          }
         }
         // Verify Enter actually submitted — on fresh Claude Code TUIs (v2.1.105+)
         // the Enter after bracketed-paste-end is occasionally eaten, leaving the

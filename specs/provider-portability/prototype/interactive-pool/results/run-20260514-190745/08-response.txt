@@ -1,0 +1,7 @@
+❯ Reverse the string 'instar' for me.
+
+⏺ ratsni
+
+✻ Brewed for 3s
+
+  ⏵⏵ bypass permissions on (shift+tab to cycle)

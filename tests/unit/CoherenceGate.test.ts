@@ -15,58 +15,42 @@ import path from 'node:path';
 import os from 'node:os';
 import { SafeFsExecutor } from '../../src/core/SafeFsExecutor.js';
 
-// ── Mock the Anthropic API at fetch level ────────────────────────────
+// ── Mock the IntelligenceProvider that reviewers route through ──────
+//
+// As of the Rule 2 path-constraint lockdown
+// (specs/provider-portability/04-anthropic-path-constraints.md), reviewers
+// route LLM calls through an IntelligenceProvider rather than calling
+// `fetch` against Anthropic directly. These helpers build a fake provider
+// whose `evaluate` returns the next canned response in sequence — each
+// reviewer call within a gate.evaluate() consumes one response. Order
+// matters: gate reviewer fires first, then per-dimension reviewers in the
+// order CoherenceGate constructs them.
 
-function mockFetchResponse(response: Record<string, unknown>) {
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({
-      content: [{ type: 'text', text: JSON.stringify(response) }],
+type MockIntelligence = { evaluate: ReturnType<typeof vi.fn> };
+
+function makeMockIntelligence(responses: Array<Record<string, unknown>> | Record<string, unknown>): MockIntelligence {
+  const arr = Array.isArray(responses) ? responses : [responses];
+  let idx = 0;
+  return {
+    evaluate: vi.fn().mockImplementation(async () => {
+      const r = arr[Math.min(idx, arr.length - 1)];
+      idx++;
+      return JSON.stringify(r);
     }),
-  });
+  };
 }
 
-function mockFetchGateSkip() {
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({
-      content: [{ type: 'text', text: JSON.stringify({ needsReview: false, reason: 'Simple ack' }) }],
-    }),
-  });
+function makeAllPassIntelligence(): MockIntelligence {
+  return makeMockIntelligence({ pass: true, severity: 'warn', issue: '', suggestion: '' });
 }
 
-function mockFetchGateNeedsReview() {
-  // Gate says needs review, all reviewers pass
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({
-      content: [{ type: 'text', text: JSON.stringify({ needsReview: true, reason: 'Contains claims' }) }],
-    }),
-  });
+function makeGateSkipIntelligence(): MockIntelligence {
+  return makeMockIntelligence({ needsReview: false, reason: 'Simple ack' });
 }
 
-function mockFetchAllPass() {
-  // Return pass for any reviewer
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    json: async () => ({
-      content: [{ type: 'text', text: JSON.stringify({ pass: true, severity: 'warn', issue: '', suggestion: '' }) }],
-    }),
-  });
-}
-
-function mockFetchSequence(responses: Array<Record<string, unknown>>) {
-  let callIndex = 0;
-  return vi.fn().mockImplementation(async () => {
-    const response = responses[callIndex % responses.length];
-    callIndex++;
-    return {
-      ok: true,
-      json: async () => ({
-        content: [{ type: 'text', text: JSON.stringify(response) }],
-      }),
-    };
-  });
+// (Retained for back-compat with any test that imports it; not currently used here.)
+function makeGateNeedsReviewIntelligence(): MockIntelligence {
+  return makeMockIntelligence({ needsReview: true, reason: 'Contains claims' });
 }
 
 // ── Test Helpers ─────────────────────────────────────────────────────
@@ -95,11 +79,14 @@ function createTestConfig(overrides?: Partial<ResponseReviewConfig>): ResponseRe
   };
 }
 
-function createGate(config?: Partial<ResponseReviewConfig>): CoherenceGate {
+function createGate(
+  config?: Partial<ResponseReviewConfig>,
+  intelligence?: MockIntelligence,
+): CoherenceGate {
   return new CoherenceGate({
     config: createTestConfig(config),
     stateDir: tmpDir,
-    apiKey: 'test-api-key',
+    intelligence: (intelligence ?? makeAllPassIntelligence()) as unknown as import('../../src/core/types.js').IntelligenceProvider,
   });
 }
 
@@ -119,9 +106,13 @@ describe('CoherenceGate', () => {
 
   describe('PEL integration', () => {
     it('blocks messages with credentials (Row 1 — PEL HARD_BLOCK)', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchAllPass());
+      const intel = makeMockIntelligence([
+        { needsReview: true, reason: 'Has claims' }, // gate
+        { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix it' }, // reviewer
+        { pass: true, severity: 'warn', issue: '', suggestion: '' }, // other reviewers pass
+      ]);
 
+      const gate = createGate();
       const result = await gate.evaluate({
         message: 'Here is your API key: sk-ant-abc123456789012345678',
         sessionId: 'test-1',
@@ -136,8 +127,6 @@ describe('CoherenceGate', () => {
 
     it('blocks PEL violations even in observeOnly mode', async () => {
       const gate = createGate({ observeOnly: true });
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       const result = await gate.evaluate({
         message: 'Your password is: password=s3cr3tP@ss!',
         sessionId: 'test-2',
@@ -152,8 +141,9 @@ describe('CoherenceGate', () => {
 
   describe('gate reviewer (triage)', () => {
     it('skips full review for simple acks on internal channels (Row 4)', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchGateSkip());
+      const intel = makeGateSkipIntelligence();
+
+      const gate = createGate(undefined, intel);
 
       const result = await gate.evaluate({
         message: 'Got it!',
@@ -168,8 +158,8 @@ describe('CoherenceGate', () => {
 
     it('always runs full review on external channels (skipGate: true)', async () => {
       // Gate would skip, but skipGate=true means gate is bypassed and full review runs
-      vi.stubGlobal('fetch', mockFetchAllPass());
-      const gate = createGate();
+      const intel = makeAllPassIntelligence();
+      const gate = createGate(undefined, intel);
 
       const result = await gate.evaluate({
         message: 'Got it!',
@@ -179,19 +169,19 @@ describe('CoherenceGate', () => {
       });
 
       expect(result.pass).toBe(true);
-      // fetch should be called multiple times (all reviewers, not just gate)
-      expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThan(1);
+      // The provider should be called multiple times (every reviewer, not just gate)
+      expect(intel.evaluate.mock.calls.length).toBeGreaterThan(1);
     });
   });
 
   describe('observeOnly mode (Row 3)', () => {
     it('logs verdicts but never blocks', async () => {
-      const gate = createGate({ observeOnly: true });
-      vi.stubGlobal('fetch', mockFetchSequence([
-        { needsReview: true, reason: 'Has claims' }, // gate
-        { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix it' }, // reviewer
-        { pass: true, severity: 'warn', issue: '', suggestion: '' }, // other reviewers pass
-      ]));
+      const intel = makeMockIntelligence([
+        { needsReview: true, reason: 'Has claims' },
+        { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix it' },
+        { pass: true, severity: 'warn', issue: '', suggestion: '' },
+      ]);
+      const gate = createGate({ observeOnly: true }, intel);
 
       const result = await gate.evaluate({
         message: 'Check .instar/config.json for your settings',
@@ -207,10 +197,11 @@ describe('CoherenceGate', () => {
 
   describe('blocking and revision flow (Row 6)', () => {
     it('blocks when a block-mode reviewer fails', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchSequence([
+      const intel = makeMockIntelligence([
         { pass: false, severity: 'block', issue: 'Technical language detected', suggestion: 'Use plain language' },
-      ]));
+      ]);
+
+      const gate = createGate(undefined, intel);
 
       const result = await gate.evaluate({
         message: 'Here is how you configure the scheduler using the terminal command interface.',
@@ -225,10 +216,11 @@ describe('CoherenceGate', () => {
     });
 
     it('composes collapse feedback on retry', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchSequence([
+      const intel = makeMockIntelligence([
         { pass: false, severity: 'block', issue: 'Issue 1', suggestion: 'Fix 1' },
-      ]));
+      ]);
+
+      const gate = createGate(undefined, intel);
 
       // First call — initial block
       await gate.evaluate({
@@ -255,10 +247,11 @@ describe('CoherenceGate', () => {
 
   describe('retry exhaustion (Rows 7-9)', () => {
     it('passes on internal channel after retry exhaustion (Row 7)', async () => {
-      const gate = createGate({ maxRetries: 1 });
-      vi.stubGlobal('fetch', mockFetchSequence([
+      const intel = makeMockIntelligence([
         { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix' },
-      ]));
+      ]);
+
+      const gate = createGate({ maxRetries: 1 }, intel);
 
       // First: initial block
       await gate.evaluate({
@@ -281,6 +274,10 @@ describe('CoherenceGate', () => {
     });
 
     it('passes on external + tone issue after exhaustion (Row 8)', async () => {
+      const intel = makeMockIntelligence([
+        { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix' },
+      ]);
+
       const gate = createGate({
         maxRetries: 1,
         reviewers: {
@@ -292,10 +289,7 @@ describe('CoherenceGate', () => {
           'url-validity': { enabled: false, mode: 'block' },
           'value-alignment': { enabled: false, mode: 'block' },
         },
-      });
-      vi.stubGlobal('fetch', mockFetchSequence([
-        { pass: false, severity: 'block', issue: 'Tone issue', suggestion: 'Fix' },
-      ]));
+      }, intel);
 
       // First: block
       await gate.evaluate({
@@ -321,6 +315,10 @@ describe('CoherenceGate', () => {
   describe('warn-only mode (Row 5)', () => {
     it('passes with warnings when only warn-mode reviewers flag', async () => {
       // Only enable settling-detection in warn mode; disable all block-mode reviewers
+      const intel = makeMockIntelligence([
+        { pass: false, severity: 'warn', issue: 'Settling detected', suggestion: 'Try harder' },
+      ]);
+
       const gate = createGate({
         reviewers: {
           'settling-detection': { enabled: true, mode: 'warn' },
@@ -333,10 +331,7 @@ describe('CoherenceGate', () => {
           'information-leakage': { enabled: false, mode: 'block' },
           'escalation-resolution': { enabled: false, mode: 'block' },
         },
-      });
-      vi.stubGlobal('fetch', mockFetchSequence([
-        { pass: false, severity: 'warn', issue: 'Settling detected', suggestion: 'Try harder' },
-      ]));
+      }, intel);
 
       const result = await gate.evaluate({
         message: 'I could not find any data.',
@@ -353,13 +348,15 @@ describe('CoherenceGate', () => {
 
   describe('channel config resolution', () => {
     it('uses explicit channel config when available', async () => {
+      const intel = makeMockIntelligence([
+        { pass: false, severity: 'block', issue: 'Issue', suggestion: 'Fix' },
+      ]);
+
       const gate = createGate({
         channels: {
           email: { failOpen: false, skipGate: true, queueOnFailure: true, queueTimeoutMs: 60000 },
         },
       });
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       const result = await gate.evaluate({
         message: 'Hello via email',
         sessionId: 'test-11',
@@ -372,8 +369,6 @@ describe('CoherenceGate', () => {
 
     it('falls back to external defaults for unknown external channels', async () => {
       const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       const result = await gate.evaluate({
         message: 'Hello via slack',
         sessionId: 'test-12',
@@ -391,10 +386,11 @@ describe('CoherenceGate', () => {
       const transcriptPath = path.join(tmpDir, 'transcript.jsonl');
       fs.writeFileSync(transcriptPath, '{"type":"message"}\n');
 
-      const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchSequence([
+      const intel = makeMockIntelligence([
+        { needsReview: true, reason: 'Has claims' },
         { pass: false, severity: 'block', issue: 'Issue', suggestion: 'Fix' },
-      ]));
+      ]);
+      const gate = createGate(undefined, intel);
 
       // First: block
       await gate.evaluate({
@@ -425,13 +421,15 @@ describe('CoherenceGate', () => {
 
   describe('information-leakage reviewer skipping', () => {
     it('skips information-leakage for primary-user', async () => {
+      const intel = makeMockIntelligence([
+        { pass: false, severity: 'block', issue: 'Issue', suggestion: 'Fix' },
+      ]);
+
       const gate = createGate({
         reviewers: {
           'information-leakage': { enabled: true, mode: 'block' },
         },
       });
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       const result = await gate.evaluate({
         message: 'Hello primary user',
         sessionId: 'test-14',
@@ -446,8 +444,6 @@ describe('CoherenceGate', () => {
   describe('review history and stats', () => {
     it('tracks review history', async () => {
       const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       await gate.evaluate({
         message: 'Hello',
         sessionId: 'test-15',
@@ -462,8 +458,6 @@ describe('CoherenceGate', () => {
 
     it('filters history by sessionId', async () => {
       const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       await gate.evaluate({
         message: 'Hello 1',
         sessionId: 'session-a',
@@ -484,8 +478,6 @@ describe('CoherenceGate', () => {
 
     it('returns reviewer stats', async () => {
       const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       await gate.evaluate({
         message: 'Hello',
         sessionId: 'test-17',
@@ -512,8 +504,6 @@ This should not be included.
 `);
 
       const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       await gate.evaluate({
         message: 'Hello',
         sessionId: 'test-18',
@@ -530,8 +520,6 @@ This should not be included.
   describe('URL extraction', () => {
     it('extracts URLs from messages', async () => {
       const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchAllPass());
-
       const result = await gate.evaluate({
         message: 'Check https://example.com and http://test.org/page for details',
         sessionId: 'test-19',
@@ -557,10 +545,11 @@ This should not be included.
 
   describe('new response resets retry counter', () => {
     it('resets retryCount on non-stopHookActive request', async () => {
-      const gate = createGate();
-      vi.stubGlobal('fetch', mockFetchSequence([
+      const intel = makeMockIntelligence([
+        { needsReview: true, reason: 'Has claims' },
         { pass: false, severity: 'block', issue: 'Issue', suggestion: 'Fix' },
-      ]));
+      ]);
+      const gate = createGate(undefined, intel);
 
       // First: block
       await gate.evaluate({

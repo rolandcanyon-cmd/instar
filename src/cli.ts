@@ -1550,6 +1550,7 @@ lifelineCmd
     try {
       const { execFileSync } = await import('node:child_process');
       execFileSync(tmuxPath, ['has-session', '-t', `=${sessionName}`], { stdio: 'ignore' });
+      // RULE 3: EXEMPT — lifecycle control (sending Ctrl-C to a tmux session we own), not state detection.
       execFileSync(tmuxPath, ['send-keys', '-t', `=${sessionName}:`, 'C-c'], { stdio: 'ignore' });
       // Wait briefly for graceful shutdown
       await new Promise(r => setTimeout(r, 3000));
@@ -2257,6 +2258,22 @@ gateCmd
   .action(async (opts) => {
     const { gateLog } = await import('./commands/gate.js');
     return gateLog(opts);
+  });
+
+// ── `instar route` — Phase 5b suggest-and-confirm composition root (CLI) ─
+
+program
+  .command('route <task...>')
+  .description('Route a task to a framework+model via Phase 5b suggest-and-confirm flow')
+  .option('-u, --user <id>', 'User id used as the cache key prefix', 'cli-user')
+  .option('--description <text>', 'Short description for the confirmation prompt header')
+  .option('--framework <name>', 'Override framework (claude-code | codex-cli)')
+  .option('--json', 'Emit JSON instead of human-readable output')
+  .option('-d, --dir <path>', 'Project directory')
+  .action(async (taskParts: string[], opts) => {
+    const { route } = await import('./commands/route.js');
+    const taskPrompt = taskParts.join(' ');
+    return route(taskPrompt, opts);
   });
 
 program.parse();

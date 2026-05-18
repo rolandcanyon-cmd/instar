@@ -259,7 +259,7 @@ export const BUILTIN_FEATURES: FeatureDefinition[] = [
     fullDescription: 'The response review pipeline evaluates agent messages before they reach users. It checks for coherence with the current topic, safety issues, and behavioral alignment. Responses that fail review are flagged or held for manual approval.',
     consentTier: 'network',
     dataImplications: [
-      { dataType: 'agent responses (for review)', destination: 'anthropic-api', retention: 'transient (API call only)', description: 'Responses are sent to the Anthropic API for evaluation by a reviewer model.' },
+      { dataType: 'agent responses (for review)', destination: 'anthropic-cli', retention: 'transient (subscription-path call only)', description: 'Responses are sent to Anthropic via the Claude CLI subscription path for evaluation by a reviewer model.' },
     ],
     reversibilityNote: 'Disable in config. Responses will be delivered directly without review.',
     discoveryTriggers: [
@@ -287,7 +287,7 @@ export const BUILTIN_FEATURES: FeatureDefinition[] = [
     fullDescription: 'The input guard analyzes incoming messages for potential prompt injection attempts — messages that try to manipulate the agent into acting outside its current topic scope. Uses lightweight LLM classification to detect and block suspicious inputs.',
     consentTier: 'network',
     dataImplications: [
-      { dataType: 'incoming message classifications', destination: 'anthropic-api', retention: 'transient (API call only)', description: 'Messages are sent to the Anthropic API for injection classification.' },
+      { dataType: 'incoming message classifications', destination: 'anthropic-cli', retention: 'transient (subscription-path call only)', description: 'Messages are sent to Anthropic via the Claude CLI subscription path for injection classification.' },
     ],
     reversibilityNote: 'Disable in config. Messages will be delivered without injection analysis.',
     discoveryTriggers: [

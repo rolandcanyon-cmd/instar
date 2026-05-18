@@ -23,7 +23,19 @@ import { InformationLeakageReviewer } from '../../src/core/reviewers/information
 // Helpers
 // ---------------------------------------------------------------------------
 
-const FAKE_API_KEY = 'test-api-key-000';
+/**
+ * Build a fake IntelligenceProvider whose `evaluate` returns the given
+ * text(s). Reviewers route their LLM calls through this provider as of
+ * the Rule 2 path-constraint lockdown (the direct-Anthropic-API
+ * fallback that previously activated when intelligence was absent has
+ * been removed — see specs/provider-portability/04-anthropic-path-constraints.md).
+ * Each `evaluate` call returns the next text in sequence; the final
+ * response is reused if more calls are made than responses provided.
+ */
+function makeMockIntelligence() {
+  return { evaluate: vi.fn<[string, unknown?], Promise<string>>() };
+}
+type MockIntelligence = ReturnType<typeof makeMockIntelligence>;
 
 function makeContext(overrides?: Partial<ReviewContext>): ReviewContext {
   return {
@@ -64,8 +76,8 @@ function mockApiError(status: number, body: string) {
 class TestReviewer extends CoherenceReviewer {
   lastPrompt = '';
 
-  constructor(apiKey: string, options?: ReviewerOptions) {
-    super('test-reviewer', apiKey, options);
+  constructor(options?: ReviewerOptions) {
+    super('test-reviewer', options);
   }
 
   protected buildPrompt(context: ReviewContext): string {
@@ -100,10 +112,12 @@ class TestReviewer extends CoherenceReviewer {
 
 describe('CoherenceReviewer base class', () => {
   let reviewer: TestReviewer;
+  let mockIntel: MockIntelligence;
 
   beforeEach(() => {
-    reviewer = new TestReviewer(FAKE_API_KEY);
     vi.restoreAllMocks();
+    mockIntel = makeMockIntelligence();
+    reviewer = new TestReviewer({ intelligence: mockIntel as unknown as import('../../src/core/types.js').IntelligenceProvider });
   });
 
   afterEach(() => {
@@ -206,8 +220,9 @@ describe('CoherenceReviewer base class', () => {
 
   describe('review', () => {
     it('returns parsed result on successful API call', async () => {
-      const apiResponse = '{"pass": false, "severity": "block", "issue": "technical leak", "suggestion": "simplify"}';
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockApiResponse(apiResponse));
+      mockIntel.evaluate.mockResolvedValueOnce(
+        '{"pass": false, "severity": "block", "issue": "technical leak", "suggestion": "simplify"}',
+      );
 
       const result = await reviewer.review(makeContext());
 
@@ -220,8 +235,9 @@ describe('CoherenceReviewer base class', () => {
     });
 
     it('returns pass on successful passing review', async () => {
-      const apiResponse = '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}';
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockApiResponse(apiResponse));
+      mockIntel.evaluate.mockResolvedValueOnce(
+        '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}',
+      );
 
       const result = await reviewer.review(makeContext());
 
@@ -229,8 +245,8 @@ describe('CoherenceReviewer base class', () => {
       expect(reviewer.metrics.passCount).toBe(1);
     });
 
-    it('fails open on API error', async () => {
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockApiError(500, 'Internal Server Error'));
+    it('fails open on intelligence error', async () => {
+      mockIntel.evaluate.mockRejectedValueOnce(new Error('Provider error: subscription expired'));
 
       const result = await reviewer.review(makeContext());
 
@@ -240,7 +256,7 @@ describe('CoherenceReviewer base class', () => {
     });
 
     it('fails open on network error', async () => {
-      vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('Network failure'));
+      mockIntel.evaluate.mockRejectedValueOnce(new Error('Network failure'));
 
       const result = await reviewer.review(makeContext());
 
@@ -249,10 +265,14 @@ describe('CoherenceReviewer base class', () => {
     });
 
     it('fails open on timeout', async () => {
-      const slowReviewer = new TestReviewer(FAKE_API_KEY, { timeoutMs: 50 });
-      vi.spyOn(globalThis, 'fetch').mockImplementationOnce(
-        () => new Promise((resolve) => setTimeout(() => resolve(mockApiResponse('{}')), 5000)),
+      const slowIntel = makeMockIntelligence();
+      slowIntel.evaluate.mockImplementationOnce(
+        () => new Promise<string>(() => { /* never resolves */ }),
       );
+      const slowReviewer = new TestReviewer({
+        timeoutMs: 50,
+        intelligence: slowIntel as unknown as import('../../src/core/types.js').IntelligenceProvider,
+      });
 
       const result = await slowReviewer.review(makeContext());
 
@@ -261,12 +281,9 @@ describe('CoherenceReviewer base class', () => {
     });
 
     it('tracks cumulative health metrics', async () => {
-      const passing = '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}';
-      const failing = '{"pass": false, "severity": "block", "issue": "x", "suggestion": "y"}';
-
-      vi.spyOn(globalThis, 'fetch')
-        .mockResolvedValueOnce(mockApiResponse(passing))
-        .mockResolvedValueOnce(mockApiResponse(failing))
+      mockIntel.evaluate
+        .mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}')
+        .mockResolvedValueOnce('{"pass": false, "severity": "block", "issue": "x", "suggestion": "y"}')
         .mockRejectedValueOnce(new Error('fail'));
 
       await reviewer.review(makeContext());
@@ -279,32 +296,31 @@ describe('CoherenceReviewer base class', () => {
       expect(reviewer.metrics.totalLatencyMs).toBeGreaterThanOrEqual(0);
     });
 
-    it('sends correct headers to Anthropic API', async () => {
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-        mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
+    it('routes through IntelligenceProvider rather than direct Anthropic API', async () => {
+      mockIntel.evaluate.mockResolvedValueOnce(
+        '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}',
       );
+      // If anything ever attempts a direct fetch to Anthropic, that's a
+      // Rule 2 violation — fail the test loudly.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
 
       await reviewer.review(makeContext());
 
-      const [url, init] = fetchSpy.mock.calls[0];
-      expect(url).toBe('https://api.anthropic.com/v1/messages');
-      const headers = init?.headers as Record<string, string>;
-      expect(headers['x-api-key']).toBe(FAKE_API_KEY);
-      expect(headers['anthropic-version']).toBe('2023-06-01');
-      expect(headers['Content-Type']).toBe('application/json');
+      expect(mockIntel.evaluate).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).not.toHaveBeenCalled();
     });
 
-    it('uses haiku model by default', async () => {
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-        mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
+    it('asks the provider for a fast-tier model with haiku-equivalent settings', async () => {
+      mockIntel.evaluate.mockResolvedValueOnce(
+        '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}',
       );
 
       await reviewer.review(makeContext());
 
-      const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-      expect(body.model).toBe('claude-haiku-4-5');
-      expect(body.max_tokens).toBe(200);
-      expect(body.temperature).toBe(0);
+      const [, options] = mockIntel.evaluate.mock.calls[0]!;
+      expect((options as { model?: string }).model).toBe('fast');
+      expect((options as { maxTokens?: number }).maxTokens).toBe(200);
+      expect((options as { temperature?: number }).temperature).toBe(0);
     });
   });
 });
@@ -318,9 +334,10 @@ describe('GateReviewer', () => {
 
   it('parses gate-specific response format', async () => {
     const gateResponse = '{"needsReview": true, "reason": "contains URLs"}';
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(mockApiResponse(gateResponse));
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce(gateResponse);
 
-    const reviewer = new GateReviewer(FAKE_API_KEY);
+    const reviewer = new GateReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.reviewAsGate(makeContext());
 
     expect(result.needsReview).toBe(true);
@@ -328,20 +345,20 @@ describe('GateReviewer', () => {
   });
 
   it('maps needsReview=false to pass=true', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"needsReview": false, "reason": "simple ack"}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"needsReview": false, "reason": "simple ack"}');
 
-    const reviewer = new GateReviewer(FAKE_API_KEY);
+    const reviewer = new GateReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(makeContext());
 
     expect(result.pass).toBe(true);
   });
 
   it('defaults to needing review on error (conservative fail-open)', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('API down'));
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockRejectedValueOnce(new Error('Provider down'));
 
-    const reviewer = new GateReviewer(FAKE_API_KEY);
+    const reviewer = new GateReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(makeContext());
 
     // Gate fails conservative: assume review IS needed
@@ -350,15 +367,13 @@ describe('GateReviewer', () => {
   });
 
   it('prompt includes channel and external-facing context', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"needsReview": false, "reason": "ok"}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"needsReview": false, "reason": "ok"}');
 
-    const reviewer = new GateReviewer(FAKE_API_KEY);
+    const reviewer = new GateReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext({ channel: 'telegram', isExternalFacing: true }));
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('telegram');
     expect(prompt).toContain('UNTRUSTED CONTENT');
     expect(prompt).toContain('ALWAYS NEEDS REVIEW');
@@ -373,15 +388,13 @@ describe('ConversationalToneReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('prompt includes channel and technical leak keywords', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ConversationalToneReviewer(FAKE_API_KEY);
+    const reviewer = new ConversationalToneReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext({ channel: 'telegram' }));
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('Config file references');
     expect(prompt).toContain('CLI commands');
     expect(prompt).toContain('telegram');
@@ -389,19 +402,17 @@ describe('ConversationalToneReviewer', () => {
   });
 
   it('includes relationship context when provided', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ConversationalToneReviewer(FAKE_API_KEY);
+    const reviewer = new ConversationalToneReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(
       makeContext({
         relationshipContext: { communicationStyle: 'casual', formality: 'low' },
       }),
     );
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('casual');
     expect(prompt).toContain('low');
   });
@@ -415,41 +426,35 @@ describe('ClaimProvenanceReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('defaults to sonnet model', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ClaimProvenanceReviewer(FAKE_API_KEY);
+    const reviewer = new ClaimProvenanceReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext());
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.model).toBe('claude-sonnet-4-6');
+    expect((intel.evaluate.mock.calls[0]![1] as { model?: string }).model).toBe('balanced');
   });
 
   it('prompt includes tool output context when provided', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ClaimProvenanceReviewer(FAKE_API_KEY);
+    const reviewer = new ClaimProvenanceReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext({ toolOutputContext: 'curl returned 200 OK' }));
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('curl returned 200 OK');
     expect(prompt).toContain('factual accuracy');
   });
 
   it('allows model override via options', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ClaimProvenanceReviewer(FAKE_API_KEY, { model: 'haiku' });
+    const reviewer = new ClaimProvenanceReviewer({ model: 'haiku', intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext());
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.model).toBe('claude-haiku-4-5');
+    expect((intel.evaluate.mock.calls[0]![1] as { model?: string }).model).toBe('fast');
   });
 });
 
@@ -461,15 +466,13 @@ describe('SettlingDetectionReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('prompt includes thoroughness keywords', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new SettlingDetectionReviewer(FAKE_API_KEY);
+    const reviewer = new SettlingDetectionReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext());
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('thoroughness reviewer');
     expect(prompt).toContain('investigation theater');
   });
@@ -483,29 +486,25 @@ describe('ContextCompletenessReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('prompt includes completeness keywords', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ContextCompletenessReviewer(FAKE_API_KEY);
+    const reviewer = new ContextCompletenessReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext());
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('completeness reviewer');
     expect(prompt).toContain('trade-offs');
   });
 
   it('includes relationship themes when provided', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ContextCompletenessReviewer(FAKE_API_KEY);
+    const reviewer = new ContextCompletenessReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext({ relationshipContext: { themes: ['security', 'performance'] } }));
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('security');
     expect(prompt).toContain('performance');
   });
@@ -519,15 +518,13 @@ describe('CapabilityAccuracyReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('prompt includes capability accuracy keywords', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new CapabilityAccuracyReviewer(FAKE_API_KEY);
+    const reviewer = new CapabilityAccuracyReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext());
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('capability accuracy reviewer');
     expect(prompt).toContain("I can't");
     expect(prompt).toContain("you'll need to");
@@ -542,25 +539,22 @@ describe('UrlValidityReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('prompt includes URL validity keywords', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new UrlValidityReviewer(FAKE_API_KEY);
+    const reviewer = new UrlValidityReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext({ message: 'Check https://example.com/dashboard' }));
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('URL validity reviewer');
     expect(prompt).toContain('https://example.com/dashboard');
   });
 
   it('uses pre-extracted URLs when provided', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new UrlValidityReviewer(FAKE_API_KEY);
+    const reviewer = new UrlValidityReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(
       makeContext({
         message: 'Visit the dashboard',
@@ -568,8 +562,7 @@ describe('UrlValidityReviewer', () => {
       }),
     );
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('https://my-app.vercel.app');
   });
 });
@@ -600,23 +593,20 @@ describe('ValueAlignmentReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('defaults to sonnet model', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ValueAlignmentReviewer(FAKE_API_KEY);
+    const reviewer = new ValueAlignmentReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(makeContext());
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    expect(body.model).toBe('claude-sonnet-4-6');
+    expect((intel.evaluate.mock.calls[0]![1] as { model?: string }).model).toBe('balanced');
   });
 
   it('prompt includes all three value tiers with separate boundaries', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new ValueAlignmentReviewer(FAKE_API_KEY);
+    const reviewer = new ValueAlignmentReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     await reviewer.review(
       makeContext({
         agentValues: 'Be thorough, never settle.',
@@ -625,8 +615,7 @@ describe('ValueAlignmentReviewer', () => {
       }),
     );
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('Be thorough, never settle.');
     expect(prompt).toContain('Prefers casual tone.');
     expect(prompt).toContain('No unauthorized deployments.');
@@ -645,44 +634,41 @@ describe('InformationLeakageReviewer', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('skips review for primary-user (always passes)', async () => {
-    // Should NOT call fetch at all
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    // Should NOT route through the provider at all
+    const intel = makeMockIntelligence();
 
-    const reviewer = new InformationLeakageReviewer(FAKE_API_KEY);
+    const reviewer = new InformationLeakageReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(makeContext({ recipientType: 'primary-user' }));
 
     expect(result.pass).toBe(true);
     expect(result.latencyMs).toBe(0);
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(intel.evaluate).not.toHaveBeenCalled();
   });
 
   it('runs review for agent recipients', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": false, "severity": "block", "issue": "leaks user name", "suggestion": "remove PII"}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": false, "severity": "block", "issue": "leaks user name", "suggestion": "remove PII"}');
 
-    const reviewer = new InformationLeakageReviewer(FAKE_API_KEY);
+    const reviewer = new InformationLeakageReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(
       makeContext({ recipientType: 'agent', trustLevel: 'verified' }),
     );
 
     expect(result.pass).toBe(false);
     expect(result.severity).toBe('block');
-    expect(fetchSpy).toHaveBeenCalled();
+    expect(intel.evaluate).toHaveBeenCalled();
 
-    const body = JSON.parse(fetchSpy.mock.calls[0][1]?.body as string);
-    const prompt = body.messages[0].content as string;
+    const prompt = intel.evaluate.mock.calls[0]![0] as string;
     expect(prompt).toContain('agent');
     expect(prompt).toContain('verified');
     expect(prompt).toContain('information leakage');
   });
 
   it('runs review for secondary-user recipients', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new InformationLeakageReviewer(FAKE_API_KEY);
+    const reviewer = new InformationLeakageReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(
       makeContext({ recipientType: 'secondary-user', trustLevel: 'trusted' }),
     );
@@ -691,11 +677,10 @@ describe('InformationLeakageReviewer', () => {
   });
 
   it('runs review for external-contact recipients', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new InformationLeakageReviewer(FAKE_API_KEY);
+    const reviewer = new InformationLeakageReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(
       makeContext({ recipientType: 'external-contact', trustLevel: 'untrusted' }),
     );
@@ -713,43 +698,41 @@ describe('CoherenceReviewer with IntelligenceProvider', () => {
     vi.restoreAllMocks();
   });
 
-  it('routes LLM calls through IntelligenceProvider when provided', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch');
-    const evaluate = vi.fn(async () =>
-      '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}',
-    );
-    const intelligence = { evaluate };
+  it('routes LLM calls through IntelligenceProvider, never directly to Anthropic API', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValueOnce('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const reviewer = new TestReviewer(FAKE_API_KEY, { intelligence });
+    const reviewer = new TestReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(makeContext());
 
     expect(result.pass).toBe(true);
-    expect(evaluate).toHaveBeenCalledTimes(1);
+    expect(intel.evaluate).toHaveBeenCalledTimes(1);
     expect(fetchSpy).not.toHaveBeenCalled();
 
-    const opts = evaluate.mock.calls[0]?.[1];
-    expect(opts).toMatchObject({ model: 'fast', temperature: 0 });
+    expect((intel.evaluate.mock.calls[0]![1] as { model?: string; temperature?: number }))
+      .toMatchObject({ model: 'fast', temperature: 0 });
   });
 
-  it('falls back to direct Anthropic API when intelligence is absent', async () => {
-    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
-      mockApiResponse('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}'),
-    );
-
-    const reviewer = new TestReviewer(FAKE_API_KEY);
+  it('throws on review() when no IntelligenceProvider is wired (Rule 2: no direct-API fallback)', async () => {
+    // The direct-Anthropic-API fallback was removed during the Rule 2
+    // path-constraint lockdown — see specs/provider-portability/04-anthropic-path-constraints.md.
+    // A reviewer constructed without intelligence must fail-open (not
+    // attempt fetch) and the error is captured in metrics.
+    const reviewer = new TestReviewer(); // no intelligence
     const result = await reviewer.review(makeContext());
 
+    // The thrown error is swallowed by the fail-open catch — the
+    // observable contract is errorCount increments and pass: true.
     expect(result.pass).toBe(true);
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(reviewer.metrics.errorCount).toBe(1);
   });
 
   it('fails open when IntelligenceProvider throws', async () => {
-    const evaluate = vi.fn(async () => {
-      throw new Error('provider down');
-    });
-    const intelligence = { evaluate };
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockRejectedValueOnce(new Error('provider down'));
 
-    const reviewer = new TestReviewer(FAKE_API_KEY, { intelligence });
+    const reviewer = new TestReviewer({ intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider });
     const result = await reviewer.review(makeContext());
 
     expect(result.pass).toBe(true);
@@ -757,21 +740,20 @@ describe('CoherenceReviewer with IntelligenceProvider', () => {
   });
 
   it('maps haiku → fast, sonnet → balanced, opus → capable model tier', async () => {
-    const evaluate = vi.fn(async () =>
-      '{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}',
-    );
-    const intelligence = { evaluate };
+    const intel = makeMockIntelligence();
+    intel.evaluate.mockResolvedValue('{"pass": true, "severity": "warn", "issue": "", "suggestion": ""}');
 
-    const haikuReviewer = new TestReviewer(FAKE_API_KEY, { intelligence, model: 'haiku' });
-    const sonnetReviewer = new TestReviewer(FAKE_API_KEY, { intelligence, model: 'sonnet' });
-    const opusReviewer = new TestReviewer(FAKE_API_KEY, { intelligence, model: 'opus' });
+    const intelArg = { intelligence: intel as unknown as import('../../src/core/types.js').IntelligenceProvider };
+    const haikuReviewer = new TestReviewer({ ...intelArg, model: 'haiku' });
+    const sonnetReviewer = new TestReviewer({ ...intelArg, model: 'sonnet' });
+    const opusReviewer = new TestReviewer({ ...intelArg, model: 'opus' });
 
     await haikuReviewer.review(makeContext());
     await sonnetReviewer.review(makeContext());
     await opusReviewer.review(makeContext());
 
-    expect(evaluate.mock.calls[0]?.[1]).toMatchObject({ model: 'fast' });
-    expect(evaluate.mock.calls[1]?.[1]).toMatchObject({ model: 'balanced' });
-    expect(evaluate.mock.calls[2]?.[1]).toMatchObject({ model: 'capable' });
+    expect(intel.evaluate.mock.calls[0]?.[1]).toMatchObject({ model: 'fast' });
+    expect(intel.evaluate.mock.calls[1]?.[1]).toMatchObject({ model: 'balanced' });
+    expect(intel.evaluate.mock.calls[2]?.[1]).toMatchObject({ model: 'capable' });
   });
 });

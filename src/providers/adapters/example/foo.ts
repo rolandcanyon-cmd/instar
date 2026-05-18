@@ -1,0 +1,1 @@
+const _useCapture = "capture-pane";

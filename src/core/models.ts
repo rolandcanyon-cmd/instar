@@ -26,7 +26,7 @@
 
 /**
  * Canonical mapping of abstract tiers to concrete Anthropic model IDs.
- * These are used by AnthropicIntelligenceProvider and StallTriageNurse.
+ * Used by ClaudeCliIntelligenceProvider, StallTriageNurse, and the new provider substrate.
  */
 export const ANTHROPIC_MODELS = Object.freeze({
   /** Most capable model — deep reasoning, complex tasks */

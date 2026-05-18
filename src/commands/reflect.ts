@@ -16,7 +16,6 @@ import { ExecutionJournal } from '../core/ExecutionJournal.js';
 import { JobReflector } from '../core/JobReflector.js';
 import { PatternAnalyzer } from '../core/PatternAnalyzer.js';
 import { ReflectionConsolidator } from '../core/ReflectionConsolidator.js';
-import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
 import type { IntelligenceProvider } from '../core/types.js';
 import type { DetectedPattern, PatternReport } from '../core/PatternAnalyzer.js';
@@ -342,16 +341,24 @@ interface ReflectRunOptions {
 
 /**
  * Resolve an IntelligenceProvider from the environment.
- * Prefers Anthropic API (faster) → Claude CLI fallback.
+ * Subscription path only — Rule 2 forbids direct Anthropic API.
+ *
+ * Honors INSTAR_FRAMEWORK so reflection jobs run through Codex when
+ * the operator selected codex-cli. Falls back to the configured Claude
+ * binary path when no framework override is set, preserving v0.x
+ * behavior.
  */
 function resolveIntelligence(claudePath?: string): IntelligenceProvider | null {
-  // Try Anthropic API first (explicit opt-in via env)
-  const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-  if (apiProvider) return apiProvider;
-
-  // Fall back to Claude CLI
+  // Lazy require — keeps the unit-test surface focused.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { buildIntelligenceProvider, frameworkFromEnv } = require('../core/intelligenceProviderFactory.js');
+  const framework = frameworkFromEnv() ?? 'claude-code';
+  const built = buildIntelligenceProvider({
+    framework,
+    binaryPath: framework === 'claude-code' ? claudePath : undefined,
+  });
+  if (built) return built;
   if (claudePath) return new ClaudeCliIntelligenceProvider(claudePath);
-
   return null;
 }
 
@@ -363,7 +370,7 @@ export async function runReflection(slug: string | undefined, opts: ReflectRunOp
   if (!intelligence) {
     console.log();
     console.log(pc.red('No LLM provider available for reflection.'));
-    console.log(pc.dim('  Set ANTHROPIC_API_KEY or ensure Claude CLI is installed.'));
+    console.log(pc.dim('  Ensure the Claude CLI is installed and the path is set in config.sessions.claudePath.'));
     return;
   }
 

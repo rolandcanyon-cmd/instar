@@ -27,8 +27,6 @@ import { AgentServer } from '../server/AgentServer.js';
 import { TelegramAdapter, TOPIC_STYLE, selectTopicEmoji } from '../messaging/TelegramAdapter.js';
 import { RelationshipManager } from '../core/RelationshipManager.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
-import { AnthropicIntelligenceProvider } from '../core/AnthropicIntelligenceProvider.js';
-import { selectIntelligenceProvider } from '../core/selectIntelligenceProvider.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
 import { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
 import { DispatchManager } from '../core/DispatchManager.js';
@@ -312,6 +310,27 @@ let _fixDeps: FixCommandDeps | null = null;
 // Module-level reference for session resume mapping.
 // Set once in startServer() and used by spawnSessionForTopic/respawnSessionForTopic.
 let _topicResumeMap: import('../core/TopicResumeMap.js').TopicResumeMap | null = null;
+/** Per-topic framework override (claude-code | codex-cli). Populated from
+ *  `config.topicFrameworks` at server boot. Boot-immutable; runtime
+ *  mutations go through `_topicFrameworksStore` instead so they persist
+ *  across restarts and don't race with operator-edited config.json. */
+let _topicFrameworks: Record<string, 'claude-code' | 'codex-cli'> = {};
+/** Runtime-mutable, atomically-persisted per-topic framework store.
+ *  Initialized in startServer(); consulted by resolveTopicFramework on every spawn. */
+let _topicFrameworksStore: import('../core/TopicFrameworksStore.js').TopicFrameworksStore | null = null;
+/** Default framework for sessions when no per-topic override is set. */
+let _defaultFramework: 'claude-code' | 'codex-cli' = 'claude-code';
+
+function resolveTopicFramework(topicId: number | undefined): 'claude-code' | 'codex-cli' {
+  if (topicId !== undefined && _topicFrameworksStore) {
+    const stored = _topicFrameworksStore.get(topicId);
+    if (stored === 'claude-code' || stored === 'codex-cli') return stored;
+  }
+  if (topicId !== undefined && _topicFrameworks[String(topicId)]) {
+    return _topicFrameworks[String(topicId)]!;
+  }
+  return _defaultFramework;
+}
 let _projectDir: string = process.cwd();
 let _sharedIntelligence: import('../core/types.js').IntelligenceProvider | null = null;
 let _selfKnowledgeTree: SelfKnowledgeTree | null = null;
@@ -532,7 +551,25 @@ async function spawnSessionForTopic(
     console.log(`[spawnSessionForTopic] Found resume UUID for topic ${topicId}: ${resumeSessionId} (source: TopicResumeMap — trusted)`);
   }
 
-  const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage, sessionName, { telegramTopicId: topicId, resumeSessionId });
+  const framework = resolveTopicFramework(topicId);
+
+  // Ensure the framework's identity shadow file exists at the project
+  // root before spawn — Codex reads AGENTS.md at session start; Claude
+  // reads CLAUDE.md. Legacy installs may have CLAUDE.md authored
+  // directly without an AGENT.md, so a fresh Codex spawn would miss
+  // the relay-script instructions and the agent would never know how
+  // to ship its output back to Telegram. ensureFrameworkIdentityFile
+  // bootstraps AGENT.md from any existing shadow and renders the
+  // framework's shadow if missing. Idempotent — no-op when the
+  // shadow already exists.
+  try {
+    const { ensureFrameworkIdentityFile } = await import('../core/IdentityRenderer.js');
+    ensureFrameworkIdentityFile(_projectDir, framework, { stateDir: path.join(_projectDir, '.instar') });
+  } catch (err) {
+    console.warn(`[spawnSessionForTopic] ensureFrameworkIdentityFile failed (non-fatal):`, err instanceof Error ? err.message : err);
+  }
+
+  const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage, sessionName, { telegramTopicId: topicId, resumeSessionId, framework });
 
   // Clear the resume entry after successful spawn to prevent stale reuse
   if (resumeSessionId) {
@@ -592,6 +629,21 @@ async function respawnSessionForTopic(
       console.error(`[telegram→session] Failed to save resume UUID:`, err);
     }
   }
+
+  // Kill the old tmux session before spawning. spawnInteractiveSession
+  // no-ops when a tmux session with the same name already exists (it
+  // just injects the message and returns), so without this kill a
+  // framework swap via /route would silently keep the old session
+  // alive and the new framework binding never takes effect.
+  // Idempotent: if the session is already dead the kill is a no-op.
+  try {
+    execFileSync(detectTmuxPath()!, ['kill-session', '-t', `=${targetSession}`], { stdio: 'ignore' });
+  } catch { /* session may already be dead — that's fine */ }
+  // Invalidate the framework cache for this tmux name. The kill+respawn
+  // may reuse the same name under a different framework (e.g., /route
+  // claude-code → codex-cli), and a stale cache entry would make
+  // injection use the wrong submit semantics.
+  sessionManager.clearSessionFrameworkCache(targetSession);
 
   let storedName = telegram.getTopicName(topicId);
   // If the name is unknown, try to resolve it from Telegram before falling back
@@ -872,6 +924,56 @@ function wireTelegramCallbacks(
       await telegram.sendToTopic(replyTopicId, 'Login didn\'t complete successfully. Try again, or if this keeps happening, the authentication service may be down.');
     }
   };
+
+  // /route — get or set the framework for this topic. Persists via
+  // TopicFrameworksStore (atomic write) and triggers a respawn so the
+  // new framework binding takes effect on the next session for this topic.
+  telegram.onRouteCommand = async (topicId: number, framework: string | null): Promise<{ ok: boolean; message: string }> => {
+    if (framework === null) {
+      // Status query — read current resolved framework
+      const current = resolveTopicFramework(topicId);
+      return { ok: true, message: `This topic is using "${current}". Run /route claude-code or /route codex-cli to switch.` };
+    }
+
+    const valid = ['claude-code', 'codex-cli'];
+    if (!valid.includes(framework)) {
+      return { ok: false, message: `Unknown framework "${framework}". Supported: ${valid.join(', ')}.` };
+    }
+
+    if (!_topicFrameworksStore) {
+      return { ok: false, message: 'Routing store not initialized — server boot was incomplete. Restart the server.' };
+    }
+
+    const prev = resolveTopicFramework(topicId);
+    if (prev === framework) {
+      return { ok: true, message: `This topic is already on "${framework}". Nothing to change.` };
+    }
+
+    _topicFrameworksStore.set(topicId, framework as 'claude-code' | 'codex-cli');
+
+    // Drop any stored resume UUID — it was created under the previous
+    // framework's session-id scheme and is meaningless to the new one
+    // (Claude UUIDs ≠ Codex session ids). Without this, the new
+    // session's --resume flag gets a wrong-shape id, which at best
+    // emits a warning and at worst dies during startup.
+    _topicResumeMap?.remove(topicId);
+
+    // Trigger a respawn so the new framework takes effect immediately.
+    // Re-use the existing respawn path which builds context from TopicMemory.
+    const existingSession = telegram.getSessionForTopic(topicId);
+    if (existingSession) {
+      try {
+        await respawnSessionForTopic(
+          sessionManager, telegram, existingSession, topicId, undefined,
+          topicMemory, undefined, undefined, { silent: true },
+        );
+      } catch (err) {
+        return { ok: false, message: `Persisted "${framework}", but respawn failed: ${err instanceof Error ? err.message : String(err)}. The new framework will take effect on the next session for this topic.` };
+      }
+    }
+
+    return { ok: true, message: `Routed this topic to "${framework}". ${existingSession ? 'Session respawned.' : 'Will take effect when a session starts for this topic.'}` };
+  };
 }
 
 /**
@@ -928,7 +1030,15 @@ function wireTelegramRouting(
       ? userManager.resolveFromTelegramUserId(telegramUserId)
       : null;
 
-    // Most commands are handled inside TelegramAdapter.handleCommand().
+    // In lifeline-owned polling mode (deep-signal, echo) TelegramAdapter's
+    // own poll loop never runs, so its handleCommand() never fires on forwarded
+    // messages. Route slash-commands through it here so /route, /sessions, /claim,
+    // /flush, etc. behave identically whether the server polls or lifeline does.
+    if (text.startsWith('/')) {
+      const handled = await telegram.handleCommand(text, topicId, telegramUserId);
+      if (handled) return;
+    }
+
     // /new — create a new topic thread. Does NOT spawn a session immediately.
     // Sessions are spawned on-demand when the user sends their first real message
     // in the new topic (via the auto-spawn path below). This avoids premature
@@ -1967,6 +2077,54 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.yellow(`  Registry heartbeat failed to start (non-critical): ${err instanceof Error ? err.message : err}`));
     }
 
+    // Phase 5 — install the cost-aware routing policy on the global
+    // providers registry. The policy itself decides nothing today because
+    // no adapters are registered against the providers registry yet
+    // (adapter-registration at startup is tracked as a separate cycle —
+    // depends on per-machine credential discovery), but installing the
+    // policy now ensures any future call to `registry.resolve()` flows
+    // through the chain (CostAware → FirstAvailable; PinHonoringPolicy
+    // pending — recommended by the spec but not yet built) instead of
+    // defaulting to first-by-registration.
+    //
+    // Idempotent: only installs when no policy has been set yet on the
+    // module-singleton registry. Re-entering `startServer` in the same
+    // process (test harnesses, in-proc respawn) won't clobber a policy
+    // a caller (test or production wiring) installed first.
+    try {
+      const { registry } = await import('../providers/registry.js');
+      // Read-only probe — `getRoutingPolicy` isn't on the public surface,
+      // so we test by attempting a no-op resolve and seeing whether the
+      // chain fires. Cheaper proxy: a private convention — set a marker
+      // on the registry the first time we install. Use a Symbol so we
+      // don't pollute the public interface.
+      const ROUTING_POLICY_INSTALLED = Symbol.for('instar.serverBoot.routingPolicyInstalled');
+      const tagged = registry as unknown as Record<symbol, boolean>;
+      if (tagged[ROUTING_POLICY_INSTALLED]) {
+        console.log(pc.dim('  Routing policy already installed in this process — skipping re-install'));
+      } else {
+        const { ChainPolicy, FirstAvailablePolicy } = await import('../providers/routing.js');
+        const { CostAwareRoutingPolicy } = await import('../providers/costAwareRouting.js');
+        registry.setRoutingPolicy(new ChainPolicy([
+          new CostAwareRoutingPolicy({
+            // Tier 3.C will plumb a real UsageMeterProvider here. Until
+            // then, `null` means "state unknown" → policy falls to
+            // subscription floor (conservative).
+            readSdkCredit: async () => null,
+            sdkCreditAdapterId: 'anthropic-headless' as never,
+            subscriptionAdapterId: 'anthropic-interactive-pool' as never,
+          }),
+          new FirstAvailablePolicy(),
+        ]));
+        tagged[ROUTING_POLICY_INSTALLED] = true;
+        console.log(pc.green('  Routing policy installed: ChainPolicy[CostAware, FirstAvailable]'));
+      }
+    } catch (err) {
+      // Policy install is non-critical — sessions still resolve adapters
+      // via the registry's first-match-by-registration fallback.
+      console.log(pc.yellow(`  Routing policy install failed (non-critical): ${err instanceof Error ? err.message : err}`));
+    }
+
     // Warn if no auth token configured — server allows unauthenticated access
     if (!config.authToken) {
       console.log(pc.yellow(pc.bold('  ⚠ WARNING: No auth token configured — all API endpoints are unauthenticated!')));
@@ -2049,41 +2207,68 @@ export async function startServer(options: StartOptions): Promise<void> {
     _projectDir = config.sessions.projectDir;
 
     // Shared intelligence provider — lightweight LLM for internal classification tasks.
-    // Subscription-by-default: API mode requires BOTH `intelligenceProvider: "anthropic-api"`
-    // AND `intelligenceProviderConfirmed: true`. The selection logic lives in a separate
-    // pure function so the safety rules are unit-testable.
-    const apiOpts = config as unknown as {
-      intelligenceProvider?: string;
-      intelligenceProviderConfirmed?: boolean;
-    };
-    const selection = selectIntelligenceProvider({
-      intelligenceProvider: apiOpts.intelligenceProvider,
-      intelligenceProviderConfirmed: apiOpts.intelligenceProviderConfirmed,
-      anthropicApiKey: process.env['ANTHROPIC_API_KEY'],
-      claudePath: config.sessions.claudePath,
-      buildClaude: (claudePath) => new ClaudeCliIntelligenceProvider(claudePath),
-      buildAnthropic: (apiKey) => new AnthropicIntelligenceProvider(apiKey),
-    });
-    const sharedIntelligence: IntelligenceProvider | undefined = selection.provider ?? undefined;
-    for (const w of selection.warnings) console.log(pc.yellow(`  ${w}`));
-    if (selection.apiModeActive) {
-      console.log(pc.yellow('  ┌─────────────────────────────────────────────────────────────────────┐'));
-      console.log(pc.yellow('  │ BILLING: Anthropic API mode is ACTIVE — per-call charges apply      │'));
-      console.log(pc.yellow('  │ To switch back to subscription, unset intelligenceProvider in config│'));
-      console.log(pc.yellow('  └─────────────────────────────────────────────────────────────────────┘'));
+    // Subscription path only: routes through the Claude CLI (`claude -p`), which bills against
+    // the Agent SDK credit pot and falls back to the Max subscription. Components that need
+    // LLM intelligence (Sentinel, TelegramAdapter, etc.) share this single provider instance.
+    //
+    // Direct calls to the Anthropic Messages API are forbidden per Rule 2 of the path
+    // constraints (specs/provider-portability/04-anthropic-path-constraints.md). The old
+    // `intelligenceProvider: "anthropic-api"` config field is no longer honored; if a stale
+    // agent config has it set (with or without the `intelligenceProviderConfirmed: true`
+    // opt-in flag that older versions accepted), we warn loudly and proceed with the
+    // subscription path.
+    let sharedIntelligence: IntelligenceProvider | undefined;
+    const staleApiProvider =
+      (config as unknown as { intelligenceProvider?: string }).intelligenceProvider === 'anthropic-api';
+    let intelligenceSource = 'none';
+    let resolvedFramework: import('../core/intelligenceProviderFactory.js').IntelligenceFramework = 'claude-code';
+
+    if (staleApiProvider) {
+      console.log(pc.yellow(
+        '  intelligenceProvider: "anthropic-api" is no longer supported — using Claude CLI subscription instead.\n'
+        + '  Remove the field from config.json. See specs/provider-portability/04-anthropic-path-constraints.md.'
+      ));
     }
-    const intelligenceSourceLabel: Record<typeof selection.source, string> = {
-      'anthropic-api-confirmed': 'Anthropic API (explicit opt-in, confirmed)',
-      'claude-cli': 'Claude CLI subscription',
-      'none': 'none',
-    };
-    const intelligenceSource = intelligenceSourceLabel[selection.source];
+
+    // Provider-portability v1.0.0: pick the IntelligenceProvider that
+    // matches the configured framework. Defaults to claude-code for
+    // backwards-compat; INSTAR_FRAMEWORK=codex-cli routes through Codex.
+    try {
+      const { buildIntelligenceProvider, frameworkFromEnv } = await import('../core/intelligenceProviderFactory.js');
+      const framework = frameworkFromEnv() ?? 'claude-code';
+      resolvedFramework = framework;
+      _defaultFramework = framework as 'claude-code' | 'codex-cli';
+      _topicFrameworks = (config as { topicFrameworks?: Record<string, 'claude-code' | 'codex-cli'> }).topicFrameworks ?? {};
+      // Initialize the runtime-mutable persistent store (overrides win over
+      // config defaults; both layers feed resolveTopicFramework).
+      try {
+        const { TopicFrameworksStore } = await import('../core/TopicFrameworksStore.js');
+        _topicFrameworksStore = new TopicFrameworksStore({
+          stateFilePath: path.join(config.stateDir, 'state', 'topic-frameworks.json'),
+          configDefaults: _topicFrameworks,
+        });
+      } catch (err) {
+        console.warn(`[server] TopicFrameworksStore failed to initialize: ${err}`);
+      }
+      const built = buildIntelligenceProvider({
+        framework,
+        binaryPath: framework === 'claude-code' ? config.sessions.claudePath : undefined,
+      });
+      if (built) {
+        sharedIntelligence = built;
+        intelligenceSource = framework === 'codex-cli' ? 'Codex CLI' : 'Claude CLI subscription';
+      } else {
+        // Fall back to the legacy Claude path for backwards-compat.
+        sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        intelligenceSource = 'Claude CLI subscription (fallback)';
+      }
+    } catch { /* CLI not available */ }
 
     _sharedIntelligence = sharedIntelligence ?? null;
     if (sharedIntelligence) {
       console.log(pc.gray(`  Intelligence: ${intelligenceSource}`));
     } else {
-      console.log(pc.yellow('  Intelligence: none (no Claude CLI, no API key) — LLM-gated features degraded'));
+      console.log(pc.yellow('  Intelligence: none (no Claude CLI available) — LLM-gated features degraded'));
       // Visible degradation — every downstream LLM-gated feature depends on this.
       // The DegradationReporter routes to console, disk, Telegram alert, and feedback.
       // Keep the externally-rendered impact string generic; the detailed
@@ -2094,9 +2279,9 @@ export async function startServer(options: StartOptions): Promise<void> {
       const { DegradationReporter } = await import('../monitoring/DegradationReporter.js');
       DegradationReporter.getInstance().report({
         feature: 'SharedIntelligenceProvider',
-        primary: 'Shared LLM provider (Claude CLI subscription by default, Anthropic API opt-in)',
+        primary: 'Shared LLM provider (Claude CLI subscription path)',
         fallback: 'Heuristic-only operation for LLM-gated features',
-        reason: 'No LLM transport configured on this machine (see local startup logs for detail).',
+        reason: 'Claude CLI not available on this machine (see local startup logs for detail).',
         impact: 'LLM-gated features degraded; defense-in-depth reduced. See local logs for the affected feature list.',
       });
     }
@@ -2137,28 +2322,29 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     let relationships: RelationshipManager | undefined;
     if (config.relationships) {
-      // Wire LLM intelligence for identity resolution.
-      // Priority: Claude CLI (subscription, zero extra cost) > Anthropic API (explicit opt-in only)
-      const claudePath = config.sessions.claudePath;
+      // Wire LLM intelligence for identity resolution. Subscription path only —
+      // direct Anthropic API is forbidden per Rule 2 of the path constraints.
+      // Reuse `sharedIntelligence` (already framework-aware: Claude or Codex
+      // per resolvedFramework) so a Codex-only install gets Codex-backed
+      // relationship resolution instead of falling back to heuristic-only.
       let intelligenceMode = 'heuristic-only';
 
-      // Check if user explicitly opted into API-based intelligence
-      // (intelligenceProvider is a config-file-only field, not in the TypeScript type)
-      const explicitProvider = (config.relationships as unknown as { intelligenceProvider?: string }).intelligenceProvider;
+      const staleRelApi = (config.relationships as unknown as { intelligenceProvider?: string }).intelligenceProvider === 'anthropic-api';
+      if (staleRelApi) {
+        console.log(pc.yellow(
+          '  relationships.intelligenceProvider: "anthropic-api" is no longer supported — using the configured framework instead.\n'
+          + '  Remove the field from config.json.'
+        ));
+      }
 
-      if (explicitProvider === 'anthropic-api') {
-        // User explicitly chose API — respect their decision
-        const apiProvider = AnthropicIntelligenceProvider.fromEnv();
-        if (apiProvider) {
-          config.relationships.intelligence = apiProvider;
-          intelligenceMode = 'LLM-supervised (Anthropic API — user choice)';
-        } else {
-          console.log(pc.yellow('  intelligenceProvider: "anthropic-api" set but ANTHROPIC_API_KEY not found'));
-        }
-      } else if (claudePath) {
-        // Default: use Claude CLI via subscription (zero extra cost)
-        config.relationships.intelligence = new ClaudeCliIntelligenceProvider(claudePath);
-        intelligenceMode = 'LLM-supervised (Claude CLI subscription)';
+      if (sharedIntelligence) {
+        config.relationships.intelligence = sharedIntelligence;
+        intelligenceMode = `LLM-supervised (${intelligenceSource})`;
+      } else if (config.sessions.claudePath) {
+        // Last-ditch fallback for installs where sharedIntelligence couldn't
+        // be built but a claude binary path is still configured.
+        config.relationships.intelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        intelligenceMode = 'LLM-supervised (Claude CLI subscription, fallback)';
       }
 
       relationships = new RelationshipManager(config.relationships);
@@ -2475,6 +2661,20 @@ export async function startServer(options: StartOptions): Promise<void> {
         };
         console.log(pc.green('  Prompt Gate: Telegram relay wired (via lifeline callback forwarding)'));
       }
+
+      // Wire incoming-message routing + command callbacks so messages forwarded
+      // by lifeline (via /internal/telegram-forward → onTopicMessage) actually
+      // fire handleCommand → onRouteCommand / onListSessions / onFlush etc.
+      // Without this, send-only mode left onTopicMessage null, so the
+      // /internal/telegram-forward handler in routes.ts fell through to the
+      // "--no-telegram (registry-only) injection" branch and slash-commands
+      // reached the AI session as plain chat text.
+      const userManagerSendOnly = new UserManager(config.stateDir, config.users);
+      _fixDeps = { state, liveConfig, sessionManager, telegram, config };
+      wireTelegramRouting(telegram, sessionManager, quotaTracker, topicMemory, userManagerSendOnly,
+        (topicId, text) => handleFixCommand(topicId, text, _fixDeps!));
+      wireTelegramCallbacks(telegram, sessionManager, state, quotaTracker, undefined, config.sessions.claudePath, topicMemory);
+      console.log(pc.green('  Telegram routing + command callbacks wired (send-only)'));
     }
 
     if (telegramConfig && !skipTelegram && !isStandbyTelegram) {
@@ -3594,8 +3794,17 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Uses Haiku for cost efficiency — summaries don't need deep reasoning.
     if (topicMemory && telegram) {
       const { TopicSummarizer } = await import('../memory/TopicSummarizer.js');
-      const { ClaudeCliIntelligenceProvider } = await import('../core/ClaudeCliIntelligenceProvider.js');
-      const summaryIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+      // Reuse the framework-aware sharedIntelligence so Codex installs
+      // get Codex-summarized topics. Last-ditch ClaudeCli fallback
+      // preserves v0.x behavior when sharedIntelligence couldn't be
+      // built but a claude binary is still on disk.
+      let summaryIntelligence: IntelligenceProvider;
+      if (sharedIntelligence) {
+        summaryIntelligence = sharedIntelligence;
+      } else {
+        const { ClaudeCliIntelligenceProvider } = await import('../core/ClaudeCliIntelligenceProvider.js');
+        summaryIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+      }
       const summarizer = new TopicSummarizer(summaryIntelligence, topicMemory);
 
       sessionManager.on('sessionComplete', (session) => {
@@ -3745,7 +3954,7 @@ export async function startServer(options: StartOptions): Promise<void> {
           },
         },
         {
-          config: config.monitoring.triage,
+          config: { ...config.monitoring.triage, framework: resolvedFramework },
           state,
           intelligence: sharedIntelligence,
         },
@@ -5588,6 +5797,10 @@ export async function startServer(options: StartOptions): Promise<void> {
       stateDir: config.stateDir,
       getActiveSessions: () => sessionManager.listRunningSessions(),
       captureOutput: (tmuxSession: string) => {
+        // RULE 3: EXEMPT — this is raw byte capture (the whole pane), not state parsing.
+        // The output is handed verbatim to the SummarySentinel (LLM-backed) which is the
+        // authority that interprets it. No structural format is parsed here; per
+        // signal-vs-authority, this is a signal producer with no blocking authority.
         try {
           const tmuxBin = detectTmuxPath();
           if (!tmuxBin) return null;
@@ -5790,15 +6003,25 @@ export async function startServer(options: StartOptions): Promise<void> {
       try {
         const { PipeSessionSpawner } = await import('../threadline/PipeSessionSpawner.js');
         const pipeConfig = config.threadline?.listener?.pipeMode;
+        // Provider-portability v1.0.0: pipe sessions route through the
+        // same framework the rest of this agent uses. Codex pipe-mode
+        // model defaults to gpt-5.3-codex; Claude defaults to sonnet.
+        const pipeFramework = resolvedFramework ?? 'claude-code';
+        const pipeBinaryPath = pipeFramework === 'claude-code'
+          ? config.sessions.claudePath
+          : (config.sessions.frameworkBinaryPaths?.['codex-cli'] ?? config.sessions.claudePath);
+        const pipeModelDefault = pipeFramework === 'claude-code' ? 'sonnet' : 'gpt-5.3-codex';
         pipeSpawner = new PipeSessionSpawner({
           stateDir: config.stateDir,
-          model: pipeConfig?.model ?? 'sonnet',
+          model: pipeConfig?.model ?? pipeModelDefault,
           timeoutMs: pipeConfig?.timeoutMs ?? 600_000,
           warningMs: pipeConfig?.warningMs ?? 480_000,
           maxConcurrent: pipeConfig?.maxConcurrent ?? 5,
           allowedTools: pipeConfig?.allowedTools ?? ['threadline_send', 'Read', 'Glob', 'Grep'],
           allowedPaths: pipeConfig?.allowedPaths ?? ['src/', 'docs/', 'specs/'],
           minIqsBand: pipeConfig?.minIqsBand ?? 70,
+          framework: pipeFramework,
+          binaryPath: pipeBinaryPath,
         });
         console.log(pc.dim(`  Pipe sessions: enabled (model: ${pipeConfig?.model ?? 'sonnet'}, max: ${pipeConfig?.maxConcurrent ?? 5})`));
       } catch (err) {
@@ -6062,7 +6285,13 @@ export async function startServer(options: StartOptions): Promise<void> {
             if (pipeCheck.eligible) {
               try {
                 const { classifyIntent, summarizeThreadHistory } = await import('../threadline/PipeSessionSpawner.js');
-                const intent = await classifyIntent(textContent);
+                // Route classifier through the shared IntelligenceProvider so
+                // Codex agents can use pipe-mode too. When no provider is
+                // available (degraded mode) the classifier fails closed to
+                // 'interactive' — safer than missing a TASK message.
+                const intent = await classifyIntent(textContent, {
+                  intelligence: sharedIntelligence,
+                });
                 if (intent === 'pipe') {
                   const result = await pipeSpawner.spawn({
                     threadId: msg.threadId,
@@ -6151,23 +6380,18 @@ export async function startServer(options: StartOptions): Promise<void> {
     // and no intelligence is available.
     let responseReviewGate: import('../core/CoherenceGate.js').CoherenceGate | undefined;
     if (config.responseReview?.enabled) {
-      const anthropicKey = process.env['ANTHROPIC_API_KEY']?.trim() ?? '';
-      if (sharedIntelligence || anthropicKey) {
+      if (sharedIntelligence) {
         const { CoherenceGate } = await import('../core/CoherenceGate.js');
         responseReviewGate = new CoherenceGate({
           config: config.responseReview,
           stateDir: config.stateDir,
-          apiKey: anthropicKey,
           intelligence: sharedIntelligence,
           relationships: relationships ?? undefined,
           adaptiveTrust: adaptiveTrust ?? undefined,
         });
-        const backend = sharedIntelligence
-          ? 'via shared IntelligenceProvider'
-          : 'via Anthropic API (direct)';
-        console.log(pc.green(`  Response review pipeline: enabled ${backend} (${Object.keys(config.responseReview.reviewers ?? {}).length} reviewers configured)`));
+        console.log(pc.green(`  Response review pipeline: enabled via shared IntelligenceProvider (${Object.keys(config.responseReview.reviewers ?? {}).length} reviewers configured)`));
       } else {
-        console.warn(pc.yellow(`  Response review pipeline: configured but no IntelligenceProvider or ANTHROPIC_API_KEY available`));
+        console.warn(pc.yellow(`  Response review pipeline: configured but no IntelligenceProvider available (path-constraints.md Rule 2 forbids direct API path)`));
       }
     }
 

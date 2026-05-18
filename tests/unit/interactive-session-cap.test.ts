@@ -26,19 +26,29 @@ describe('SessionManager — interactive session cap', () => {
     expect(method).toContain('listRunningSessions');
   });
 
-  it('spawnInteractiveSession includes --dangerously-skip-permissions', () => {
-    const source = fs.readFileSync(
+  it('spawnInteractiveSession routes claude-code launch through buildInteractiveLaunch (which emits --dangerously-skip-permissions)', () => {
+    // The flag was hoisted out of SessionManager's inline body into the
+    // framework launch module (provider-portability refactor). Two assertions
+    // lock the property: (1) spawnInteractiveSession dispatches via
+    // buildInteractiveLaunch, and (2) the launch module emits the flag for
+    // the claude-code framework.
+    const managerSource = fs.readFileSync(
       path.join(process.cwd(), 'src/core/SessionManager.ts'),
       'utf-8',
     );
+    const methodStart = managerSource.indexOf('async spawnInteractiveSession(');
+    const methodEnd = managerSource.indexOf('\n  /**', methodStart + 1);
+    const method = managerSource.slice(methodStart, methodEnd > -1 ? methodEnd : undefined);
+    expect(method).toContain('buildInteractiveLaunch');
 
-    // Extract the spawnInteractiveSession method
-    const methodStart = source.indexOf('async spawnInteractiveSession(');
-    const methodEnd = source.indexOf('\n  /**', methodStart + 1);
-    const method = source.slice(methodStart, methodEnd > -1 ? methodEnd : undefined);
-
-    // Must include --dangerously-skip-permissions
-    expect(method).toContain('--dangerously-skip-permissions');
+    const launchSource = fs.readFileSync(
+      path.join(process.cwd(), 'src/core/frameworkSessionLaunch.ts'),
+      'utf-8',
+    );
+    const claudeBuilderStart = launchSource.indexOf('claudeCodeBuilder');
+    const claudeBuilderEnd = launchSource.indexOf('codexCliBuilder', claudeBuilderStart);
+    const claudeBuilder = launchSource.slice(claudeBuilderStart, claudeBuilderEnd > -1 ? claudeBuilderEnd : undefined);
+    expect(claudeBuilder).toContain('--dangerously-skip-permissions');
   });
 
   it('spawnInteractiveSession does NOT use bash -c (shell injection risk)', () => {
@@ -57,19 +67,29 @@ describe('SessionManager — interactive session cap', () => {
     expect(method).not.toContain('"bash", "-c"');
   });
 
-  it('spawnSession includes --dangerously-skip-permissions', () => {
-    const source = fs.readFileSync(
+  it('spawnSession routes claude-code launch through buildHeadlessLaunch (which emits --dangerously-skip-permissions)', () => {
+    // The flag was hoisted out of SessionManager's inline body into the
+    // framework launch module (provider-portability refactor — companion
+    // to the interactive refactor above). Two assertions lock the
+    // property: (1) spawnSession dispatches via buildHeadlessLaunch, and
+    // (2) the launch module's claude-code headless builder emits the flag.
+    const managerSource = fs.readFileSync(
       path.join(process.cwd(), 'src/core/SessionManager.ts'),
       'utf-8',
     );
+    const methodStart = managerSource.indexOf('async spawnSession(');
+    const methodEnd = managerSource.indexOf('\n  /**', methodStart + 1);
+    const method = managerSource.slice(methodStart, methodEnd > -1 ? methodEnd : undefined);
+    expect(method).toContain('buildHeadlessLaunch');
 
-    // Extract the spawnSession method
-    const methodStart = source.indexOf('async spawnSession(');
-    const methodEnd = source.indexOf('\n  /**', methodStart + 1);
-    const method = source.slice(methodStart, methodEnd > -1 ? methodEnd : undefined);
-
-    // Must include --dangerously-skip-permissions
-    expect(method).toContain('--dangerously-skip-permissions');
+    const launchSource = fs.readFileSync(
+      path.join(process.cwd(), 'src/core/frameworkSessionLaunch.ts'),
+      'utf-8',
+    );
+    const claudeBuilderStart = launchSource.indexOf('claudeCodeHeadlessBuilder');
+    const claudeBuilderEnd = launchSource.indexOf('codexCliHeadlessBuilder', claudeBuilderStart);
+    const claudeBuilder = launchSource.slice(claudeBuilderStart, claudeBuilderEnd > -1 ? claudeBuilderEnd : undefined);
+    expect(claudeBuilder).toContain('--dangerously-skip-permissions');
   });
 
   it('waitForClaudeReady has .catch() handler', () => {

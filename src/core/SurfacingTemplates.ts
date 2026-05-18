@@ -165,7 +165,7 @@ function formatDataImplications(implications: DataImplication[]): string {
 
   const parts = implications.map(di => {
     const where = di.destination === 'local' ? 'stays on your machine'
-      : di.destination === 'anthropic-api' ? 'sent to Anthropic\'s API'
+      : di.destination === 'anthropic-cli' ? 'sent to Anthropic via the Claude CLI subscription path'
       : di.destination === 'cloudflare' ? 'routed through Cloudflare'
       : `sent to ${di.destination}`;
     return `${di.dataType} (${where})`;

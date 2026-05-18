@@ -2,25 +2,29 @@
  * StallTriageNurse Types — Shared type definitions for LLM-powered session recovery.
  */
 
+import type { IntelligenceFramework } from '../core/intelligenceProviderFactory.js';
+
 export interface StallTriageConfig {
+  /**
+   * Framework whose activity-signal patterns (tool-call regex, spinner
+   * glyphs, "esc to interrupt" wording) are used by the heuristic
+   * diagnose layer and the LLM prompt. Defaults to 'claude-code' for
+   * backwards-compat — preserves v0.x behavior when unset.
+   */
+  framework?: IntelligenceFramework;
+
   /** Enable the triage nurse */
   enabled: boolean;
-  /** Anthropic API key (falls back to process.env.ANTHROPIC_API_KEY) */
-  apiKey?: string;
   /** Model to use for diagnosis (default: 'claude-sonnet-4-6') */
   model?: string;
   /** Max tokens for LLM response (default: 1024) */
   maxTokens?: number;
-  /** Timeout for API calls in ms (default: 15000) */
-  apiTimeoutMs?: number;
   /** Cooldown between triages for same topic in ms (default: 180000 = 3min) */
   cooldownMs?: number;
   /** Delay before verifying action worked in ms (default: 10000) */
   verifyDelayMs?: number;
   /** Max escalation attempts before giving up (default: 2) */
   maxEscalations?: number;
-  /** Use IntelligenceProvider instead of direct API (default: true) */
-  useIntelligenceProvider?: boolean;
   /** Delay after intervention before sending follow-up message (default: 3000ms) */
   postInterventionDelayMs?: number;
   /** Number of restarts within the loop window that triggers loop detection (default: 3) */

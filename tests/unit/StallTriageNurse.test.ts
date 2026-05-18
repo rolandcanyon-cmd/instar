@@ -133,6 +133,109 @@ describe('StallTriageNurse', () => {
     });
   });
 
+  // ─── 1b. Framework-aware heuristics (Tier 2.B) ─────────────
+
+  describe('framework-aware model tier normalization', () => {
+    it('claude-code: tier name → canonical Anthropic model id', () => {
+      const nurse = new StallTriageNurse(deps, {
+        config: { ...TEST_CONFIG, framework: 'claude-code', model: 'sonnet' },
+      });
+      // Stored on the merged config; downstream tooling that greps the
+      // model id sees the canonical Anthropic name, not the tier alias.
+      expect((nurse as unknown as { config: { model: string } }).config.model)
+        .toBe('claude-sonnet-4-6');
+    });
+    it('claude-code: generic tier "balanced" resolves to sonnet → canonical Anthropic id', () => {
+      const nurse = new StallTriageNurse(deps, {
+        config: { ...TEST_CONFIG, framework: 'claude-code', model: 'balanced' },
+      });
+      expect((nurse as unknown as { config: { model: string } }).config.model)
+        .toBe('claude-sonnet-4-6');
+    });
+    it('codex-cli: generic tier "balanced" resolves to Codex model id (no Anthropic mapping)', () => {
+      const nurse = new StallTriageNurse(deps, {
+        config: { ...TEST_CONFIG, framework: 'codex-cli', model: 'balanced' },
+      });
+      expect((nurse as unknown as { config: { model: string } }).config.model)
+        .toBe('gpt-5.3-codex');
+    });
+    it('codex-cli: legacy Claude tier name maps to Codex equivalent', () => {
+      const nurse = new StallTriageNurse(deps, {
+        config: { ...TEST_CONFIG, framework: 'codex-cli', model: 'haiku' },
+      });
+      expect((nurse as unknown as { config: { model: string } }).config.model)
+        .toBe('gpt-5.2');
+    });
+    it('codex-cli: raw Codex model id passes through verbatim', () => {
+      const nurse = new StallTriageNurse(deps, {
+        config: { ...TEST_CONFIG, framework: 'codex-cli', model: 'gpt-5.4-codex' },
+      });
+      expect((nurse as unknown as { config: { model: string } }).config.model)
+        .toBe('gpt-5.4-codex');
+    });
+  });
+
+  describe('framework-aware heuristicDiagnose', () => {
+    /** Build a TriageContext suitable for heuristicDiagnose calls. */
+    function ctx(tmuxOutput: string, waitMinutes = 0): TriageContext {
+      return {
+        sessionName: 'echo-test',
+        topicId: 1,
+        tmuxOutput,
+        sessionStatus: 'alive',
+        recentMessages: [],
+        pendingMessage: 'hi',
+        waitMinutes,
+      };
+    }
+
+    it('claude-code: shell prompt + Claude activity → no restart (Claude still alive)', () => {
+      const nurse = new StallTriageNurse(deps, { config: { ...TEST_CONFIG, framework: 'claude-code' } });
+      // Bare shell prompt is visible at end, but Claude is still rendering tool output.
+      const output = 'Read(/etc/hosts)\nsome output\n$ ';
+      expect(nurse.heuristicDiagnose(ctx(output))).toBeNull();
+    });
+
+    it('claude-code: shell prompt without Claude activity → restart', () => {
+      const nurse = new StallTriageNurse(deps, { config: { ...TEST_CONFIG, framework: 'claude-code' } });
+      const output = 'logged out\n$ ';
+      const result = nurse.heuristicDiagnose(ctx(output));
+      expect(result?.action).toBe('restart');
+      expect(result?.summary).toContain('Claude Code');
+    });
+
+    it('codex-cli: shell prompt + Codex activity → no restart (Codex still alive)', () => {
+      const nurse = new StallTriageNurse(deps, { config: { ...TEST_CONFIG, framework: 'codex-cli' } });
+      // Codex is rendering shell tool output, then a bare prompt.
+      const output = 'exec(npm test)\nrunning tests...\n$ ';
+      expect(nurse.heuristicDiagnose(ctx(output))).toBeNull();
+    });
+
+    it('codex-cli: shell prompt + Claude tool tokens → STILL restarts (Codex signal does not match Claude tokens)', () => {
+      const nurse = new StallTriageNurse(deps, { config: { ...TEST_CONFIG, framework: 'codex-cli' } });
+      // Output happens to contain "Read(" which Claude would treat as activity,
+      // but the Codex signal correctly ignores it — bare prompt means restart.
+      const output = 'previously: Read(/foo)\n$ ';
+      const result = nurse.heuristicDiagnose(ctx(output));
+      expect(result?.action).toBe('restart');
+      expect(result?.summary).toContain('Codex CLI');
+    });
+
+    it('codex-cli: Ctrl+C-to-cancel hint visible for 3+ min → interrupt', () => {
+      const nurse = new StallTriageNurse(deps, { config: { ...TEST_CONFIG, framework: 'codex-cli' } });
+      const output = 'streaming response\npress Ctrl+C to cancel';
+      const result = nurse.heuristicDiagnose(ctx(output, 4));
+      expect(result?.action).toBe('interrupt');
+    });
+
+    it('claude-code: "esc to interrupt" hint visible for 3+ min → interrupt (default framework)', () => {
+      const nurse = new StallTriageNurse(deps, { config: { ...TEST_CONFIG } });
+      const output = 'doing things\npress esc to interrupt';
+      const result = nurse.heuristicDiagnose(ctx(output, 5));
+      expect(result?.action).toBe('interrupt');
+    });
+  });
+
   // ─── 2. isInCooldown ────────────────────────────────────────
 
   describe('isInCooldown', () => {
@@ -255,33 +358,26 @@ describe('StallTriageNurse', () => {
       expect(result.diagnosis).not.toBeNull();
     });
 
-    it('falls back to direct API when no IntelligenceProvider', async () => {
-      const mockFetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          content: [{ type: 'text', text: NUDGE_DIAGNOSIS_JSON }],
-        }),
+    it('without an IntelligenceProvider, the LLM layer surfaces an error and the heuristic fallback runs', async () => {
+      // Per Rule 2 (specs/provider-portability/04-anthropic-path-constraints.md),
+      // the direct-Anthropic-API fallback was removed. The previous version of this
+      // test asserted that a missing intelligence provider caused a `fetch` to
+      // api.anthropic.com — that's no longer the contract. The current contract:
+      // when intelligence is absent, `diagnose` throws inside the LLM layer and
+      // the layer-3 process-tree / layer-4 heuristic fallback decides the action.
+      const nurse = new StallTriageNurse(deps, {
+        config: { ...TEST_CONFIG },
+        // No intelligence provider
       });
-      vi.stubGlobal('fetch', mockFetch);
 
-      try {
-        const nurse = new StallTriageNurse(deps, {
-          config: { ...TEST_CONFIG, useIntelligenceProvider: false, apiKey: 'test-key' },
-          // No intelligence provider
-        });
+      const result = await nurse.triage(1, 'sess', 'hello', Date.now());
 
-        const result = await nurse.triage(1, 'sess', 'hello', Date.now());
-
-        expect(mockFetch).toHaveBeenCalledTimes(1);
-        expect(mockFetch).toHaveBeenCalledWith(
-          'https://api.anthropic.com/v1/messages',
-          expect.objectContaining({ method: 'POST' }),
-        );
-        expect(result.diagnosis?.action).toBe('nudge');
-      } finally {
-        vi.unstubAllGlobals();
-      }
+      // Must not invoke the LLM (we didn't supply one).
+      expect(mockIntelligence.evaluate).not.toHaveBeenCalled();
+      // A diagnosis must still be produced — fallback layer is responsible.
+      expect(result.diagnosis).not.toBeNull();
+      expect(['interrupt', 'restart', 'nudge', 'unstick']).toContain(result.diagnosis!.action);
+      expect(result.diagnosis!.confidence).toBe('low');
     });
 
     it('falls back to nudge on LLM error', async () => {

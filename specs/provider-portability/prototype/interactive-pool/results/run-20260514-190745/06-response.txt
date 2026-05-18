@@ -1,0 +1,6 @@
+❯ What's the boiling point of water in Celsius? Number only.
+
+⏺ 100
+
+✻ Baked for 1s
+

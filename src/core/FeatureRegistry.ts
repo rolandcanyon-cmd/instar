@@ -53,7 +53,7 @@ export interface EnableAction {
 
 export interface DataImplication {
   dataType: string;
-  destination: 'local' | 'anthropic-api' | 'cloudflare' | 'custom';
+  destination: 'local' | 'anthropic-cli' | 'cloudflare' | 'custom';
   retention?: string;
   description: string;
 }

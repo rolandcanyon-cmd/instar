@@ -38,10 +38,21 @@ const ROOT = path.resolve(__dirname, '..');
 // Files that may legitimately reference LLM provider URLs directly.
 // Adding entries requires a spec change.
 const ALLOWLIST = new Set([
-  'src/core/AnthropicIntelligenceProvider.ts',
   'src/core/ClaudeCliIntelligenceProvider.ts',
   // The lint rule itself names the URLs in the patterns array.
   'scripts/lint-no-direct-llm-http.js',
+  // Provider-portability v1.0.0 (spec/provider-portability): the
+  // anthropic-headless adapter implements the IntelligenceProvider
+  // contract via legitimate OAuth + Messages-API calls. It IS the
+  // chokepoint for that provider — same shape Phase 1 envisioned
+  // for AnthropicIntelligenceProvider (which was deleted per Rule 2).
+  'src/providers/adapters/anthropic-headless/control/authCredentialInjection.ts',
+  'src/providers/adapters/anthropic-headless/observability/usageMeterProvider.ts',
+  'src/providers/adapters/anthropic-headless/transport/oneShotCompletion.ts',
+  'src/providers/adapters/anthropic-headless/transport/agenticSessionHeadless.ts',
+  'src/providers/adapters/anthropic-headless/errors.ts',
+  'src/providers/adapters/anthropic-headless/_smoketest.ts',
+  'src/providers/adapters/anthropic-headless/capability/fileSystemAccess.ts',
 ]);
 
 /**

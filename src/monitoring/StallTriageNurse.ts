@@ -17,6 +17,9 @@ import type { IntelligenceProvider, IntelligenceOptions } from '../core/types.js
 import type { StateManager } from '../core/StateManager.js';
 import { DegradationReporter } from './DegradationReporter.js';
 import { ANTHROPIC_MODELS, resolveModelId } from '../core/models.js';
+import type { IntelligenceFramework } from '../core/intelligenceProviderFactory.js';
+import { resolveModelForFramework } from '../core/frameworkSessionLaunch.js';
+import { getActivitySignal, type FrameworkActivitySignal } from './frameworkActivitySignals.js';
 import type {
   StallTriageConfig,
   TreatmentAction,
@@ -47,15 +50,18 @@ export type {
 const DEFAULT_POST_INTERVENTION_DELAY_MS = 3000;
 
 const DEFAULT_CONFIG: Required<StallTriageConfig> = {
+  framework: 'claude-code',
   enabled: true,
-  apiKey: '',
-  model: resolveModelId(process.env.STALL_TRIAGE_MODEL || 'sonnet'),
+  // Default tier stored as generic — the per-framework resolution
+  // happens in the constructor based on `framework` so Codex agents
+  // get a Codex model id instead of a Claude one. Legacy env var
+  // STALL_TRIAGE_MODEL keeps working but is now interpreted as a
+  // tier OR raw id, not specifically a Claude alias.
+  model: process.env.STALL_TRIAGE_MODEL || 'balanced',
   maxTokens: 2000,
-  apiTimeoutMs: 15000,
   cooldownMs: 180000,
   verifyDelayMs: 10000,
   maxEscalations: 2,
-  useIntelligenceProvider: true,
   postInterventionDelayMs: DEFAULT_POST_INTERVENTION_DELAY_MS,
   restartLoopThreshold: 3,
   restartLoopWindowMs: 600_000, // 10 minutes
@@ -69,14 +75,21 @@ const ACTION_ESCALATION_ORDER: TreatmentAction[] = [
   'restart',
 ];
 
-const SYSTEM_PROMPT = `You are a session recovery specialist for Claude Code sessions running in tmux. Your job is to diagnose why a session is not responding to a user's Telegram message and recommend the best recovery action.
+/**
+ * Build a per-framework system prompt. The framework-specific signal
+ * line is injected into the "status_update" bullet so the LLM keys on
+ * the right indicators (Claude's spinner glyphs vs Codex's tool names,
+ * etc.).
+ */
+function buildSystemPrompt(signal: FrameworkActivitySignal): string {
+  return `You are a session recovery specialist for ${signal.displayName} sessions running in tmux. Your job is to diagnose why a session is not responding to a user's Telegram message and recommend the best recovery action.
 
 You will receive terminal output from the session, the session's liveness status, recent message history, and the pending message that went unanswered.
 
 Diagnose the situation and recommend ONE of these actions:
 
 1. **status_update** — The session is actively working (you see tool calls, output, thinking indicators). It just hasn't replied yet. Tell the user to wait.
-   Terminal signatures: spinner characters, "Read", "Write", "Edit", "Bash", "Grep", "Glob" tool names, "thinking", token counts, active output scrolling.
+   Terminal signatures: ${signal.promptSignaturesLine}
 
 2. **nudge** — The session might be waiting for input or slightly stuck. A newline keystroke could unstick it.
    Terminal signatures: blank prompt, "Press Enter to continue", cursor blinking at end of output, session idle but alive.
@@ -88,7 +101,7 @@ Diagnose the situation and recommend ONE of these actions:
    Terminal signatures: long-running command with no output, build/test hanging, curl/fetch timeout, "npm run" with no progress.
 
 5. **restart** — The session is dead, crashed, or so broken that only a full restart will help.
-   Terminal signatures: "Session ended", exit codes, error stack traces, empty/no output, "bash" prompt (Claude exited).
+   Terminal signatures: "Session ended", exit codes, error stack traces, empty/no output, "bash" prompt (the ${signal.displayName} wrapper exited).
 
 Respond with a JSON object (no markdown fences):
 {
@@ -97,6 +110,7 @@ Respond with a JSON object (no markdown fences):
   "confidence": "high|medium|low",
   "userMessage": "Friendly message to send to the user explaining what's happening and what you're doing"
 }`;
+}
 
 // ─── Fast-path heuristic ─────────────────────────────────────
 
@@ -161,12 +175,24 @@ export class StallTriageNurse extends EventEmitter {
     this.deps = deps;
     this.state = opts?.state ?? null;
     this.intelligence = opts?.intelligence ?? null;
+    const mergedFramework = opts?.config?.framework ?? DEFAULT_CONFIG.framework;
+    const rawModel = opts?.config?.model || DEFAULT_CONFIG.model;
+    // Per-framework tier resolution: 'balanced' → 'sonnet' for Claude,
+    // 'gpt-5.3-codex' for Codex. resolveModelForFramework passes raw
+    // model ids through verbatim so explicit configurations work too.
+    // For claude-code we still run through resolveModelId so legacy
+    // tier names get expanded to canonical ANTHROPIC_MODELS ids (e.g.
+    // 'sonnet' → 'claude-sonnet-4-6'), preserving the previous on-disk
+    // model-id format that downstream tooling may grep.
+    const tierResolved = resolveModelForFramework(mergedFramework, rawModel) ?? rawModel;
+    const finalModel = mergedFramework === 'claude-code'
+      ? resolveModelId(tierResolved)
+      : tierResolved;
     this.config = {
       ...DEFAULT_CONFIG,
       ...opts?.config,
-      apiKey: opts?.config?.apiKey || process.env.ANTHROPIC_API_KEY || '',
-      // Resolve tier names in model config (e.g., 'sonnet' → 'claude-sonnet-4-6')
-      model: resolveModelId(opts?.config?.model || DEFAULT_CONFIG.model),
+      framework: mergedFramework,
+      model: finalModel,
     };
 
     // Load persisted state
@@ -453,14 +479,16 @@ export class StallTriageNurse extends EventEmitter {
     const output = context.tmuxOutput;
     if (!output) return null;
 
+    const signal = getActivitySignal(this.config.framework);
+
     // Pattern 1: Running bash command with "(running)" indicator
-    // NOTE: "(running)" is a NORMAL Claude Code indicator for any executing Bash tool.
-    // Only fire this heuristic if the session has been waiting 10+ minutes, since
-    // test suites, builds, and installs legitimately take several minutes.
-    // For shorter waits, let the LLM diagnose (it's much better at distinguishing
-    // "running test suite" from "hung curl command").
+    // NOTE: a running-indicator is the framework's NORMAL display for any
+    // executing shell tool. Only fire this heuristic if the session has been
+    // waiting 10+ minutes, since test suites, builds, and installs legitimately
+    // take several minutes. For shorter waits, let the LLM diagnose (it's much
+    // better at distinguishing "running test suite" from "hung curl command").
     if (context.waitMinutes >= 10 &&
-        /\(running\)/i.test(output) &&
+        signal.runningIndicator.test(output) &&
         /timeout|etime|\.py|\.sh|curl|npm|node|bash|python|pnpm/i.test(output)) {
       return {
         summary: `Bash command running with (running) indicator for ${context.waitMinutes}+ minutes — likely hung process`,
@@ -494,15 +522,14 @@ export class StallTriageNurse extends EventEmitter {
       }
     }
 
-    // Pattern 4: Bare shell prompt (Claude has exited)
+    // Pattern 4: Bare shell prompt (framework wrapper has exited)
     const shellPromptPattern = /^\$\s*$/m;
     const bashVersionPattern = /bash-[\d.]+\$\s*$/m;
     if (shellPromptPattern.test(output) || bashVersionPattern.test(output)) {
-      // Make sure Claude isn't actively working (tool calls in progress)
-      const claudeActivityPattern = /claude|Read\(|Write\(|Edit\(|Bash\(|Grep\(|Glob\(|⠋|⠙|⠹|⠸|⠼|⠴|⠦|⠧|⠇|⠏/;
-      if (!claudeActivityPattern.test(output)) {
+      // Make sure the framework isn't actively working (tool calls in progress)
+      if (!signal.toolCallOrSpinner.test(output)) {
         return {
-          summary: 'Shell prompt visible — Claude process has likely exited',
+          summary: `Shell prompt visible — ${signal.displayName} process has likely exited`,
           action: 'restart',
           confidence: 'high',
           userMessage: `Session "${context.sessionName}" appears to have ended. Restarting it now...`,
@@ -520,10 +547,10 @@ export class StallTriageNurse extends EventEmitter {
       };
     }
 
-    // Pattern 6: "esc to interrupt" visible for 3+ minutes
-    if (/esc to interrupt/i.test(output) && context.waitMinutes >= 3) {
+    // Pattern 6: framework interrupt-hint visible for 3+ minutes
+    if (signal.escapeToInterrupt.test(output) && context.waitMinutes >= 3) {
       return {
-        summary: `"esc to interrupt" visible for ${context.waitMinutes}+ minutes — session stuck in tool call`,
+        summary: `Interrupt hint visible for ${context.waitMinutes}+ minutes — session stuck in tool call`,
         action: 'interrupt',
         confidence: 'medium',
         userMessage: `Session "${context.sessionName}" appears stuck on a long-running operation. Interrupting it...`,
@@ -573,16 +600,16 @@ export class StallTriageNurse extends EventEmitter {
       const prompt = this.buildDiagnosisPrompt(context);
       let rawResponse: string;
 
-      if (this.config.useIntelligenceProvider && this.intelligence) {
-        rawResponse = await this.intelligence.evaluate(prompt, {
-          model: 'balanced',
-          maxTokens: this.config.maxTokens,
-        });
-      } else if (this.config.apiKey) {
-        rawResponse = await this.callAnthropicApi(prompt);
-      } else {
-        throw new Error('No intelligence provider or API key configured');
+      if (!this.intelligence) {
+        // Direct Anthropic API path was removed per Rule 2 of the path
+        // constraints (specs/provider-portability/04-anthropic-path-constraints.md).
+        // Triage must route through an IntelligenceProvider.
+        throw new Error('No IntelligenceProvider configured (direct Anthropic API path removed)');
       }
+      rawResponse = await this.intelligence.evaluate(prompt, {
+        model: 'balanced',
+        maxTokens: this.config.maxTokens,
+      });
 
       return this.parseDiagnosis(rawResponse);
     } catch (err) {
@@ -656,8 +683,10 @@ export class StallTriageNurse extends EventEmitter {
       ? context.recentMessages.map(m => `[${m.timestamp}] ${m.sender}: ${m.text}`).join('\n')
       : '(no recent messages)';
 
+    const systemPrompt = buildSystemPrompt(getActivitySignal(this.config.framework));
+
     return [
-      SYSTEM_PROMPT,
+      systemPrompt,
       '',
       '--- Current Situation ---',
       `Session: ${context.sessionName}`,
@@ -671,40 +700,6 @@ export class StallTriageNurse extends EventEmitter {
       '--- Terminal output (last 50 lines) ---',
       context.tmuxOutput || '(empty — no output captured)',
     ].join('\n');
-  }
-
-  async callAnthropicApi(prompt: string): Promise<string> {
-    if (!this.config.apiKey) {
-      throw new Error('No Anthropic API key configured');
-    }
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': this.config.apiKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.config.model,
-        max_tokens: this.config.maxTokens,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-      signal: AbortSignal.timeout(this.config.apiTimeoutMs),
-    });
-
-    if (response.status === 429) {
-      throw new Error('Rate limited (429)');
-    }
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`API error ${response.status}: ${body.slice(0, 200)}`);
-    }
-
-    const data = await response.json() as any;
-    const textBlock = data?.content?.find((b: any) => b.type === 'text');
-    return textBlock?.text || '';
   }
 
   parseDiagnosis(rawResponse: string): TriageDiagnosis {

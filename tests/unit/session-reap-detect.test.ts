@@ -139,18 +139,19 @@ describe('Session reaping and detection', () => {
 
     it('passes prompt as CLI argument and unsets CLAUDECODE env var', () => {
       source = fs.readFileSync(SOURCE_PATH, 'utf-8');
-      // spawnSession uses tmux -e flag to unset CLAUDECODE env var directly
-      // (prevents "cannot be launched inside another Claude Code session" errors)
+      // spawnSession routes through buildHeadlessLaunch (provider-portability
+      // v1.0.0) which composes the args + env-overrides per framework. The
+      // CLAUDECODE clear lives there now, not inline in SessionManager.
       const spawnSection = source.match(/async spawnSession[\s\S]*?this\.state\.saveSession\(session\)/);
       expect(spawnSection).toBeTruthy();
       const body = spawnSection![0];
-      // Should pass prompt as -p argument
-      expect(body).toContain("'-p'");
-      // Should use this.config.claudePath
-      expect(body).toContain('this.config.claudePath');
-      // Should unset CLAUDECODE to prevent nested Claude Code errors
-      // Uses tmux -e flag: '-e', 'CLAUDECODE=' sets env var to empty (unset) in spawned session
-      expect(body).toContain("'CLAUDECODE='");
+      expect(body).toContain('buildHeadlessLaunch');
+      // The helper itself must set CLAUDECODE='' as an env override.
+      const helperSrc = fs.readFileSync(
+        path.join(process.cwd(), 'src/core/frameworkSessionLaunch.ts'),
+        'utf-8',
+      );
+      expect(helperSrc).toContain("CLAUDECODE: ''");
     });
   });
 

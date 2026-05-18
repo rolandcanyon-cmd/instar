@@ -3976,7 +3976,7 @@ export function createRoutes(ctx: RouteContext): Router {
   // Default: 10 spawns per 60 seconds, which is generous for normal use.
   const spawnLimiter = rateLimiter(60_000, 10);
   router.post('/sessions/spawn', spawnLimiter, async (req, res) => {
-    const { name, prompt, model, jobSlug } = req.body;
+    const { name, prompt, model, jobSlug, framework } = req.body;
 
     if (!name || !prompt) {
       res.status(400).json({ error: '"name" and "prompt" are required' });
@@ -3990,9 +3990,32 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(400).json({ error: '"prompt" must be a string under 500KB' });
       return;
     }
-    if (model && !['opus', 'sonnet', 'haiku'].includes(model)) {
-      res.status(400).json({ error: '"model" must be one of: opus, sonnet, haiku' });
+    if (framework !== undefined && !['claude-code', 'codex-cli'].includes(framework)) {
+      res.status(400).json({ error: '"framework" must be one of: claude-code, codex-cli' });
       return;
+    }
+    // Provider-portability v1.0.0: model whitelist is framework-aware.
+    // Generic tiers ('fast'|'balanced'|'capable') are universally accepted
+    // and resolve per-framework inside buildHeadlessLaunch. Framework-
+    // specific names are accepted when they match the framework slot.
+    const GENERIC_TIERS = ['fast', 'balanced', 'capable'];
+    const CLAUDE_TIERS = ['opus', 'sonnet', 'haiku'];
+    const CODEX_MODELS_SUBSCRIPTION = ['gpt-5.2', 'gpt-5.3-codex', 'gpt-5.4'];
+    if (model !== undefined) {
+      if (typeof model !== 'string') {
+        res.status(400).json({ error: '"model" must be a string' });
+        return;
+      }
+      const requestedFramework = framework ?? 'claude-code';
+      const allowed = requestedFramework === 'codex-cli'
+        ? [...GENERIC_TIERS, ...CODEX_MODELS_SUBSCRIPTION]
+        : [...GENERIC_TIERS, ...CLAUDE_TIERS];
+      if (!allowed.includes(model)) {
+        res.status(400).json({
+          error: `"model" must be one of: ${allowed.join(', ')} (framework: ${requestedFramework})`,
+        });
+        return;
+      }
     }
     if (jobSlug !== undefined && (typeof jobSlug !== 'string' || !JOB_SLUG_RE.test(jobSlug))) {
       res.status(400).json({ error: '"jobSlug" must contain only letters, numbers, hyphens, underscores' });
@@ -4000,7 +4023,7 @@ export function createRoutes(ctx: RouteContext): Router {
     }
 
     try {
-      const session = await ctx.sessionManager.spawnSession({ name, prompt, model, jobSlug });
+      const session = await ctx.sessionManager.spawnSession({ name, prompt, model, jobSlug, framework });
       res.status(201).json(session);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -14618,6 +14641,229 @@ export function createRoutes(ctx: RouteContext): Router {
     }
   );
 
+  // ── Provider portability v1.0.0 — Phase 5 inspection endpoints ────────
+  //
+  // Test-friendly handles that exercise the cost-aware routing policy,
+  // cost-state tracker, and framework-model router via HTTP. These are
+  // load-bearing for the test-driver-as-self pattern (see
+  // .claude/scripts/run-v1-scenarios.py + .instar/scenarios/v1.0.0/).
+  //
+  // The endpoints construct ephemeral policy/tracker/router instances
+  // per call with the parameters in the query string. They do NOT
+  // depend on adapters being registered against the global Registry —
+  // production-adapter registration is tracked separately.
+
+  router.get('/providers/routing/decide', async (req, res) => {
+    try {
+      const mod = await import('../providers/costAwareRouting.js');
+      const { CostAwareRoutingPolicy } = mod;
+
+      const fakeUnknown = String(req.query.fakeUnknown ?? '') === '1';
+      const parseNum = (v: unknown): number | null => {
+        if (v == null) return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+      };
+      const fakeRemaining = parseNum(req.query.fakeRemainingUsd);
+      const fakeTotal = parseNum(req.query.fakeTotalUsd);
+      // Reject mid-call if the caller supplied non-numeric parse errors —
+      // surfacing the issue beats silently routing to a degraded branch.
+      if (req.query.fakeRemainingUsd != null && fakeRemaining === null) {
+        res.status(400).json({ error: 'fakeRemainingUsd must be a finite number' });
+        return;
+      }
+      if (req.query.fakeTotalUsd != null && fakeTotal === null) {
+        res.status(400).json({ error: 'fakeTotalUsd must be a finite number' });
+        return;
+      }
+      const candidatesParam = String(req.query.candidates ?? '');
+
+      const sdkId = 'anthropic-headless';
+      const subId = 'anthropic-interactive-pool';
+      const fakeAdapter = (id: string) => ({
+        id,
+        capabilities: new Set(),
+        primitive: () => null,
+      });
+
+      const candidateIds = candidatesParam
+        ? candidatesParam.split(',').map((s) => s.trim()).filter(Boolean)
+        : [sdkId, subId];
+      const candidateAdapters = candidateIds.map((id) => fakeAdapter(id));
+
+      const readSdkCredit = async () => {
+        if (fakeUnknown) return null;
+        if (fakeRemaining != null && fakeTotal != null) {
+          return {
+            remainingUsd: fakeRemaining,
+            totalUsd: fakeTotal,
+            resetsAt: new Date(Date.now() + 30 * 86400_000).toISOString(),
+            overageEnabled: false,
+          };
+        }
+        return null;
+      };
+
+      const policy = new CostAwareRoutingPolicy({
+        readSdkCredit,
+        sdkCreditAdapterId: sdkId as never,
+        subscriptionAdapterId: subId as never,
+      });
+
+      let decision;
+      try {
+        decision = await policy.decide(
+          candidateAdapters as never,
+          { requires: [] } as never,
+        );
+      } catch (err) {
+        const chosen = candidateAdapters[0]?.id ?? null;
+        decision = {
+          chosen,
+          reason: `cost-aware-policy-deferred-to-fallback: ${(err as Error).message}`,
+          fallbacks: [],
+        };
+      }
+      res.json(decision);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.get('/providers/cost-state/diff', async (req, res) => {
+    try {
+      const mod = await import('../providers/costAwareRouting.js');
+      const { CostStateTracker } = mod;
+
+      const parseFiniteOr400 = (key: string, defaultVal = 0): number | null => {
+        const raw = req.query[key];
+        if (raw == null) return defaultVal;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : null;
+      };
+      const priorRemaining = parseFiniteOr400('priorRemainingUsd');
+      const priorTotal = parseFiniteOr400('priorTotalUsd');
+      const currentRemaining = parseFiniteOr400('currentRemainingUsd');
+      const currentTotal = parseFiniteOr400('currentTotalUsd');
+      if (priorRemaining === null || priorTotal === null ||
+          currentRemaining === null || currentTotal === null) {
+        res.status(400).json({ error: 'all *RemainingUsd / *TotalUsd query params must be finite numbers' });
+        return;
+      }
+
+      // Build two ad-hoc snapshots and compare. Tracker's snapshot()
+      // would re-call readSdkCredit; we shortcut by constructing the
+      // CostStateSnapshot shape directly.
+      const margin = 0.10;
+      const mkSnap = (remaining: number, total: number) => ({
+        capturedAt: new Date().toISOString(),
+        agentSdkCredit: total > 0 ? {
+          remainingUsd: remaining,
+          totalUsd: total,
+          safetyMarginUsd: margin * total,
+          belowMargin: remaining <= margin * total,
+          consumedFraction: 1 - remaining / total,
+        } : null,
+      });
+
+      const tracker = new CostStateTracker({
+        readSdkCredit: async () => null,
+      });
+      const reason = tracker.isMaterialShift(
+        mkSnap(priorRemaining, priorTotal),
+        mkSnap(currentRemaining, currentTotal),
+      );
+      res.json({ materialShift: reason !== null, reason });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  router.get('/providers/framework-router/route', async (req, res) => {
+    try {
+      const taskPrompt = String(req.query.taskPrompt ?? '');
+      const userId = String(req.query.userId ?? 'v1-scenario');
+      if (!taskPrompt) {
+        res.status(400).json({ error: 'taskPrompt is required' });
+        return;
+      }
+
+      const { FrameworkModelRouter } = await import('../providers/uxConfirm/FrameworkModelRouter.js');
+      const { TaskClassifier } = await import('../providers/uxConfirm/TaskClassifier.js');
+      const { OverrideDetector } = await import('../providers/uxConfirm/OverrideDetector.js');
+      const { TelegramConfirmer } = await import('../providers/uxConfirm/TelegramConfirmer.js');
+      const { StaticCatalogProvider } = await import('../providers/uxConfirm/StaticCatalogProvider.js');
+      const { CostStateTracker } = await import('../providers/costAwareRouting.js');
+
+      // Stub IntelligenceProvider — test-mode never needs real LLM judgment.
+      const stubIntelligence = {
+        async evaluate(): Promise<string> { return ''; },
+      };
+
+      // In-memory PreferenceStore stub. Sidesteps the real PreferenceStore's
+      // dependency on better-sqlite3, which is often a missing/mis-built
+      // native module on agents that haven't run npm rebuild after a Node
+      // upgrade (e.g., deep-signal as of this session). The stub satisfies
+      // the same get/set/clear surface the FrameworkModelRouter consumes.
+      const memStore = new Map<string, unknown>();
+      const stubStore = {
+        get(userId: string, taskPattern: string) {
+          return (memStore.get(`${userId}::${taskPattern}`) as never) ?? null;
+        },
+        set(userId: string, taskPattern: string, preference: unknown) {
+          memStore.set(`${userId}::${taskPattern}`, preference);
+        },
+        clear(userId: string, taskPattern: string) {
+          memStore.delete(`${userId}::${taskPattern}`);
+        },
+      };
+
+      const KNOWN_FRAMEWORKS = ['claude-code', 'codex-cli', 'gemini-cli'];
+      const KNOWN_MODELS = [
+        'opus-4.7', 'sonnet-4.6', 'haiku-4.5',
+        'gpt-5.3-codex', 'gemini-2.5-pro', 'deepseek-v4',
+      ];
+
+      const classifier = new TaskClassifier({ intelligence: stubIntelligence });
+      const overrideDetector = new OverrideDetector({
+        intelligence: stubIntelligence,
+        knownFrameworks: KNOWN_FRAMEWORKS,
+        knownModels: KNOWN_MODELS,
+      });
+      const store = stubStore;
+      const catalog = new StaticCatalogProvider();
+      const costStateTracker = new CostStateTracker({ readSdkCredit: async () => null });
+      const noopTransport = {
+        async send(): Promise<void> { /* no-op */ },
+        async awaitReply(): Promise<string | null> { return null; },
+      };
+      const confirmer = new TelegramConfirmer({
+        transport: noopTransport,
+        overrideDetector,
+      });
+
+      const router2 = new FrameworkModelRouter({
+        classifier,
+        // Test-mode in-memory store satisfies the surface FrameworkModelRouter
+        // consumes (get/set/clear); cast avoids dragging PreferenceStore's
+        // internal db/schema fields into the stub.
+        store: store as unknown as import('../providers/uxConfirm/PreferenceStore.js').PreferenceStore,
+        confirmer,
+        costStateTracker,
+        catalog,
+      });
+
+      const result = await router2.route({
+        userId,
+        taskPrompt,
+        taskDescription: taskPrompt.slice(0, 80),
+        telegramTopicId: null,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message, stack: (err as Error).stack });
+    }
+  });
   // ─── TaskFlow registry (OpenClaw import — Phase 1) ──────────────────
   // Admin Bearer-token auth via global authMiddleware. The HTTP API exists for
   // debugging and out-of-process tooling; production controllers run

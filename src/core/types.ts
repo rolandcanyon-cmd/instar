@@ -5,6 +5,38 @@
  * Everything flows from these — sessions, jobs, users, messaging.
  */
 
+// ── Provider Credentials ────────────────────────────────────────────
+
+/**
+ * The kind of credential a provider accepts. Influences which env var
+ * the SessionManager injects when spawning a subprocess.
+ *
+ *   - `oauth-token`: subscription path (Anthropic CLAUDE_CODE_OAUTH_TOKEN,
+ *     OpenAI sub OAuth, Google ADC).
+ *   - `api-key`: pay-per-call path (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.).
+ */
+export type ProviderCredentialKind = 'oauth-token' | 'api-key';
+
+/**
+ * A credential for a single provider. Carries enough information for
+ * SessionManager to inject the correct env vars at spawn time.
+ *
+ * Provider-portability v1.0.0: replaces the single `anthropicApiKey`
+ * field on SessionManagerConfig. Keys in the parent `credentials` map
+ * are provider ids (e.g. 'anthropic', 'openai', 'google').
+ */
+export interface ProviderCredential {
+  /** Which auth mode this credential represents. */
+  kind: ProviderCredentialKind;
+  /** The credential string (token or API key). */
+  value: string;
+  /**
+   * Optional API base URL override. Used by translation-proxy installs
+   * (e.g. ANTHROPIC_BASE_URL pointed at a local proxy) and OSS deployments.
+   */
+  baseUrl?: string;
+}
+
 // ── Session Management ──────────────────────────────────────────────
 
 export interface Session {
@@ -21,9 +53,13 @@ export interface Session {
   endedAt?: string;
   /** User who triggered the session, if any */
   triggeredBy?: string;
-  /** Model to use for this session */
-  model?: ModelTier;
-  /** The initial prompt/instruction sent to Claude */
+  /** Model tier (or raw model id) requested for this session.
+   *  May be a Claude tier ('opus'|'sonnet'|'haiku'), a generic
+   *  cross-framework tier ('fast'|'balanced'|'capable'), or a raw
+   *  model id. Per-framework resolution happens in the headless/
+   *  interactive launch builders, not at the session-state level. */
+  model?: ModelTier | string;
+  /** The initial prompt/instruction sent to the framework's CLI */
   prompt?: string;
   /** Maximum duration in minutes before the session is killed */
   maxDurationMinutes?: number;
@@ -38,8 +74,28 @@ export type ModelTier = 'opus' | 'sonnet' | 'haiku';
 export interface SessionManagerConfig {
   /** Path to tmux binary */
   tmuxPath: string;
-  /** Path to claude CLI binary */
+  /** Path to the framework CLI binary for the agent's primary framework.
+   *  Misnamed for v0.x compat — actually holds whichever framework binary
+   *  was selected (claude OR codex OR …). New code should consult
+   *  `frameworkBinaryPaths` for per-framework lookups.
+   *  @deprecated naming — value semantics correct; prefer `frameworkBinaryPaths`. */
   claudePath: string;
+  /**
+   * Per-framework binary path map. Populated from detection at load
+   * time so spawnInteractiveSession can dispatch to any framework
+   * without re-running detection. Missing keys mean that framework
+   * isn't installed.
+   */
+  frameworkBinaryPaths?: { 'claude-code'?: string; 'codex-cli'?: string };
+  /**
+   * Per-framework default model override. Lets the agent's
+   * `instar.config.json` choose a specific Codex / Claude model id
+   * without code changes. Accepts generic tier names
+   * ('fast'|'balanced'|'capable'), framework-specific tier names, or
+   * raw model ids. Missing keys fall back to each builder's hardcoded
+   * subscription-safe default.
+   */
+  frameworkDefaultModels?: { 'claude-code'?: string; 'codex-cli'?: string };
   /** Project directory (where CLAUDE.md lives) */
   projectDir: string;
   /** Maximum concurrent sessions */
@@ -53,9 +109,28 @@ export interface SessionManagerConfig {
   authToken?: string;
   /** Server port — used to construct INSTAR_SERVER_URL for HTTP hooks */
   port?: number;
-  /** Anthropic API key for spawned sessions (e.g., 'x' for meridian proxy) */
+  /**
+   * Per-provider credentials. Keys are provider ids
+   * (e.g. 'anthropic', 'openai', 'google'). Values declare the
+   * credential kind and value, plus an optional base-URL override
+   * (used for translation-proxy / OSS routing).
+   *
+   * Replaces the v0.x single-provider `anthropicApiKey` field. When
+   * `credentials` is unset, the legacy fields are read at load time
+   * and migrated into `credentials.anthropic` for backwards-compat.
+   */
+  credentials?: Record<string, ProviderCredential>;
+  /**
+   * @deprecated v1.0.0 — use `credentials.anthropic` instead.
+   * Anthropic API key for spawned sessions (e.g., 'x' for meridian proxy).
+   * Still readable for backwards-compat; new code should consult
+   * `credentials` via `getProviderCredential()`.
+   */
   anthropicApiKey?: string;
-  /** Anthropic base URL for spawned sessions (e.g., 'http://127.0.0.1:3456' for meridian) */
+  /**
+   * @deprecated v1.0.0 — use `credentials.anthropic.baseUrl` instead.
+   * Anthropic base URL for spawned sessions.
+   */
   anthropicBaseUrl?: string;
   /** Minutes of idle-at-prompt before a non-protected session is killed (default: 15) */
   idlePromptKillMinutes?: number;
@@ -1581,6 +1656,15 @@ export interface InstarConfig {
   host?: string;
   /** Session manager config */
   sessions: SessionManagerConfig;
+  /**
+   * Per-topic framework override. Maps a Telegram topic ID (as string,
+   * since JSON object keys are strings) to the framework that should
+   * run sessions spawned for that topic. When unset, sessions inherit
+   * the agent-level `sessions.framework` (or default `claude-code`).
+   * Lets you flip a single topic to Codex without changing the whole
+   * agent's framework.
+   */
+  topicFrameworks?: Record<string, 'claude-code' | 'codex-cli'>;
   /** Job scheduler config */
   scheduler: JobSchedulerConfig;
   /** Registered users */
