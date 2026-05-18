@@ -221,6 +221,9 @@ export class PostUpdateMigrator {
       result.upgraded.push(`provider-portability: v1.0.0 migration recorded. ${codexNote}`);
     } catch (err) {
       result.errors.push(`provider-portability: config.json write failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // ── Fleet watchdog (lifeline-shadow-install-self-heal spec) ──────────
   //
   // The user-machine fleet watchdog supervises ALL instar agents on the host.
