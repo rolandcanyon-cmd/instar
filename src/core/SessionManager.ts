@@ -1432,7 +1432,7 @@ rm()  { "${shimRunner}" rm  "$@"; }
    * Used for Telegram-driven conversational sessions.
    * Optionally sends an initial message after Claude is ready.
    */
-  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string; framework?: IntelligenceFramework; codexLocalProvider?: 'ollama' | 'lmstudio' }): Promise<string> {
+  async spawnInteractiveSession(initialMessage?: string, name?: string, options?: { telegramTopicId?: number; slackChannelId?: string; resumeSessionId?: string; framework?: IntelligenceFramework; codexLocalProvider?: 'ollama' | 'lmstudio'; defaultModel?: string }): Promise<string> {
     const sanitized = name
       ? name.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
       : null;
@@ -1480,7 +1480,10 @@ rm()  { "${shimRunner}" rm  "$@"; }
     if (!binaryPath) {
       throw new Error(`No binary path available for framework "${framework}"`);
     }
-    const defaultModel = this.config.frameworkDefaultModels?.[framework];
+    // Per-call defaultModel override (used by /local-model to set Codex's
+    // local model id) wins over config defaults. Config defaults survive
+    // for cloud-Codex topics that haven't been customized.
+    const defaultModel = options?.defaultModel ?? this.config.frameworkDefaultModels?.[framework];
     const launchSpec = buildInteractiveLaunch(framework, {
       binaryPath,
       ...(options?.resumeSessionId ? { resumeSessionId: options.resumeSessionId } : {}),

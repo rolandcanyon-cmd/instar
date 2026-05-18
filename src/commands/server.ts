@@ -318,6 +318,7 @@ let _topicFrameworks: Record<string, 'claude-code' | 'codex-cli'> = {};
 /** Runtime-mutable, atomically-persisted per-topic framework store.
  *  Initialized in startServer(); consulted by resolveTopicFramework on every spawn. */
 let _topicFrameworksStore: import('../core/TopicFrameworksStore.js').TopicFrameworksStore | null = null;
+let _topicLocalModelStore: import('../core/TopicLocalModelStore.js').TopicLocalModelStore | null = null;
 /** Default framework for sessions when no per-topic override is set. */
 let _defaultFramework: 'claude-code' | 'codex-cli' = 'claude-code';
 
@@ -594,7 +595,22 @@ async function spawnSessionForTopic(
     console.warn(`[spawnSessionForTopic] ensureFrameworkIdentityFile failed (non-fatal):`, err instanceof Error ? err.message : err);
   }
 
-  const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage, sessionName, { telegramTopicId: topicId, resumeSessionId, framework });
+  // Per-topic local-model selection (Codex --oss passthrough). The store
+  // merges runtime overrides (set by /local-model) with config.json
+  // defaults. spawnInteractiveSession's codexLocalProvider option flows
+  // through to frameworkSessionLaunch which composes the
+  // `codex exec --oss --local-provider <p> --model <m>` argv.
+  const localEntry = _topicLocalModelStore?.get(topicId) ?? null;
+  const codexLocalProvider = framework === 'codex-cli' ? localEntry?.provider : undefined;
+  const codexLocalModelOverride = framework === 'codex-cli' && localEntry?.model ? localEntry.model : undefined;
+
+  const newSessionName = await sessionManager.spawnInteractiveSession(bootstrapMessage, sessionName, {
+    telegramTopicId: topicId,
+    resumeSessionId,
+    framework,
+    ...(codexLocalProvider ? { codexLocalProvider } : {}),
+    ...(codexLocalModelOverride ? { defaultModel: codexLocalModelOverride } : {}),
+  });
 
   // Clear the resume entry after successful spawn to prevent stale reuse
   if (resumeSessionId) {
@@ -998,6 +1014,93 @@ function wireTelegramCallbacks(
     }
 
     return { ok: true, message: `Routed this topic to "${framework}". ${existingSession ? 'Session respawned.' : 'Will take effect when a session starts for this topic.'}` };
+  };
+
+  // /local-model — conversational counterpart of editing config.json.
+  // Justin's rule: every config change must be reachable via Telegram.
+  // Validates the requested provider is reachable before flipping the
+  // binding, then persists via TopicLocalModelStore + respawns.
+  telegram.onLocalModelCommand = async (topicId: number, provider: string | null, model: string | null): Promise<{ ok: boolean; message: string }> => {
+    if (!_topicLocalModelStore) {
+      return { ok: false, message: 'Local-model store not initialized — server boot was incomplete. Restart the server.' };
+    }
+
+    // Status query
+    if (provider === null) {
+      const current = _topicLocalModelStore.get(topicId);
+      const fw = resolveTopicFramework(topicId);
+      if (!current) {
+        return {
+          ok: true,
+          message: fw === 'codex-cli'
+            ? 'This topic is on Codex with the cloud model. Run /local-model ollama [model] to switch to a local model (Ollama / LM Studio supported).'
+            : `This topic is on "${fw}", which doesn't support the local-model path. Run /route codex-cli first, then /local-model ollama [model].`,
+        };
+      }
+      return { ok: true, message: `This topic is on Codex via local ${current.provider}${current.model ? ` (model: ${current.model})` : ''}. Run /local-model off to revert to cloud Codex.` };
+    }
+
+    // Disable
+    if (provider === 'off' || provider === 'none' || provider === 'disable') {
+      const cleared = _topicLocalModelStore.clear(topicId);
+      if (!cleared) {
+        return { ok: true, message: 'This topic was not on a local model. Nothing to change.' };
+      }
+      _topicResumeMap?.remove(topicId);
+      const existingSession = telegram.getSessionForTopic(topicId);
+      if (existingSession) {
+        try {
+          await respawnSessionForTopic(
+            sessionManager, telegram, existingSession, topicId, undefined,
+            topicMemory, undefined, undefined, { silent: true },
+          );
+        } catch (err) {
+          return { ok: false, message: `Cleared local-model binding, but respawn failed: ${err instanceof Error ? err.message : String(err)}. Effect on next session.` };
+        }
+      }
+      return { ok: true, message: 'Reverted to cloud Codex. Session respawned.' };
+    }
+
+    // Validate provider
+    const validProviders = ['ollama', 'lmstudio'];
+    if (!validProviders.includes(provider)) {
+      return { ok: false, message: `Unknown local-model provider "${provider}". Supported: ${validProviders.join(', ')}. Or "/local-model off" to revert.` };
+    }
+
+    // Topic must be on codex-cli — local-model goes through Codex --oss.
+    const fw = resolveTopicFramework(topicId);
+    if (fw !== 'codex-cli') {
+      return { ok: false, message: `This topic is on "${fw}". Local models route through Codex CLI's --oss flag, so the topic must be on codex-cli first. Run /route codex-cli, then re-run this command.` };
+    }
+
+    // Pre-flight: provider reachability + model availability (best-effort).
+    try {
+      const { checkLocalProviderReachable } = await import('../providers/adapters/openai-codex/transport/checkLocalProvider.js');
+      const reachable = await checkLocalProviderReachable(provider as 'ollama' | 'lmstudio', model ?? undefined);
+      if (!reachable.ok) {
+        return { ok: false, message: `Can't reach ${provider} — ${reachable.reason}. Once that's fixed, re-run this command.` };
+      }
+    } catch (err) {
+      console.warn('[onLocalModelCommand] reachability check skipped (helper missing):', err);
+      // Fall through; spawn will fail loudly if the provider truly isn't reachable.
+    }
+
+    _topicLocalModelStore.set(topicId, { provider: provider as 'ollama' | 'lmstudio', ...(model ? { model } : {}) });
+    _topicResumeMap?.remove(topicId);
+
+    const existingSession = telegram.getSessionForTopic(topicId);
+    if (existingSession) {
+      try {
+        await respawnSessionForTopic(
+          sessionManager, telegram, existingSession, topicId, undefined,
+          topicMemory, undefined, undefined, { silent: true },
+        );
+      } catch (err) {
+        return { ok: false, message: `Persisted local-model binding, but respawn failed: ${err instanceof Error ? err.message : String(err)}. Effect on next session.` };
+      }
+    }
+
+    return { ok: true, message: `Switched this topic to local ${provider}${model ? ` (model: ${model})` : ' (default model)'}. ${existingSession ? 'Session respawned.' : 'Will take effect when a session starts for this topic.'}` };
   };
 }
 
@@ -2274,6 +2377,33 @@ export async function startServer(options: StartOptions): Promise<void> {
         });
       } catch (err) {
         console.warn(`[server] TopicFrameworksStore failed to initialize: ${err}`);
+      }
+      // Per-topic local-model selection — Codex --oss --local-provider
+      // passthrough. Driven conversationally via /local-model in Telegram;
+      // operator-edited defaults come from config.json's topicCodexLocalProvider
+      // + topicCodexLocalModel maps (merged into a single TopicLocalModelEntry
+      // per topic).
+      try {
+        const { TopicLocalModelStore } = await import('../core/TopicLocalModelStore.js');
+        const localProviderDefaults =
+          (config as { topicCodexLocalProvider?: Record<string, 'ollama' | 'lmstudio'> }).topicCodexLocalProvider
+          ?? {};
+        const localModelDefaults =
+          (config as { topicCodexLocalModel?: Record<string, string> }).topicCodexLocalModel
+          ?? {};
+        const mergedDefaults: Record<string, { provider: 'ollama' | 'lmstudio'; model?: string }> = {};
+        for (const [topic, provider] of Object.entries(localProviderDefaults)) {
+          mergedDefaults[topic] = {
+            provider,
+            ...(localModelDefaults[topic] ? { model: localModelDefaults[topic] } : {}),
+          };
+        }
+        _topicLocalModelStore = new TopicLocalModelStore({
+          stateFilePath: path.join(config.stateDir, 'state', 'topic-local-models.json'),
+          configDefaults: mergedDefaults,
+        });
+      } catch (err) {
+        console.warn(`[server] TopicLocalModelStore failed to initialize: ${err}`);
       }
       const built = buildIntelligenceProvider({
         framework,
