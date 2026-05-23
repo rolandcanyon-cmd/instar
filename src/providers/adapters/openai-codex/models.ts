@@ -18,19 +18,39 @@ import type { ModelTier } from '../../types.js';
  * Model availability on the ChatGPT subscription auth path differs from
  * OPENAI_API_KEY auth. Per OpenAI Community thread 1378986 (referenced
  * 2026-05-15), several `-codex` suffixed model names were retired from
- * ChatGPT accounts on 2026-04-14 and are API-only now. Empirically
- * probed 2026-05-15 against Justin's ChatGPT Plus subscription via
- * codex-cli 0.130.0:
+ * ChatGPT accounts on 2026-04-14 and are API-only now.
  *
- *   ✅ working on ChatGPT account:  gpt-5.2, gpt-5.3-codex, gpt-5.4
- *   ❌ rejected on ChatGPT account: gpt-5, gpt-5-codex, gpt-5.2-codex
- *                                   (Codex CLI's default), gpt-5.3, gpt-5.4-codex
+ * RE-PROBED 2026-05-23 against Justin's ChatGPT subscription via
+ * codex-cli 0.133.0 (live, during the codex test harness):
+ *
+ *   ✅ working on ChatGPT account:  gpt-5.2, gpt-5.3-codex, gpt-5.4, gpt-5.5 (NEW)
+ *   ❌ rejected on ChatGPT account: gpt-5.5-codex, gpt-5.4-codex
+ *                                   ("not supported when using Codex with a
+ *                                   ChatGPT account"), and the older
+ *                                   gpt-5, gpt-5-codex, gpt-5.2-codex, gpt-5.3.
+ *   Pattern holds: plain gpt-5.x models work; `-codex` suffix is API-only
+ *   EXCEPT the grandfathered gpt-5.3-codex.
+ *
+ * TOKEN-BURN observation (same trivial "reply OK" prompt, 2026-05-23):
+ *   gpt-5.2 = 103 tokens · gpt-5.3-codex = 5,574 · gpt-5.5 = 7,399.
+ *   The reasoning models (5.3-codex, 5.5) burn ~50-70x more than gpt-5.2
+ *   even on a trivial prompt (reasoning overhead). This is why the `fast`
+ *   tier — used by cheap internal calls (gates, tone-gate, classification)
+ *   — MUST stay on gpt-5.2: routing those through a reasoning model would
+ *   torch quota. The reasoning burn is only worth it for real session work.
  *
  * Default tier choices below favor the subscription path:
- *   - fast:     gpt-5.2 (cheapest working, plain ChatGPT model)
- *   - balanced: gpt-5.3-codex (coding-specialist tier)
- *   - capable:  gpt-5.4 (most powerful; burns ~20x more quota per
- *                forum reports, use sparingly)
+ *   - fast:     gpt-5.2 (cheapest working; NO reasoning overhead — keep for
+ *                all cheap internal LLM calls)
+ *   - balanced: gpt-5.3-codex (coding-specialist tier — the session default)
+ *   - capable:  gpt-5.4 (most powerful older tier; high burn, use sparingly)
+ *
+ * gpt-5.5 is now Codex CLI's OWN default (codey's ~/.codex/config.toml) and
+ * is confirmed working on the subscription. Whether to promote the session
+ * default from gpt-5.3-codex (coding-specialist) to gpt-5.5 (newest
+ * generalist) is a product decision pending a real coding-quality + burn
+ * benchmark — NOT changed here to avoid a silent default shift. gpt-5.5 is
+ * available now via a raw per-call model name.
  *
  * Callers on the API-key path can override these per-call to access the
  * full model surface (gpt-5-codex, etc.) by passing a raw model name
