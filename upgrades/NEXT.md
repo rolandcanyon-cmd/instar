@@ -6,6 +6,12 @@
 
 Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory. NOT YET PUBLISHED — Justin reviews before deploy.
 
+### Item 9: framework arg-rendering audit-completeness matrix
+
+codey asked for centralized framework-specific argument rendering with a test matrix for `claude-code` + `codex-cli`. The centralization already exists at `src/core/frameworkSessionLaunch.ts` (`buildInteractiveLaunch` + `buildHeadlessLaunch`, used at every spawn site), and the existing `frameworkSessionLaunch.test.ts` has 38 cases.
+
+This adds the EXPLICIT audit-completeness invariant: a new matrix-style test (`tests/unit/framework-arg-rendering-matrix.test.ts`) that loops over every framework in `ALL_SUPPORTED_FRAMEWORKS` and asserts BOTH interactive AND headless builders produce non-empty argv for canonical inputs. If a future framework is added without registering one of the builders, this test fails loudly — structural enforcement against the silent skew the audit worried about.
+
 ### Item 11: cross-agent communication discipline (anti-confabulation)
 
 A new CLAUDE.md section names three concrete failure modes that all share the root cause "narrate intentions as if they were completed actions":
