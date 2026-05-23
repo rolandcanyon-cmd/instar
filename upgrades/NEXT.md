@@ -6,6 +6,14 @@
 
 Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory. NOT YET PUBLISHED — Justin reviews before deploy.
 
+### Item 5: scheduler default-on (autonomy continuity)
+
+Previously `Config.ts` resolved `scheduler.enabled` to `false` when the file didn't specify it. Codex agents (and any agent shipping without explicit scheduler config) silently lost autonomy-continuity tasks — org-intent drift audits, threadline sync, post-update self-healing — anything that runs on the scheduler.
+
+Now: the runtime fallback is `true`. `ConfigDefaults.SHARED_DEFAULTS` adds `scheduler: { enabled: true }` so PostUpdateMigrator backfills the field on existing agents whose config block is missing it. Agents with an explicit `enabled: false` are preserved (operator choice wins).
+
+Empirical: codey went from `/status.scheduler === null` to `{ running: true, jobCount: 27, enabledJobs: 27, activeJobSessions: 1 }`.
+
 ### Item 2: SpawnRequestManager reads session cap via live accessor
 
 Previously the manager cached `maxSessions` at construction. Operators who raised `sessions.maxSessions` in the config saw `/status` reflect the new cap, but threadline spawn-denial payloads kept reporting the old cap (e.g. `Session limit reached (15/10)` while `/status.sessions.max` = 30). codey identified this split-brain on echo's live state.
