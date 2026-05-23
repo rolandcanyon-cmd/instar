@@ -6,6 +6,16 @@
 
 Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory. NOT YET PUBLISHED — Justin reviews before deploy.
 
+### Item 4: post-update restart handshake (defer "Just updated, restarting" until verified)
+
+Previously `AutoUpdater` sent "Just updated to vX. Restarting to pick up the changes." BEFORE the restart actually took effect. If the new process didn't boot on the new code (any reason), operators were told the update was live when it wasn't — exactly the version-skew codey reported (`runtime v1.2.48` while `installed v1.2.50`).
+
+New `UpdateRestartHandshake` module + verifier:
+- **Phase 1** (old process, pre-restart): write `state/restart-handshake.json` with `{expectedVersion, previousVersion, deferredNotification}` instead of calling `notify()` immediately.
+- **Phase 2** (new process, server startup): compare `ProcessIntegrity.runningVersion` to `expectedVersion`. On match, emit the deferred notification + clear the marker. On mismatch, emit an honest "applied but still running old code" message and bump retry count; second boot escalates loud.
+
+Both pieces are wired: AutoUpdater optionally accepts the handshake (back-compat fallback for tests), and `server.ts` instantiates + verifies before AutoUpdater construction.
+
 ### Item 10: canonical `maxSessions` config migration
 
 Older agent configs used a top-level `maxSessions` field; the canonical location is `sessions.maxSessions`. Some agents (echo as of 2026-05-22) carry BOTH keys with divergent values. Item 2's spawn-cap accessor already reads canonical first, so the dual state was harmless in code — but still misleading in the file. New `PostUpdateMigrator.migrateLegacyMaxSessions()` step canonicalizes on update:
