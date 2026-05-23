@@ -6416,6 +6416,15 @@ export async function startServer(options: StartOptions): Promise<void> {
     let spawnManager: SpawnRequestManager;
     spawnManager = new SpawnRequestManager({
       maxSessions: config.sessions.maxSessions ?? 5,
+      // Live accessor — read config on every admission check so operators
+      // raising sessions.maxSessions don't have to rebuild the manager.
+      // Resolves the split-brain where /status reflected the new cap but
+      // spawn denials kept reporting the constructor value (codex-instar
+      // audit Item 2). Reads the canonical key first; if absent, falls back
+      // to the legacy top-level maxSessions for older configs.
+      getMaxSessions: () => config.sessions?.maxSessions
+        ?? (config as { maxSessions?: number }).maxSessions
+        ?? 5,
       getActiveSessions: () => sessionManager.listRunningSessions(),
       spawnSession: async (prompt, opts) => {
         const session = await sessionManager.spawnSession({

@@ -6,6 +6,12 @@
 
 Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory. NOT YET PUBLISHED — Justin reviews before deploy.
 
+### Item 2: SpawnRequestManager reads session cap via live accessor
+
+Previously the manager cached `maxSessions` at construction. Operators who raised `sessions.maxSessions` in the config saw `/status` reflect the new cap, but threadline spawn-denial payloads kept reporting the old cap (e.g. `Session limit reached (15/10)` while `/status.sessions.max` = 30). codey identified this split-brain on echo's live state.
+
+Now: an optional `getMaxSessions: () => number` accessor is consulted on every admission check; the construction site passes a closure that reads `config.sessions?.maxSessions ?? config.maxSessions ?? 5`. The constructor `maxSessions` remains as a back-compat fallback. Denial messages report the live value. This also dissolves the legacy-vs-canonical `maxSessions` ambiguity at read time (audit Item 10 will canonicalize the config key itself).
+
 ### Item 1: `/threadline/relay-send` now respects caller priority
 
 Previously the endpoint hardcoded `priority: 'medium'` on every local-delivery envelope. Critical coordination traffic was indistinguishable from routine sends on the recipient side, which starved the spawn-cap override policy and caused urgent cross-agent messages to be denied at the session cap.
