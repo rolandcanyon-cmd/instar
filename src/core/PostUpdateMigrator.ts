@@ -32,7 +32,7 @@ import { HTTP_HOOK_TEMPLATES, buildHttpHookSettings } from '../data/http-hook-te
 import { getMigrationDefaults, applyDefaults } from '../config/ConfigDefaults.js';
 import { installBuiltinSkills } from '../commands/init.js';
 import { crossesBreaking, writeLifelineRestartSignal } from './version-skew.js';
-import { installAutoStart } from '../commands/setup.js';
+import { installAutoStart, installBootWrapper } from '../commands/setup.js';
 import { installBuiltinJobs } from '../scheduler/InstallBuiltinJobs.js';
 import { jobsMigrate } from '../commands/jobMigrate.js';
 import { snapshotUserNamespace, verifyMigrationInvariants } from '../scheduler/MigrationInvariants.js';
@@ -197,9 +197,54 @@ export class PostUpdateMigrator {
     this.migrateConversationalCatalogPlaybookManifest(result);
     this.migrateWorktreeConvention(result);
     this.migrateBootWrapperToCjs(result);
+    this.migrateBootWrapperAbiCheck(result);
     this.migrateStaleLifelineSignal(result);
 
     return result;
+  }
+
+  /**
+   * Regenerate the boot wrapper when it predates the ABI-aware node
+   * self-heal (recurring-SQLite-bane fix).
+   *
+   * The `.js → .cjs` migration above only regenerates the wrapper when the
+   * plist still references the old `.js` name — agents already on `.cjs`
+   * (the majority) are skipped, so they'd never receive the new
+   * selfHealNodeSymlink logic that detects "node runs but can't load
+   * better-sqlite3" and re-points to an ABI-compatible node. This migration
+   * closes that gap: if the on-disk `instar-boot.cjs` lacks the ABI-check
+   * marker, regenerate it via installBootWrapper.
+   *
+   * Idempotent: once the marker is present, it skips.
+   */
+  private migrateBootWrapperAbiCheck(result: MigrationResult): void {
+    if (process.platform !== 'darwin') {
+      result.skipped.push('boot-wrapper ABI-check: non-darwin');
+      return;
+    }
+    const bootWrapperPath = path.join(this.config.stateDir, 'instar-boot.cjs');
+    if (!fs.existsSync(bootWrapperPath)) {
+      result.skipped.push('boot-wrapper ABI-check: no instar-boot.cjs present');
+      return;
+    }
+    let content: string;
+    try {
+      content = fs.readFileSync(bootWrapperPath, 'utf-8');
+    } catch (err) {
+      result.errors.push(`boot-wrapper ABI-check read: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+    // Marker string emitted by the new selfHealNodeSymlink ABI branch.
+    if (content.includes('cannot load better-sqlite3 (ABI drift)')) {
+      result.skipped.push('boot-wrapper ABI-check: already current');
+      return;
+    }
+    try {
+      installBootWrapper(this.config.projectDir);
+      result.upgraded.push('boot-wrapper ABI-check: regenerated instar-boot.cjs with ABI-aware node self-heal');
+    } catch (err) {
+      result.errors.push(`boot-wrapper ABI-check regen: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // ── Boot-wrapper .js → .cjs plist migration ─────────────────────────
