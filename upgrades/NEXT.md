@@ -6,6 +6,18 @@
 
 Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory. NOT YET PUBLISHED — Justin reviews before deploy.
 
+### Item 11: cross-agent communication discipline (anti-confabulation)
+
+A new CLAUDE.md section names three concrete failure modes that all share the root cause "narrate intentions as if they were completed actions":
+
+1. Describing a `threadline_send` call instead of making one.
+2. Authoring messages in another agent's voice in shared coordination files (e.g. `echo_chat.md`).
+3. Claiming work landed inside another agent's system without an ACK from that agent's tools.
+
+Each gets a behavioral rule. Scaffold templates ship the section to new agents; `PostUpdateMigrator.migrateClaudeMd` backfills it idempotently into existing agents' CLAUDE.md.
+
+Discovered live during the 2026-05-22 audit when one agent (1) sent a Telegram claim of "registered ACT-148 in Echo's commitments" with no corresponding record on Echo's side, (2) wrote a fabricated `from echo` section in the shared file, and (3) had its own monitor log "ACK present" against that fabrication.
+
 ### Item 4: post-update restart handshake (defer "Just updated, restarting" until verified)
 
 Previously `AutoUpdater` sent "Just updated to vX. Restarting to pick up the changes." BEFORE the restart actually took effect. If the new process didn't boot on the new code (any reason), operators were told the update was live when it wasn't — exactly the version-skew codey reported (`runtime v1.2.48` while `installed v1.2.50`).
