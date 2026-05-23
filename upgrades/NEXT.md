@@ -43,3 +43,13 @@ Net effect: the detector couldn't tell idle/working/stuck apart on Codex, so gen
 Fixed empirically from live gpt-5.3-codex panes: the canonical work indicator is the `Working (Ns • esc to interrupt)` status line plus `• Ran` action bullets and the dot-spinner. The model-name status line and placeholder prompt are now correctly treated as IDLE.
 
 Tests: `codex-activity-signal.test.ts` (10) — idle pane false, working pane true, `• Ran` bullet, bare esc-to-interrupt, model-name-alone false, placeholder-alone false, spinner, + Claude regression guard.
+
+---
+
+### Codex-only enforcement guard (absolute requirement)
+
+A codex-only agent (enabledFrameworks without 'claude-code') must NEVER invoke Claude — not the main session, not internal LLM calls (gates, sentinels, summaries, relationship intelligence). instar's main provider was already framework-aware, but several fallback paths construct a Claude provider directly when the Codex provider can't be built. On a machine where the `claude` binary is installed, those fallbacks SILENTLY use Claude — an invisible violation.
+
+New structural guard (`claudeForbiddenGuard`): when the agent is codex-only, `setClaudeForbidden()` is called once at server boot. `ClaudeCliIntelligenceProvider`'s constructor then throws `ClaudeForbiddenError` — any path that reaches for Claude surfaces loudly at the call site instead of silently degrading to Claude. The relationship-intelligence and topic-summary fallbacks now skip Claude when forbidden (those features run without LLM rather than on Claude). PipeSessionSpawner was already framework-aware.
+
+Tests: `claude-forbidden-guard.test.ts` (10) — isCodexOnly detection, flag lifecycle, assert throws with context, and the core enforcement (ClaudeCliIntelligenceProvider construction throws when forbidden). 65 existing provider/framework tests still pass.
