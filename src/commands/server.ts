@@ -5647,6 +5647,9 @@ export async function startServer(options: StartOptions): Promise<void> {
           stateDir: config.stateDir,
           intelligence: sharedIntelligence,
           agentName: config.projectName ?? 'the agent',
+          // Resolved default framework so idle/stall detection uses the right
+          // pane signals (Codex panes don't match Claude prompt patterns).
+          agentFramework: _defaultFramework,
           hasAgentRespondedSince: (topicId, sinceMs) => {
             const sinceIso = new Date(sinceMs).toISOString();
             // Check Telegram log

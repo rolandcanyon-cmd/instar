@@ -63,3 +63,18 @@ Per Justin (2026-05-23): the Codex session default moves from gpt-5.3-codex (cod
 Reasoning-effort research (Justin asked about token savings): levels are low|medium|high|xhigh ('minimal' is GPT-5-only — errors on gpt-5.5). Empirically, on a trivial prompt the levels barely differ (low=7.4k, medium=8.9k, high=7.4k tokens) because the cost is dominated by Codex CLI's fixed per-invocation overhead (openai/codex#19996), not reasoning — the delta only shows on complex tasks. codey's config.toml sets medium (OpenAI's recommended default). The real cheap-call quota win is the fast tier (gpt-5.2, ~103 tokens vs 7k+), already in place.
 
 Tests: 50 framework tests updated + pass (balanced default assertions → gpt-5.5).
+
+---
+
+### PresenceProxy Codex-blindness (the other half of the stuck-session bug)
+
+The Codex activity-signal fix above corrected the StallTriageNurse / silence sentinel. But PresenceProxy has its OWN detection, and it was blind on Codex in two places:
+
+1. **Finished-detection (standby flood).** The "agent finished → stop heartbeats" early-exit used `detectSessionIdle`, whose patterns are Claude-shaped (`❯`, `>`, `$`, "bypass permissions"). A Codex idle pane (the `gpt-5.3-codex medium · <dir>` status line + `›` composer) matches none of them, so the finished-check never fired on Codex — "still working" heartbeats kept flooding after the agent was done.
+2. **Stall-assessment fallback (silent stuck session).** When the tier-3 LLM call failed or returned an unparseable class, the assessment defaulted to `'working'`. A stuck Codex session whose pane the LLM couldn't read was assumed active forever and never escalated to the user.
+
+Fix: two framework-aware pure functions threaded with the agent's resolved default framework (`agentFramework` on `PresenceProxyConfig`, wired from `_defaultFramework` at server boot):
+- **`detectSessionFinished(snapshot, framework)`** — for `codex-cli`, "finished" means `!looksActivelyWorking` (the `›` composer renders in BOTH idle and working panes, so prompt-presence is not a valid discriminator). `claude-code` and absent-framework keep `detectSessionIdle` (back-compat).
+- **`deterministicStallAssessment(snapshot, framework)`** — when the LLM is unavailable/unparseable, fall back to the deterministic active-work signal (`looksActivelyWorking`) instead of blindly assuming "working". No active-work signal → `'stalled'` so it surfaces. This also hardens the Claude path: the old "default to working forever" was itself the silently-stopped failure mode.
+
+Tests: `presence-proxy-codex-blindness.test.ts` (10) — codex idle reads finished (and locks that `detectSessionIdle` alone missed it), codex working not-finished, claude back-compat, absent-framework default, codex stuck/idle/null → stalled, codex/claude working → working. 86 existing presence-proxy tests still pass.
