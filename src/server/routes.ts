@@ -12284,11 +12284,31 @@ export function createRoutes(ctx: RouteContext): Router {
       timeoutSeconds,
       originTopicId,
       purpose,
+      priority,
     } = req.body;
 
     if (!targetAgent || !message) {
       res.status(400).json({ success: false, error: 'Missing required fields: targetAgent, message' });
       return;
+    }
+
+    // Caller-supplied priority — accept ['critical','high','medium','low'].
+    // Default to 'medium' when omitted. Reject any unknown string so caller
+    // gets a clear 400 rather than silently downgraded delivery. The local
+    // envelope used to hardcode 'medium', which made critical coordination
+    // traffic indistinguishable from routine sends and starved the spawn
+    // override policy in SpawnRequestManager.
+    const ALLOWED_PRIORITIES: ReadonlyArray<MessagePriority> = ['critical', 'high', 'medium', 'low'];
+    let resolvedPriority: MessagePriority = 'medium';
+    if (priority !== undefined && priority !== null) {
+      if (typeof priority !== 'string' || !(ALLOWED_PRIORITIES as readonly string[]).includes(priority)) {
+        res.status(400).json({
+          success: false,
+          error: `Invalid priority "${String(priority)}". Allowed: ${ALLOWED_PRIORITIES.join(', ')}.`,
+        });
+        return;
+      }
+      resolvedPriority = priority as MessagePriority;
     }
 
     // THREAD-TOPIC-LINKAGE-SPEC.md: validate the optional originTopicId early.
@@ -12534,7 +12554,7 @@ export function createRoutes(ctx: RouteContext): Router {
                     from: { agent: ctx.config.projectName, session: 'threadline', machine: 'local' },
                     to: { agent: localTarget.name, session: 'best', machine: 'local' },
                     type: 'request' as const,
-                    priority: 'medium' as const,
+                    priority: resolvedPriority,
                     subject: 'Relay message',
                     body: message,
                     threadId: effectiveThreadId,
