@@ -179,6 +179,7 @@ export class PostUpdateMigrator {
     this.migrateScripts(result);
     this.migrateSettings(result);
     this.migrateConfig(result);
+    this.migrateLegacyMaxSessions(result);
     this.migratePrPipelineArtifacts(result);
     this.migrateBackupManifest(result);
     this.migrateGitignore(result);
@@ -3526,6 +3527,92 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
    * Generate self-knowledge tree for agents that don't have one.
    * Uses managed/unmanaged merge if one already exists.
    */
+  /**
+   * Canonical maxSessions migration — codex-instar audit Item 10.
+   *
+   * Older agent configs used a top-level `maxSessions` field; the current
+   * canonical location is `sessions.maxSessions`. Some agents (echo as of
+   * 2026-05-22) carry BOTH keys, with divergent values — the legacy key is
+   * dead in code today (after audit Item 2's fallback chain reads canonical
+   * first), but it's still cruft and still misleading to anyone reading the
+   * file.
+   *
+   * Logic:
+   *  - If only canonical key → no-op (skip).
+   *  - If neither key → no-op (skip).
+   *  - If only legacy key → copy to canonical, delete legacy.
+   *  - If both → keep canonical, delete legacy (canonical wins; legacy is
+   *    presumed stale because it was historically the only source).
+   *
+   * Idempotent: subsequent runs find no legacy key and skip.
+   */
+  private migrateLegacyMaxSessions(result: MigrationResult): void {
+    const configPath = path.join(this.config.stateDir, 'config.json');
+    if (!fs.existsSync(configPath)) {
+      result.skipped.push('legacy maxSessions migration (config.json not found)');
+      return;
+    }
+
+    let config: Record<string, unknown>;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (err) {
+      result.errors.push(`legacy maxSessions migration: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const hasLegacy = typeof config.maxSessions === 'number';
+    const sessionsBlock = (config.sessions as Record<string, unknown> | undefined) ?? undefined;
+    const hasCanonical = sessionsBlock !== undefined && typeof sessionsBlock.maxSessions === 'number';
+
+    if (!hasLegacy) {
+      result.skipped.push('legacy maxSessions migration (no legacy key present)');
+      return;
+    }
+
+    const legacyValue = config.maxSessions as number;
+
+    if (!hasCanonical) {
+      // Only legacy key exists — promote to canonical.
+      const newSessions: Record<string, unknown> = sessionsBlock
+        ? { ...sessionsBlock, maxSessions: legacyValue }
+        : { maxSessions: legacyValue };
+      config.sessions = newSessions;
+      delete config.maxSessions;
+      result.upgraded.push(`config.json: promoted legacy maxSessions=${legacyValue} to sessions.maxSessions`);
+    } else {
+      // Both keys exist — keep canonical, delete legacy.
+      const canonicalValue = (config.sessions as Record<string, unknown>).maxSessions as number;
+      delete config.maxSessions;
+      if (canonicalValue !== legacyValue) {
+        result.upgraded.push(`config.json: removed stale legacy maxSessions=${legacyValue} (canonical sessions.maxSessions=${canonicalValue} retained)`);
+      } else {
+        result.upgraded.push(`config.json: removed duplicate legacy maxSessions=${legacyValue} (matched canonical)`);
+      }
+    }
+
+    try {
+      const bak = configPath + '.bak';
+      const tmp = configPath + '.tmp';
+      fs.copyFileSync(configPath, bak);
+      fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
+      fs.renameSync(tmp, configPath);
+
+      try {
+        const securityLogPath = path.join(this.config.stateDir, 'security.jsonl');
+        const auditEntry = {
+          event: 'config-migration-legacy-maxsessions',
+          timestamp: new Date().toISOString(),
+          changes: result.upgraded.filter(u => u.includes('legacy maxSessions') || u.includes('canonical sessions.maxSessions')),
+          source: 'PostUpdateMigrator.migrateLegacyMaxSessions',
+        };
+        fs.appendFileSync(securityLogPath, JSON.stringify(auditEntry) + '\n');
+      } catch { /* audit log is best-effort */ }
+    } catch (err) {
+      result.errors.push(`legacy maxSessions migration write: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private migrateSelfKnowledgeTree(result: MigrationResult): void {
     const treeFilePath = path.join(this.config.stateDir, 'self-knowledge-tree.json');
 

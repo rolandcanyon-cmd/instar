@@ -6,6 +6,16 @@
 
 Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory. NOT YET PUBLISHED — Justin reviews before deploy.
 
+### Item 10: canonical `maxSessions` config migration
+
+Older agent configs used a top-level `maxSessions` field; the canonical location is `sessions.maxSessions`. Some agents (echo as of 2026-05-22) carry BOTH keys with divergent values. Item 2's spawn-cap accessor already reads canonical first, so the dual state was harmless in code — but still misleading in the file. New `PostUpdateMigrator.migrateLegacyMaxSessions()` step canonicalizes on update:
+
+- Only legacy → promoted to `sessions.maxSessions` (preserving other sessions fields).
+- Both → canonical retained, legacy removed.
+- Only canonical, or neither → no-op.
+
+Idempotent. Atomic write. Appends a `config-migration-legacy-maxsessions` audit entry to `.instar/security.jsonl`.
+
 ### Item 5: scheduler default-on (autonomy continuity)
 
 Previously `Config.ts` resolved `scheduler.enabled` to `false` when the file didn't specify it. Codex agents (and any agent shipping without explicit scheduler config) silently lost autonomy-continuity tasks — org-intent drift audits, threadline sync, post-update self-healing — anything that runs on the scheduler.
