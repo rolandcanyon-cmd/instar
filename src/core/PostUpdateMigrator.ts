@@ -202,6 +202,7 @@ export class PostUpdateMigrator {
     this.migrateBootWrapperToCjs(result);
     this.migrateBootWrapperAbiCheck(result);
     this.migrateStaleLifelineSignal(result);
+    this.migrateThreadlineConversationStore(result);
 
     return result;
   }
@@ -338,6 +339,137 @@ export class PostUpdateMigrator {
       );
     } catch (err) {
       result.errors.push(`stale-lifeline-signal: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Threadline Phase 1 keystone (THREADLINE-CONVERSATION-KEYSTONE-SPEC, Migration
+   * parity): fold the legacy thread-resume-map.json + context-thread-map.json
+   * into the unified conversations.json so in-flight conversations survive the
+   * update with their turn/binding context. Idempotent (skips a threadId already
+   * present in conversations.json — never clobbers runtime-written rows),
+   * atomic (tmp + rename), and field-preserving (sessionUuid, agentIdentity,
+   * pinned, lifecycle incl. failed/archived, cross-machine fields). Reconciliation
+   * rule: the resume entry is authoritative for session binding; the contextId
+   * index is attached from the context map (distinct fields, no conflict).
+   */
+  private migrateThreadlineConversationStore(result: MigrationResult): void {
+    const dir = path.join(this.config.stateDir, 'threadline');
+    const resumePath = path.join(dir, 'thread-resume-map.json');
+    const ctxPath = path.join(dir, 'context-thread-map.json');
+    const convPath = path.join(dir, 'conversations.json');
+
+    if (!fs.existsSync(resumePath) && !fs.existsSync(ctxPath)) {
+      result.skipped.push('threadline-conversations: no legacy stores to fold');
+      return;
+    }
+
+    // Load existing unified store (idempotency — never overwrite live rows).
+    let store: { version: 1; conversations: Record<string, Record<string, unknown>>; lastModified: string };
+    try {
+      if (fs.existsSync(convPath)) {
+        const parsed = JSON.parse(fs.readFileSync(convPath, 'utf-8'));
+        store = (parsed && parsed.version === 1 && parsed.conversations)
+          ? parsed
+          : { version: 1, conversations: {}, lastModified: new Date().toISOString() };
+      } else {
+        store = { version: 1, conversations: {}, lastModified: new Date().toISOString() };
+      }
+    } catch {
+      store = { version: 1, conversations: {}, lastModified: new Date().toISOString() };
+    }
+
+    const now = new Date().toISOString();
+    let folded = 0;
+
+    // 1) Fold ThreadResumeMap entries (authoritative for session binding).
+    try {
+      if (fs.existsSync(resumePath)) {
+        const resumeMap = JSON.parse(fs.readFileSync(resumePath, 'utf-8')) as Record<string, Record<string, unknown>>;
+        for (const [threadId, e] of Object.entries(resumeMap)) {
+          if (!threadId || typeof e !== 'object' || e === null) continue;
+          if (store.conversations[threadId]) continue; // idempotent — keep live row
+          const remoteAgent = typeof e.remoteAgent === 'string' ? e.remoteAgent : undefined;
+          store.conversations[threadId] = {
+            threadId,
+            version: 0,
+            participants: { peers: remoteAgent ? [remoteAgent] : [] },
+            remoteAgent,
+            state: typeof e.state === 'string' ? e.state : 'idle',
+            resolvedAt: e.resolvedAt,
+            sessionUuid: typeof e.uuid === 'string' ? e.uuid : undefined,
+            boundSessionName: typeof e.sessionName === 'string' ? e.sessionName : undefined,
+            boundTopicId: typeof e.originTopicId === 'number' ? e.originTopicId : undefined,
+            originSessionName: typeof e.originSessionName === 'string' ? e.originSessionName : undefined,
+            spawnMode: e.spawnMode,
+            subject: typeof e.subject === 'string' ? e.subject : undefined,
+            pinned: e.pinned === true,
+            messageCount: typeof e.messageCount === 'number' ? e.messageCount : 0,
+            machineOrigin: e.machineOrigin,
+            migratedTo: e.migratedTo,
+            turnCount: 0,
+            createdAt: typeof e.createdAt === 'string' ? e.createdAt : now,
+            savedAt: now,
+            lastActivityAt: typeof e.lastAccessedAt === 'string' ? e.lastAccessedAt : now,
+          };
+          folded++;
+        }
+      }
+    } catch (err) {
+      result.errors.push(`threadline-conversations resume fold: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // 2) Attach ContextThreadMap identity bindings (reconciliation: resume entry
+    //    is authoritative for session binding; contextId index rebuilt from here).
+    try {
+      if (fs.existsSync(ctxPath)) {
+        const ctxFile = JSON.parse(fs.readFileSync(ctxPath, 'utf-8')) as { mappings?: Array<Record<string, unknown>> };
+        const mappings = Array.isArray(ctxFile.mappings) ? ctxFile.mappings : [];
+        for (const m of mappings) {
+          const threadId = typeof m.threadId === 'string' ? m.threadId : undefined;
+          if (!threadId) continue;
+          const existing = store.conversations[threadId];
+          if (existing) {
+            if (existing.contextId === undefined && typeof m.contextId === 'string') existing.contextId = m.contextId;
+            if (existing.agentIdentity === undefined && typeof m.agentIdentity === 'string') existing.agentIdentity = m.agentIdentity;
+          } else {
+            // Context-only thread (no resume entry) — create a minimal row so the
+            // identity binding (hijack guard) is not lost.
+            store.conversations[threadId] = {
+              threadId, version: 0, participants: { peers: [] },
+              state: 'idle', pinned: false, messageCount: 0, turnCount: 0,
+              contextId: typeof m.contextId === 'string' ? m.contextId : undefined,
+              agentIdentity: typeof m.agentIdentity === 'string' ? m.agentIdentity : undefined,
+              createdAt: typeof m.createdAt === 'string' ? m.createdAt : now,
+              savedAt: now,
+              lastActivityAt: typeof m.lastAccessedAt === 'string' ? m.lastAccessedAt : now,
+            };
+            folded++;
+          }
+        }
+      }
+    } catch (err) {
+      result.errors.push(`threadline-conversations context fold: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    if (folded === 0) {
+      result.skipped.push('threadline-conversations: nothing new to fold (already migrated)');
+      return;
+    }
+
+    // Atomic write (backup + tmp + rename).
+    try {
+      store.lastModified = now;
+      fs.mkdirSync(dir, { recursive: true });
+      if (fs.existsSync(convPath)) {
+        try { fs.copyFileSync(convPath, `${convPath}.bak`); } catch { /* best-effort backup */ }
+      }
+      const tmp = `${convPath}.migrate-${process.pid}-${Date.now()}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(store, null, 2) + '\n');
+      fs.renameSync(tmp, convPath);
+      result.upgraded.push(`threadline-conversations: folded ${folded} legacy thread(s) into conversations.json`);
+    } catch (err) {
+      result.errors.push(`threadline-conversations write: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
