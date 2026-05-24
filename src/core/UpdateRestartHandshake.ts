@@ -32,6 +32,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { SafeFsExecutor } from './SafeFsExecutor.js';
 
 export interface HandshakeState {
   /** Version we expected to be running after the restart we triggered. */
@@ -114,9 +115,12 @@ export class UpdateRestartHandshake {
   /** Phase 2 — successful verification, clear the marker. */
   clearHandshake(): void {
     try {
-      if (fs.existsSync(this.filePath)) {
-        fs.unlinkSync(this.filePath);
-      }
+      // safeRmSync with force:true is rm -f semantics — no throw if the
+      // marker is already absent, so no existsSync guard needed.
+      SafeFsExecutor.safeRmSync(this.filePath, {
+        force: true,
+        operation: 'UpdateRestartHandshake.clearHandshake',
+      });
     } catch {
       // @silent-fallback-ok — clearing failure is non-fatal; the next
       // successful boot will rewrite or re-clear.

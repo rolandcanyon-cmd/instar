@@ -4,7 +4,7 @@
 
 ## What Changed
 
-Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory. NOT YET PUBLISHED — Justin reviews before deploy.
+Audit pass against instar running on Codex agents. Multiple framework-level fixes from codey's shortcomings inventory.
 
 ### Item 3 — status doc, no code change shipped
 

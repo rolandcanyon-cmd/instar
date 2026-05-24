@@ -189,7 +189,10 @@ describe('/threadline/relay-send caller-supplied priority', () => {
   afterAll(async () => {
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
     if (fakeTargetServer) await new Promise<void>((resolve) => fakeTargetServer.close(() => resolve()));
-    try { fs.unlinkSync(tokenFilePath); } catch { /* @silent-fallback-ok */ }
+    SafeFsExecutor.safeRmSync(tokenFilePath, {
+      force: true,
+      operation: 'tests/integration/threadline-relay-send-priority.test.ts:cleanup-token',
+    });
     SafeFsExecutor.safeRmSync(projectDir, {
       recursive: true,
       force: true,
