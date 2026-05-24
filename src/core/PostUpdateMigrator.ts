@@ -2361,6 +2361,43 @@ Strip the \`[telegram:N]\` prefix before interpreting the message. Respond natur
       result.skipped.push('CLAUDE.md: Private Viewer section already present');
     }
 
+    // Secret Drop section. Pre-existing agents whose CLAUDE.md predates the
+    // Secret Drop template section never received it — and because
+    // migrateFrameworkShadowCapabilities copies sections FROM CLAUDE.md, a
+    // missing source section also means Codex/Gemini shadows (AGENTS.md) never
+    // learn the capability, so those agents improvise a weaker plaintext-file
+    // handoff and even ask the user to edit a file (observed live on codey,
+    // 2026-05-24). Content-sniff and inject the full section if absent. Inserted
+    // immediately before the Cloudflare Tunnel marker (template document order)
+    // so the shadow-capability slicer bounds the section cleanly at the next
+    // marker. The retrieve-line hardening below patches an existing section; this
+    // block ensures the section exists in the first place.
+    if (!content.includes('**Secret Drop**')) {
+      const section = `
+**Secret Drop** — Securely collect secrets (API keys, passwords, tokens) from users without exposing them in chat history.
+- Request a secret: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/secrets/request -H 'Content-Type: application/json' -d '{"label":"OpenAI API Key","description":"Needed for GPT integration","topicId":TOPIC_ID}'\`
+- The response includes a one-time URL (\`localUrl\` and \`tunnelUrl\`). Send this link to the user.
+- When the user submits the secret through the form, you receive a Telegram confirmation in the specified topic.
+- **Retrieve the secret (HARDENED — required)**: \`node .instar/scripts/secret-drop-retrieve.mjs TOKEN field-name\` — streams the field VALUE to stdout, prints field NAMES + lengths to stderr, NEVER prints the response body. Discover available fields with \`... TOKEN --names\`.
+- **NEVER use \`curl /secrets/retrieve\` directly** — the raw curl pattern dumps the full JSON response (including the secret value) into the Bash tool transcript.
+- List pending: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/secrets/pending\`
+- **Security**: One-time use, expires after 15 minutes, in-memory only (never written to disk), CSRF-protected.
+- **When to use** (PROACTIVE — this is the trigger): the moment a user offers to give you a credential (API key, password, token) or you realize you need one, use Secret Drop. It is the ONLY correct way to collect a secret. NEVER accept it pasted into Telegram or chat, and NEVER create a local file (e.g. \`.instar/secrets/foo.env\`) and ask the user to edit/paste into it — that defeats the one-time, in-memory, never-on-disk guarantee and asks the user to edit files (which you must never do). Always issue a Secret Drop one-time link instead.
+`;
+      const tunnelIdx = content.indexOf('**Cloudflare Tunnel**');
+      const scriptsIdx = content.indexOf('**Scripts**');
+      const insertBefore = tunnelIdx >= 0 ? tunnelIdx : scriptsIdx;
+      if (insertBefore >= 0) {
+        content = content.slice(0, insertBefore) + section.trimStart() + '\n' + content.slice(insertBefore);
+      } else {
+        content += '\n' + section;
+      }
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Secret Drop section');
+    } else {
+      result.skipped.push('CLAUDE.md: Secret Drop section already present');
+    }
+
     // Tunnel-failure-resilience awareness (spec Part 7). Existing agents
     // already have the Cloudflare Tunnel section but not the resilience
     // text — content-sniff and append a bullet so they can explain a link
@@ -2827,6 +2864,7 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
     const markers = [
       '### Self-Discovery',
       '**Private Viewing**',
+      '**Secret Drop**',
       '**Cloudflare Tunnel**',
       '**Dashboard**',
       '**File Viewer',
@@ -2856,18 +2894,32 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
         const start = claudeMd.indexOf(marker);
         if (start < 0) continue;
         // Slice from the marker through the start of the next top-level
-        // heading (##/### line) or EOF. The leading "\n" guard avoids
-        // matching headings inside fenced code blocks at column 0 only
-        // when they begin a line.
+        // heading (##/### line) OR the next capability marker, whichever comes
+        // first. The leading "\n" guard avoids matching headings inside fenced
+        // code blocks at column 0 only when they begin a line. Bounding at the
+        // next marker (not only the next heading) is required because these
+        // capability sections are `**bold**` blocks with NO intervening
+        // heading — without it, slicing one bold section over-grabs every
+        // following bold section up to the next ### and duplicates them in the
+        // shadow. (Regression context: `**Secret Drop**` sits between
+        // `**Private Viewing**` and `**Cloudflare Tunnel**`; a heading-only
+        // bound would have copied Tunnel + everything after into the Secret
+        // Drop slice.)
         const after = claudeMd.slice(start);
         // Skip past the marker's own header line, then look for the next
-        // heading. Without this, a marker that itself starts with "###"
+        // boundary. Without this, a marker that itself starts with "###"
         // would zero-length match.
         const nlAfterMarker = after.indexOf('\n');
         const searchFrom = nlAfterMarker >= 0 ? nlAfterMarker + 1 : 0;
         const tail = after.slice(searchFrom);
-        const nextRel = tail.search(/(^|\n)(##|###) [^#\n]/);
-        const sectionEnd = nextRel >= 0 ? searchFrom + nextRel : after.length;
+        let nextRel = tail.search(/(^|\n)(##|###) [^#\n]/);
+        if (nextRel < 0) nextRel = tail.length;
+        for (const other of markers) {
+          if (other === marker) continue;
+          const oi = tail.indexOf(other);
+          if (oi >= 0 && oi < nextRel) nextRel = oi;
+        }
+        const sectionEnd = searchFrom + nextRel;
         const section = after.slice(0, sectionEnd).trimEnd();
         appended = appended.trimEnd() + '\n\n' + section + '\n';
         mirrored++;

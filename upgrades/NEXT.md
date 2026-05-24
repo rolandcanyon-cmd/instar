@@ -115,3 +115,34 @@ Tests: `frameworkSessionLaunch.test.ts` + `StallTriageNurse.test.ts` updated (10
 ## Rollback (tier mapping)
 
 Revert the two map entries in both files (`balanced`→gpt-5.5, `capable`→gpt-5.4) and drop `gpt-5.4-mini` from the `/sessions/create` allowlist. No data/schema/migration involved.
+
+---
+
+### Secret Drop now reaches Codex agents (capability-awareness parity)
+
+Live codey test (2026-05-24) caught a real gap: when offered an API key over Telegram, codey correctly refused to take it in chat — but instead of using the built-in **Secret Drop** one-time link, it improvised a plaintext `.instar/secrets/openai.env` file and asked the user to open the dashboard and edit it by hand. Weaker (plaintext at rest) and a direct violation of "never ask the user to edit files."
+
+Root cause was a two-part awareness gap, not a missing feature (Secret Drop has always been wired):
+1. `migrateClaudeMd` only patched an *existing* Secret Drop section's retrieve line — it never *added* the section to a stale CLAUDE.md that predated it. Agents (Claude and Codex alike) that updated in place never learned the capability.
+2. `migrateFrameworkShadowCapabilities` — which mirrors CLAUDE.md capability sections into Codex's `AGENTS.md` (its session-start briefing) — had `**Secret Drop**` missing from its marker allowlist, and its slice boundary stopped only at headings, so a bold-marker section wedged between two others (Secret Drop sits between Private Viewing and Cloudflare Tunnel) was never propagated and would have over-grabbed its neighbors if naively added.
+
+Fixes: the CLAUDE.md template's Secret Drop section now carries an explicit proactive trigger (the moment a user offers a credential → one-time link, NEVER chat-paste, NEVER a local file to edit); `migrateClaudeMd` injects the full section when absent; `migrateFrameworkShadowCapabilities` adds `**Secret Drop**` to its markers and bounds each slice at the next marker (so Codex agents get it without duplicating neighbors). This is an Agent Awareness + Migration Parity fix for the Codex framework, which the standards previously enforced only for Claude.
+
+## What to Tell Your User
+
+I looked at instar under a microscope on the OpenAI-engine side this session and fixed a batch of things that quietly affected reliability — most of them turned out to help every agent, not just the Codex one:
+
+- Your agent's memory no longer throws itself away and rebuilds on every restart (this was happening silently for a long time).
+- The OpenAI-engine "gears" are set correctly now (a light, a medium, and a heavy model picked for cost and speed).
+- Stuck-session detection and the standby heartbeat work correctly on the OpenAI engine instead of mis-firing.
+- And the new one: when you offer your agent a secret like an API key, it now hands you a secure one-time link instead of making a file for you to edit. That fix reaches OpenAI-engine agents too, which previously never learned about the secure drop-box at all.
+
+Nothing here requires anything from you — it lands on your next update.
+
+## Summary of New Capabilities
+
+- ABI-aware Node selection — ends the recurring "SQLite broke after a brew upgrade" degradation.
+- Codex activity-signal + PresenceProxy correction — accurate stuck-session detection on the OpenAI engine.
+- Codex model tier mapping (light=gpt-5.2 / medium=gpt-5.4-mini / heavy=gpt-5.5), subscription-aware; main chat stays on gpt-5.5.
+- SemanticMemory vec0 false-corruption fix — vector recall persists across restarts (all frameworks).
+- Secret Drop capability-awareness parity for Codex — agents on the OpenAI engine now use the secure one-time link instead of improvising a plaintext file.

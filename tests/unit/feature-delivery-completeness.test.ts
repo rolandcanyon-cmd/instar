@@ -121,6 +121,7 @@ describe('Feature Delivery Completeness', () => {
     const featureSections = [
       'Self-Discovery',
       'Private Viewing',
+      'Secret Drop',
       'Dashboard',
       'File Viewer',
       'Threadline Network',
@@ -156,6 +157,7 @@ describe('Feature Delivery Completeness', () => {
       'POST /view',               // alternate check for Private Viewing
       '/dashboard',               // alternate check for Dashboard
       '**Dashboard**',            // alternate check for Dashboard (bold markdown variant)
+      '**Secret Drop**',          // alternate check for Secret Drop (bold markdown variant — migrateClaudeMd ensure-section)
       '/coherence/check',         // alternate check for Coherence Gate
       '/operations/evaluate',     // alternate check for External Operation Safety
       'instar playbook',          // alternate check for Playbook
