@@ -100,7 +100,7 @@ import { ThreadlineRouter } from '../threadline/ThreadlineRouter.js';
 import { resolveThreadlineMcpEntry } from '../threadline/mcpEntry.js';
 import { ThreadResumeMap } from '../threadline/ThreadResumeMap.js';
 import { ConversationStore } from '../threadline/ConversationStore.js';
-import { WarrantsReplyGate } from '../threadline/WarrantsReplyGate.js';
+import { WarrantsReplyGate, evaluateAndRecordInbound } from '../threadline/WarrantsReplyGate.js';
 import { ListenerSessionManager } from '../threadline/ListenerSessionManager.js';
 import { SystemReviewer } from '../monitoring/SystemReviewer.js';
 import { createSessionProbes } from '../monitoring/probes/SessionProbe.js';
@@ -7075,54 +7075,22 @@ export async function startServer(options: StartOptions): Promise<void> {
           // novelty state lives on the Conversation, not the one-shot worker.
           {
             const gateThreadId = msg.threadId ?? getSyntheticThreadId(senderFingerprint);
-            const existingConv = conversationStore.get(gateThreadId);
-            // Relay inbound is agent-to-agent → autonomous (stricter). The
-            // human-in-loop exemption is derived ONLY from our own records and
-            // is never set from anything the peer sends (unforgeable).
-            const humanInLoop = false;
-            let gateVerdict: import('../threadline/WarrantsReplyGate.js').WarrantsReplyVerdict | null = null;
             try {
-              gateVerdict = await warrantsReplyGate.evaluate({
+              // Relay inbound is agent-to-agent → autonomous (stricter). The
+              // human-in-loop exemption is derived ONLY from our own records and
+              // is never set from anything the peer sends (unforgeable).
+              const decision = await evaluateAndRecordInbound(warrantsReplyGate, conversationStore, {
                 threadId: gateThreadId,
                 text: textContent,
-                conversation: existingConv,
-                humanInLoop,
+                senderFingerprint,
+                senderName,
+                trustLevel,
+                humanInLoop: false,
               });
-            } catch (gateErr) {
-              // Gate failure → fail toward responsive (never silently drop a message).
-              console.warn(`[relay] warrants-reply gate error (defaulting responsive): ${gateErr instanceof Error ? gateErr.message : gateErr}`);
-            }
-
-            if (gateVerdict) {
-              // Record the inbound on the Conversation — turn state lives here.
-              // A NOVEL turn resets the no-progress counter (a 30-turn novel
-              // collaboration never trips the budget); a non-novel turn accrues
-              // toward the backstop.
-              const verdict = gateVerdict;
-              try {
-                await conversationStore.mutate(gateThreadId, d => {
-                  d.turnCount = verdict.novel ? 0 : d.turnCount + 1;
-                  d.messageCount += 1;
-                  d.lastInboundHash = verdict.normalizedInbound;
-                  d.lastActivityAt = new Date().toISOString();
-                  if (senderFingerprint && !d.participants.peers.includes(senderFingerprint)) d.participants.peers.push(senderFingerprint);
-                  if (!d.remoteAgent) d.remoteAgent = senderName;
-                  d.trustLevel = trustLevel;
-                  if (!verdict.warrants) {
-                    d.state = 'idle';
-                  } else if (d.state === 'open' || d.state === 'idle') {
-                    d.state = 'active';
-                  }
-                  return d;
-                });
-              } catch (convErr) {
-                console.warn(`[relay] ConversationStore mutate failed (non-fatal): ${convErr instanceof Error ? convErr.message : convErr}`);
-              }
-
-              if (!verdict.warrants) {
-                console.log(`[relay] warrants-reply gate suppressed reply (${verdict.signal}) for ${senderName} thread ${gateThreadId.slice(0, 8)}`);
+              if (decision.suppress) {
+                console.log(`[relay] warrants-reply gate suppressed reply (${decision.verdict.signal}) for ${senderName} thread ${gateThreadId.slice(0, 8)}`);
                 // On budget exhaustion, escalate ONE attention item — never silently drop.
-                if (verdict.budgetExhausted && telegram) {
+                if (decision.verdict.budgetExhausted && telegram) {
                   telegram.createAttentionItem({
                     id: `threadline-loop-${gateThreadId.slice(0, 12)}`,
                     title: `Threadline conversation loop wound down (${senderName})`,
@@ -7134,6 +7102,9 @@ export async function startServer(options: StartOptions): Promise<void> {
                 }
                 return; // short-circuit ALL three routing branches
               }
+            } catch (gateErr) {
+              // Gate failure → fail toward responsive (never silently drop a message).
+              console.warn(`[relay] warrants-reply gate error (defaulting responsive): ${gateErr instanceof Error ? gateErr.message : gateErr}`);
             }
           }
 

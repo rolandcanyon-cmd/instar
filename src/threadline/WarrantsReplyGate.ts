@@ -25,7 +25,7 @@
  * (the one-shot worker provably can't self-police).
  */
 
-import type { Conversation } from './ConversationStore.js';
+import type { Conversation, ConversationStore } from './ConversationStore.js';
 import type { IntelligenceProvider } from '../core/types.js';
 
 // ── Tuning ──────────────────────────────────────────────────────
@@ -38,12 +38,18 @@ const NOVELTY_SIM_THRESHOLD = 0.85;
 const NORMALIZED_MAX_LEN = 600;
 
 /**
- * Decisive control tokens that ALWAYS warrant a reply. Deliberately tight —
- * these are short-but-decisive directives, NOT acknowledgements. Acks
- * (thanks/got it/great/perfect) are the loop fuel and are NOT here.
+ * Decisive control phrases that ALWAYS warrant a reply. Deliberately tight —
+ * these are short-but-decisive directives, NOT acknowledgements (acks like
+ * thanks/got it/great are the loop fuel and are NOT here). Matched as the WHOLE
+ * (normalized) message, never as a substring — so "How did the deploy go?" is a
+ * question, not a "go" control token.
  */
-const CONTROL_TOKEN_RE =
-  /\b(yes|yep|yeah|no|nope|go|proceed|stop|halt|done|approved?|confirm(ed)?|cancel|abort|retry|continue|go ahead|let'?s do it)\b/i;
+const CONTROL_PHRASES = new Set([
+  'yes', 'yep', 'yeah', 'y', 'no', 'nope', 'n', 'go', 'proceed', 'stop', 'halt',
+  'done', 'approve', 'approved', 'confirm', 'confirmed', 'cancel', 'abort',
+  'retry', 'continue', 'go ahead', 'go for it', 'lets do it', 'let s do it',
+  'sounds good', 'yes please', 'proceed please', 'ok go', 'do it',
+]);
 
 /** Question-word openers (combined with a '?' check). */
 const QUESTION_OPENER_RE =
@@ -157,10 +163,11 @@ export function tokenSetSimilarity(a: Set<string>, b: Set<string>): number {
 // ── Deterministic signal detectors ──────────────────────────────
 
 function isControlToken(text: string): boolean {
-  const trimmed = text.trim();
-  // Decisive only when short — "yes" not "yes, but here's a long question...".
-  if (trimmed.split(/\s+/).length > 6) return false;
-  return CONTROL_TOKEN_RE.test(trimmed);
+  // The WHOLE message (normalized) must BE a control phrase — not merely contain
+  // one as a word. This is what keeps "deploy go" / "proceed with the audit"
+  // from masquerading as decisive control tokens.
+  const norm = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+  return CONTROL_PHRASES.has(norm);
 }
 
 function isQuestion(text: string): boolean {
@@ -200,7 +207,11 @@ export class WarrantsReplyGate {
 
     const conv = input.conversation;
     const turnCount = conv?.turnCount ?? 0;
-    const firstContact = !conv || turnCount === 0 || !conv.lastInboundHash;
+    // First contact = no prior inbound recorded on this thread. Keyed on the
+    // presence of history (lastInboundHash), NOT turnCount — turnCount RESETS to
+    // 0 on every novel turn, so a turnCount===0 check would treat every
+    // post-progress turn as first contact and always reply (defeats the gate).
+    const firstContact = !conv || !conv.lastInboundHash;
 
     // Novelty: forward progress vs the last inbound (computed up-front so it is
     // reported on EVERY verdict — the caller resets its no-progress counter on
@@ -288,4 +299,64 @@ ${text.slice(0, 2000)}
       return 'REPLY';
     }
   }
+}
+
+// ── Funnel integration helper ───────────────────────────────────
+
+export interface InboundReplyParams {
+  threadId: string;
+  text: string;
+  senderFingerprint: string;
+  senderName: string;
+  trustLevel: string;
+  /** From OUR OWN verified records, never the peer. Default false (autonomous). */
+  humanInLoop: boolean;
+  expectsReply?: boolean;
+}
+
+export interface InboundReplyDecision {
+  /** true → do NOT spawn a reply worker (short-circuit all routing branches). */
+  suppress: boolean;
+  verdict: WarrantsReplyVerdict;
+}
+
+/**
+ * The single funnel step: evaluate the warrants-a-reply gate AND record the
+ * inbound on the Conversation in one place, so the relay inbound funnel and the
+ * integration tests exercise the SAME code (no copy that could drift). The
+ * no-progress counter resets on a novel turn and accrues otherwise; a suppress
+ * verdict flips the conversation to 'idle'. The caller owns the
+ * attention-escalation + branch short-circuit (it has the messaging surface).
+ */
+export async function evaluateAndRecordInbound(
+  gate: WarrantsReplyGate,
+  store: ConversationStore,
+  params: InboundReplyParams,
+): Promise<InboundReplyDecision> {
+  const existingConv = store.get(params.threadId);
+  const verdict = await gate.evaluate({
+    threadId: params.threadId,
+    text: params.text,
+    conversation: existingConv,
+    humanInLoop: params.humanInLoop,
+    expectsReply: params.expectsReply,
+  });
+  await store.mutate(params.threadId, d => {
+    d.turnCount = verdict.novel ? 0 : d.turnCount + 1;
+    d.messageCount += 1;
+    d.lastInboundHash = verdict.normalizedInbound;
+    d.lastActivityAt = new Date().toISOString();
+    if (params.senderFingerprint && !d.participants.peers.includes(params.senderFingerprint)) {
+      d.participants.peers.push(params.senderFingerprint);
+    }
+    if (!d.remoteAgent) d.remoteAgent = params.senderName;
+    d.trustLevel = params.trustLevel;
+    if (!verdict.warrants) {
+      d.state = 'idle';
+    } else if (d.state === 'open' || d.state === 'idle') {
+      d.state = 'active';
+    }
+    return d;
+  });
+  return { suppress: !verdict.warrants, verdict };
 }
