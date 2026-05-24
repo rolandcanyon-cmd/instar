@@ -122,6 +122,7 @@ describe('Feature Delivery Completeness', () => {
       'Self-Discovery',
       'Private Viewing',
       'Secret Drop',
+      'Commitments & Follow-Through',
       'Dashboard',
       'File Viewer',
       'Threadline Network',
@@ -158,6 +159,7 @@ describe('Feature Delivery Completeness', () => {
       '/dashboard',               // alternate check for Dashboard
       '**Dashboard**',            // alternate check for Dashboard (bold markdown variant)
       '**Secret Drop**',          // alternate check for Secret Drop (bold markdown variant — migrateClaudeMd ensure-section)
+      '**Commitments & Follow-Through**', // alternate check for Commitments (bold markdown variant — migrateClaudeMd ensure-section)
       '/coherence/check',         // alternate check for Coherence Gate
       '/operations/evaluate',     // alternate check for External Operation Safety
       'instar playbook',          // alternate check for Playbook

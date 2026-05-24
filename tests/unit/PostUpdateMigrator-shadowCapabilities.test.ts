@@ -220,6 +220,46 @@ Dashboard body line.
     expect(agents.match(/\*\*Secret Drop\*\*/g)?.length).toBe(1);
   });
 
+  it('propagates Commitments & Follow-Through to a shadow that has its neighbors but not it (no over-grab)', () => {
+    const claudeMd = `# CLAUDE.md — instar
+
+### Self-Discovery (Know Before You Claim)
+
+curl the capabilities endpoint.
+
+**Private Viewing** — auth-gated HTML.
+Private body.
+
+**Secret Drop** — secure secret intake.
+Secret body.
+
+**Commitments & Follow-Through** — durable promise tracking.
+- Open: POST /commitments
+- NEVER improvise the follow-through with a raw sleep/timer.
+
+**Cloudflare Tunnel** — expose the server.
+Tunnel body.
+
+### Coherence Gate
+
+Check coherence.
+`;
+    fs.writeFileSync(path.join(projectDir, 'CLAUDE.md'), claudeMd);
+    fs.writeFileSync(
+      path.join(projectDir, 'AGENTS.md'),
+      '# Echo\n\n### Self-Discovery (Know Before You Claim)\n\ncurl it.\n\n**Private Viewing** — auth-gated HTML.\nPrivate body.\n\n**Cloudflare Tunnel** — expose the server.\nTunnel body.\n',
+    );
+
+    const result = runShadowCaps(migrator(projectDir));
+    expect(result.errors).toEqual([]);
+
+    const agents = fs.readFileSync(path.join(projectDir, 'AGENTS.md'), 'utf-8');
+    expect(agents).toContain('**Commitments & Follow-Through**');
+    expect(agents).toContain('NEVER improvise the follow-through');
+    expect(agents.match(/\*\*Cloudflare Tunnel\*\*/g)?.length).toBe(1);
+    expect(agents.match(/\*\*Commitments & Follow-Through\*\*/g)?.length).toBe(1);
+  });
+
   it('fresh shadow: every bold capability section is appended exactly once (slice bounded at next marker)', () => {
     fs.writeFileSync(path.join(projectDir, 'CLAUDE.md'), SECRET_ADJACENCY_FIXTURE);
     fs.writeFileSync(path.join(projectDir, 'AGENTS.md'), '# Echo\n\nidentity only\n');

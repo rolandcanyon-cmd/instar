@@ -146,3 +146,11 @@ Nothing here requires anything from you — it lands on your next update.
 - Codex model tier mapping (light=gpt-5.2 / medium=gpt-5.4-mini / heavy=gpt-5.5), subscription-aware; main chat stays on gpt-5.5.
 - SemanticMemory vec0 false-corruption fix — vector recall persists across restarts (all frameworks).
 - Secret Drop capability-awareness parity for Codex — agents on the OpenAI engine now use the secure one-time link instead of improvising a plaintext file.
+
+---
+
+### Commitments & Follow-Through now agent-facing (Codex + all frameworks)
+
+Second capability of the awareness-parity pass (after Secret Drop). Live on codey: asked to "report back in 3 minutes," codey improvised a raw shell `sleep` timer — which silently dies when the session ends. The durable mechanism (the commitment-tracker + promise-beacon) had always been wired, but it was only ever documented in the developer/architecture notes, never in the agent's own "here's what you can do" briefing — on any engine. So no agent knew to use it. The OpenAI engine made it visible because it has no startup hook to compensate.
+
+Fix (same recipe as Secret Drop): a new agent-facing **Commitments & Follow-Through** section in the briefing with a clear trigger (when you promise a follow-up, register a commitment; never improvise a timer), injected into existing agents' CLAUDE.md on update, and propagated to the OpenAI-engine briefing (AGENTS.md) via the shadow-capability mirror. Verified live: codey now registers a real commitment (CMT-014) and the follow-through survives restarts. 65 affected tests green.

@@ -200,6 +200,36 @@ describe('PostUpdateMigrator — CLAUDE.md Secret Drop rewrite', () => {
     expect(after.match(/\*\*Private Viewing\*\*/g)?.length).toBe(1);
   });
 
+  it('ADDS the Commitments & Follow-Through section when a stale CLAUDE.md lacks it', () => {
+    // codey live (2026-05-24): improvised a raw `sleep` for "report back in 3 min"
+    // instead of registering a durable commitment, because the follow-through
+    // capability was never agent-facing. Ensure the section is injected when absent.
+    const stale = [
+      '# CLAUDE.md — test',
+      '',
+      '**Private Viewing** — auth-gated HTML pages.',
+      '- Create: POST /view',
+      '',
+      '**Cloudflare Tunnel** — expose the server.',
+      '- Status: GET /tunnel',
+      '',
+    ].join('\n');
+    fs.writeFileSync(claudeMdPath, stale);
+
+    const result = runMigrateClaudeMd(createMigrator(projectDir));
+    expect(result.errors).toEqual([]);
+
+    const after = fs.readFileSync(claudeMdPath, 'utf-8');
+    expect(after).toContain('**Commitments & Follow-Through**');
+    expect(after).toContain('/commitments');
+    // The proactive trigger that prevents codey's exact failure mode:
+    expect(after).toContain('NEVER improvise the follow-through with a raw');
+    // Inserted before Cloudflare Tunnel (document order), neighbors not duplicated.
+    expect(after.indexOf('**Commitments & Follow-Through**')).toBeLessThan(after.indexOf('**Cloudflare Tunnel**'));
+    expect(after.match(/\*\*Cloudflare Tunnel\*\*/g)?.length).toBe(1);
+    expect(result.upgraded.some(u => u.includes('added Commitments & Follow-Through section'))).toBe(true);
+  });
+
   it('is idempotent — re-running does not add a second Secret Drop section', () => {
     const stale = '# CLAUDE.md — test\n\n**Cloudflare Tunnel** — expose.\n- Status: GET /tunnel\n';
     fs.writeFileSync(claudeMdPath, stale);

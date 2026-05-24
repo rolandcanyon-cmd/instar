@@ -2398,6 +2398,37 @@ Strip the \`[telegram:N]\` prefix before interpreting the message. Respond natur
       result.skipped.push('CLAUDE.md: Secret Drop section already present');
     }
 
+    // Commitments & Follow-Through section. The durable follow-through
+    // mechanism (CommitmentTracker + PromiseBeacon, `/commitments`) had no
+    // agent-facing documentation in the template — only the dev/architecture
+    // section mentions it. Result: agents (Codex observed live on codey,
+    // 2026-05-24) improvise a raw `sleep`/background timer for "I'll report
+    // back" promises, which does not survive session turnover. Inject the
+    // agent-facing section if absent, before the Cloudflare Tunnel marker so
+    // the shadow-capability slicer bounds it cleanly.
+    if (!content.includes('**Commitments & Follow-Through**')) {
+      const section = `
+**Commitments & Follow-Through** — Durable tracking for any promise you make to the user. When you say "I'll report back when X", "I'll check in after N minutes", or otherwise commit to a future action, register it so the follow-through survives session turnover, restarts, and compaction.
+- Open a commitment: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/commitments -H 'Content-Type: application/json' -d '{"userRequest":"<what you promised>","type":"follow-up","topicId":TOPIC_ID}'\`
+- List / inspect: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/commitments\` · \`GET /commitments/:id\`
+- Mark delivered when done: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/commitments/:id/deliver\`
+- The PromiseBeacon fires cadenced heartbeats on open commitments so you actually follow through, and the commitment-check job surfaces overdue ones.
+- **When to use** (PROACTIVE — this is the trigger): the moment you promise the user a future action, open a commitment. NEVER improvise the follow-through with a raw \`sleep\`/background timer or by "remembering" — those do not survive a session ending, a restart, or compaction, so the promise is silently dropped. A registered commitment is the ONLY durable path. (Distinct from the Evolution Action Queue / \`/commit-action\`, which tracks self-improvement items, not promises to the user.)
+`;
+      const tunnelIdx = content.indexOf('**Cloudflare Tunnel**');
+      const scriptsIdx = content.indexOf('**Scripts**');
+      const insertBefore = tunnelIdx >= 0 ? tunnelIdx : scriptsIdx;
+      if (insertBefore >= 0) {
+        content = content.slice(0, insertBefore) + section.trimStart() + '\n' + content.slice(insertBefore);
+      } else {
+        content += '\n' + section;
+      }
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Commitments & Follow-Through section');
+    } else {
+      result.skipped.push('CLAUDE.md: Commitments & Follow-Through section already present');
+    }
+
     // Tunnel-failure-resilience awareness (spec Part 7). Existing agents
     // already have the Cloudflare Tunnel section but not the resilience
     // text — content-sniff and append a bullet so they can explain a link
@@ -2865,6 +2896,7 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
       '### Self-Discovery',
       '**Private Viewing**',
       '**Secret Drop**',
+      '**Commitments & Follow-Through**',
       '**Cloudflare Tunnel**',
       '**Dashboard**',
       '**File Viewer',
