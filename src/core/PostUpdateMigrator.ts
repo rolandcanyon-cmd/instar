@@ -1171,48 +1171,60 @@ export class PostUpdateMigrator {
   }
 
   /**
-   * Update the deployed autonomous stop hook to the topic-keyed version.
-   *
-   * The old hook keyed autonomous-session ownership on the Claude session UUID;
-   * a memory-limit restart rotated the UUID, mismatched the state file, and let
-   * the still-running session exit — autonomy died silently. The new hook keys
-   * on the TOPIC (a stable address that survives restarts), demotes session-id
-   * matching to a liveness-gated backstop, and emits a one-line recovery note.
+   * Update the deployed autonomous skill files (stop hook + setup script) to the
+   * current bundled versions. This covers both the topic-keyed ownership fix
+   * (v1.2.55: restarts no longer silently kill autonomy) AND multi-session
+   * per-topic state (each topic runs its own autonomous job from
+   * .instar/autonomous/<topicId>.local.md).
    *
    * installAutonomousSkill() is install-if-missing, so existing agents never get
-   * this through init — a dedicated migration is the only path (Migration Parity
+   * these through init — a dedicated migration is the only path (Migration Parity
    * Standard, "updating existing skill content").
    *
-   * Idempotent + conservative: only re-copies the bundled hook when the installed
-   * copy (a) lacks the new "topic-session-registry" marker AND (b) still looks
-   * like the stock hook (contains "Autonomous Mode Stop Hook"). A customized hook
-   * that no longer matches the stock fingerprint is left untouched.
+   * Idempotent + conservative per file: re-copy the bundled file only when the
+   * installed copy (a) lacks the current capability MARKER AND (b) still matches
+   * the stock FINGERPRINT. A customized file is left untouched. The marker is the
+   * multi-session signature so v1.2.55 topic-keyed installs (which lack it) still
+   * receive this upgrade.
    */
   private migrateAutonomousStopHookTopicKeyed(result: MigrationResult): void {
-    try {
-      const deployed = path.join(
-        this.config.projectDir, '.claude', 'skills', 'autonomous', 'hooks', 'autonomous-stop-hook.sh',
-      );
-      if (!fs.existsSync(deployed)) return; // installAutonomousSkill handles fresh installs
-      const current = fs.readFileSync(deployed, 'utf8');
-      if (current.includes('topic-session-registry')) return; // already topic-keyed — idempotent
-      if (!current.includes('Autonomous Mode Stop Hook')) {
-        result.skipped.push('skills/autonomous/hooks/autonomous-stop-hook.sh: customized — left untouched');
-        return;
+    const upgrade = (
+      relPath: string, marker: string, fingerprint: string, label: string,
+    ): void => {
+      try {
+        const deployed = path.join(this.config.projectDir, ...relPath.split('/'));
+        if (!fs.existsSync(deployed)) return; // installAutonomousSkill handles fresh installs
+        const current = fs.readFileSync(deployed, 'utf8');
+        if (current.includes(marker)) return; // already current — idempotent
+        if (!current.includes(fingerprint)) {
+          result.skipped.push(`${relPath}: customized — left untouched`);
+          return;
+        }
+        const bundled = path.join(__dirname, '..', '..', ...relPath.split('/'));
+        if (!fs.existsSync(bundled)) return;
+        const next = fs.readFileSync(bundled, 'utf8');
+        if (next.includes(marker)) {
+          fs.writeFileSync(deployed, next);
+          fs.chmodSync(deployed, 0o755);
+          result.upgraded.push(label);
+        }
+      } catch (err) {
+        result.errors.push(`${relPath} migration: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const bundled = path.join(
-        __dirname, '..', '..', '.claude', 'skills', 'autonomous', 'hooks', 'autonomous-stop-hook.sh',
-      );
-      if (!fs.existsSync(bundled)) return;
-      const next = fs.readFileSync(bundled, 'utf8');
-      if (next.includes('topic-session-registry')) {
-        fs.writeFileSync(deployed, next);
-        fs.chmodSync(deployed, 0o755);
-        result.upgraded.push('skills/autonomous/hooks/autonomous-stop-hook.sh (topic-keyed ownership + recovery note)');
-      }
-    } catch (err) {
-      result.errors.push(`autonomous stop hook topic-keying migration: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    };
+    // Marker = the multi-session signature (absent from v1.2.55 topic-keyed installs).
+    upgrade(
+      '.claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
+      'MULTI-SESSION (per-topic state)',
+      'Autonomous Mode Stop Hook',
+      'skills/autonomous/hooks/autonomous-stop-hook.sh (topic-keyed + multi-session per-topic state)',
+    );
+    upgrade(
+      '.claude/skills/autonomous/scripts/setup-autonomous.sh',
+      'STATE_PATH=".instar/autonomous/',
+      'autonomous-state.local.md',
+      'skills/autonomous/scripts/setup-autonomous.sh (per-topic state path)',
+    );
   }
 
   /**
@@ -2252,6 +2264,26 @@ Rule: I do not state that work landed inside another agent's state unless I have
       result.upgraded.push('CLAUDE.md: added Cross-Agent Communication Discipline (anti-confabulation) section');
     }
 
+    // Multi-Session Autonomy awareness (Agent Awareness Standard). Existing
+    // agents need to know they can run concurrent per-topic autonomous jobs and
+    // how to list/stop them, even if initialized before this capability existed.
+    if (!content.includes('Multi-Session Autonomy')) {
+      const multiSessionSection = `
+### Multi-Session Autonomy
+
+**Multi-Session Autonomy** — I can run multiple autonomous jobs at once, one per topic (default cap 5, set \`autonomousSessions.maxConcurrent\` in config). Each topic's job is isolated, survives restarts (keyed on its topic), and lives at \`.instar/autonomous/<topicId>.local.md\`.
+
+- What's running: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/autonomous/sessions\`
+- The cap + budget gate is checked automatically when a job starts (\`GET /autonomous/can-start\`); a start is refused at the cap or under budget pressure.
+- Stop one topic's job: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/autonomous/sessions/TOPIC/stop\`
+- Stop every job: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/autonomous/stop-all\`
+- Proactive: "what autonomous jobs are running?" → GET /autonomous/sessions. "stop everything" → POST /autonomous/stop-all. "stop the job on topic X" → POST /autonomous/sessions/X/stop.
+`;
+      content += '\n' + multiSessionSection;
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Multi-Session Autonomy awareness section');
+    }
+
     // Version-Skew Self-Recovery section
     // Tells the agent what's happening when the lifeline+server temporarily
     // mismatch versions during an auto-update. Without this, agents diagnose
@@ -3038,6 +3070,7 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
       '### Playbook — Adaptive Context Engineering',
       '## Threadline Network (Agent-to-Agent Communication)',
       '## Worktree Convention',
+      '**Multi-Session Autonomy**',
     ];
 
     for (const shadowName of ['AGENTS.md', 'GEMINI.md']) {
