@@ -2429,6 +2429,53 @@ Strip the \`[telegram:N]\` prefix before interpreting the message. Respond natur
       result.skipped.push('CLAUDE.md: Commitments & Follow-Through section already present');
     }
 
+    // Publishing (Telegraph public pages). Awareness-parity pass: add the
+    // agent-facing section if absent so it reaches Codex/Gemini shadows via
+    // the markers list. Inserted before Private Viewing (template doc order).
+    if (!content.includes('**Publishing**')) {
+      const section = `
+**Publishing** — Share content as PUBLIC web pages via Telegraph. Instant, zero-config, accessible from anywhere.
+- Publish: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/publish -H 'Content-Type: application/json' -d '{"title":"Page Title","markdown":"# Content here"}'\`
+- List published: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/published\`
+- **⚠ CRITICAL: All Telegraph pages are PUBLIC.** Anyone with the URL can view the content — no auth, no access control. NEVER publish sensitive/private/confidential info via Telegraph; use Private Viewing for that. Always tell the user a Telegraph link is publicly accessible.
+`;
+      const pvIdx = content.indexOf('**Private Viewing**');
+      const scriptsIdx = content.indexOf('**Scripts**');
+      const insertBefore = pvIdx >= 0 ? pvIdx : scriptsIdx;
+      if (insertBefore >= 0) {
+        content = content.slice(0, insertBefore) + section.trimStart() + '\n' + content.slice(insertBefore);
+      } else {
+        content += '\n' + section;
+      }
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Publishing section');
+    } else {
+      result.skipped.push('CLAUDE.md: Publishing section already present');
+    }
+
+    // Attention Queue. Awareness-parity pass — agent-facing capability for
+    // signalling items the user must see. Inserted before Dashboard (doc order).
+    if (!content.includes('**Attention Queue**')) {
+      const section = `
+**Attention Queue** — Signal important items to the user. When something needs their attention — a decision, a review, an anomaly — queue it here instead of hoping they see a chat message.
+- Queue: \`curl -X POST -H "Authorization: Bearer $AUTH" http://localhost:${port}/attention -H 'Content-Type: application/json' -d '{"title":"...","body":"...","priority":"medium","source":"agent"}'\`
+- View / resolve: \`GET /attention\` · \`PATCH /attention/ATT-ID\` with \`{"status":"resolved"}\`
+- **Proactive use**: when you detect something the user should know (stale relationships, failed jobs, CI failures, overdue actions), don't just log it — queue it so it gets seen.
+`;
+      const dashIdx = content.indexOf('**Dashboard**');
+      const scriptsIdx = content.indexOf('**Scripts**');
+      const insertBefore = dashIdx >= 0 ? dashIdx : scriptsIdx;
+      if (insertBefore >= 0) {
+        content = content.slice(0, insertBefore) + section.trimStart() + '\n' + content.slice(insertBefore);
+      } else {
+        content += '\n' + section;
+      }
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Attention Queue section');
+    } else {
+      result.skipped.push('CLAUDE.md: Attention Queue section already present');
+    }
+
     // Tunnel-failure-resilience awareness (spec Part 7). Existing agents
     // already have the Cloudflare Tunnel section but not the resilience
     // text — content-sniff and append a bullet so they can explain a link
@@ -2894,10 +2941,12 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
     // sections preserve narrative ordering in the shadow.
     const markers = [
       '### Self-Discovery',
+      '**Publishing**',
       '**Private Viewing**',
       '**Secret Drop**',
       '**Commitments & Follow-Through**',
       '**Cloudflare Tunnel**',
+      '**Attention Queue**',
       '**Dashboard**',
       '**File Viewer',
       '### Coherence Gate',

@@ -154,3 +154,9 @@ Nothing here requires anything from you — it lands on your next update.
 Second capability of the awareness-parity pass (after Secret Drop). Live on codey: asked to "report back in 3 minutes," codey improvised a raw shell `sleep` timer — which silently dies when the session ends. The durable mechanism (the commitment-tracker + promise-beacon) had always been wired, but it was only ever documented in the developer/architecture notes, never in the agent's own "here's what you can do" briefing — on any engine. So no agent knew to use it. The OpenAI engine made it visible because it has no startup hook to compensate.
 
 Fix (same recipe as Secret Drop): a new agent-facing **Commitments & Follow-Through** section in the briefing with a clear trigger (when you promise a follow-up, register a commitment; never improvise a timer), injected into existing agents' CLAUDE.md on update, and propagated to the OpenAI-engine briefing (AGENTS.md) via the shadow-capability mirror. Verified live: codey now registers a real commitment (CMT-014) and the follow-through survives restarts. 65 affected tests green.
+
+---
+
+### Awareness-parity guard + Publishing/Attention Queue (close the class)
+
+After fixing Secret Drop and Commitments one at a time, added the durable class-fix: a build guard that **fails CI if any agent-facing capability is missing from the OpenAI-engine/Gemini briefing** (the shadow-capability markers). This turns "keep the two briefings in sync" from a hope into a guarantee — the exact Structure-over-Willpower move. Completing the guard surfaced two more capabilities the briefing had been silently dropping — public Publishing (Telegraph) and the Attention Queue — both now added and propagated. Verified on codey: the migration mirrored both into its OpenAI-engine briefing with no duplication. 70 affected tests green.
