@@ -63,6 +63,15 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
     visibility: 'public',
     capabilities: ['chat'],
   },
+  // Scheduler default-on. Autonomous-continuity tasks (org-intent drift
+  // audits, threadline sync, post-update self-healing) only fire when the
+  // scheduler runs, so agents shipping without it lose silent infrastructure
+  // that operators expect to be present. Conservative migration: only
+  // BACKFILLS when `enabled` is missing (per applyDefaults semantics);
+  // never overrides an explicit `false`. codex-instar audit Item 5.
+  scheduler: {
+    enabled: true,
+  },
   // Backup overrides. `includeFiles` is set-unioned with BackupManager's
   // DEFAULT_CONFIG.includeFiles — the empty default here means users and
   // migrators can ADD paths (e.g. pr-pipeline state) without displacing

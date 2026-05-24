@@ -139,8 +139,22 @@ const AGENT_ATTRIBUTABLE_CAUSES: ReadonlySet<SpawnFailureCause> = new Set([
 ]);
 
 export interface SpawnRequestManagerConfig {
-  /** Max concurrent sessions allowed */
+  /**
+   * Max concurrent sessions allowed.
+   *
+   * Used as the fallback when no live accessor is provided (back-compat).
+   * Prefer `getMaxSessions` so the manager reflects config reloads without
+   * needing a constructor rebuild.
+   */
   maxSessions: number;
+  /**
+   * Optional live accessor for the session cap. Called on every admission
+   * check (line ~519). When provided, takes precedence over the constructor
+   * snapshot `maxSessions`. This fixes the split-brain where operators
+   * raised `sessions.maxSessions` in the config but the manager kept
+   * denying at the old cap because the constructor value was frozen.
+   */
+  getMaxSessions?: () => number;
   /** Function to list current running sessions */
   getActiveSessions: () => Session[];
   /**
@@ -511,13 +525,19 @@ export class SpawnRequestManager {
       };
     }
 
-    // Check session limits
+    // Check session limits — prefer the live accessor over the constructor
+    // snapshot so config reloads (e.g. operator raising sessions.maxSessions)
+    // take effect without a manager rebuild. Falls back to the constructor
+    // value for back-compat.
     const activeSessions = this.#config.getActiveSessions();
-    if (activeSessions.length >= this.#config.maxSessions) {
+    const liveMaxSessions = this.#config.getMaxSessions
+      ? this.#config.getMaxSessions()
+      : this.#config.maxSessions;
+    if (activeSessions.length >= liveMaxSessions) {
       if (request.priority !== 'critical' && request.priority !== 'high') {
         return {
           approved: false,
-          reason: `Session limit reached (${activeSessions.length}/${this.#config.maxSessions}). Priority ${request.priority} insufficient to override.`,
+          reason: `Session limit reached (${activeSessions.length}/${liveMaxSessions}). Priority ${request.priority} insufficient to override.`,
           retryAfterMs: 60_000,
         };
       }

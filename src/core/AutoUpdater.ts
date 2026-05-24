@@ -30,6 +30,7 @@ import type { SessionManagerLike, SessionMonitorLike } from './UpdateGate.js';
 import { SafeFsExecutor } from './SafeFsExecutor.js';
 import { crossesBreaking, writeLifelineRestartSignal } from './version-skew.js';
 import { RestartCascadeDampener, formatLocalTimeHHMM } from './RestartCascadeDampener.js';
+import type { UpdateRestartHandshake } from './UpdateRestartHandshake.js';
 
 export interface AutoUpdaterConfig {
   /** How often to check for updates, in minutes. Default: 30 */
@@ -38,6 +39,14 @@ export interface AutoUpdaterConfig {
   autoApply?: boolean;
   /** Telegram topic ID for update notifications (uses Agent Attention if not set) */
   notificationTopicId?: number;
+  /**
+   * Optional restart handshake. When wired, AutoUpdater defers the
+   * "Just updated, restarting" notification until the NEW process verifies
+   * its runningVersion matches the expectedVersion the OLD process wrote.
+   * Resolves the bug where users were told the update was live before the
+   * restart had actually taken effect (codex-instar audit Item 4).
+   */
+  restartHandshake?: UpdateRestartHandshake;
   /** Whether to auto-restart after applying an update. Default: true */
   autoRestart?: boolean;
   /** Delay before applying an update, in minutes. Allows coalescing rapid-fire publishes. Default: 5 */
@@ -162,6 +171,10 @@ export class AutoUpdater {
       preRestartDelaySecs: config?.preRestartDelaySecs ?? 60,
       restartWindow: config?.restartWindow ?? null,
       restartCascadeDampenerWindowMs: config?.restartCascadeDampenerWindowMs ?? 15 * 60_000,
+      // codex-instar audit Item 4 — Required<T> demands every field, so we
+      // coerce undefined to undefined explicitly; consumers branch on
+      // truthiness in gatedRestart.
+      restartHandshake: config?.restartHandshake as UpdateRestartHandshake | undefined as never,
     };
 
     this.gate = new UpdateGate();
@@ -641,9 +654,42 @@ export class AutoUpdater {
         // But only notify ONCE per version to prevent spam in restart loops.
         if (this.lastNotifiedRestartVersion !== newVersion) {
           this.lastNotifiedRestartVersion = newVersion;
-          await this.notify(
-            `Just updated to v${newVersion}. Restarting to pick up the changes.`
-          );
+          // codex-instar audit Item 4 — restart-handshake deferral.
+          //
+          // If a UpdateRestartHandshake is wired, DON'T send the "Just
+          // updated, restarting" notification yet. The current process has
+          // the new bytes on disk but still runs the OLD code in memory;
+          // notifying here would tell the user the update is live before
+          // the restart has actually taken effect. Instead, stash the
+          // notification in the handshake file. Server startup re-reads it
+          // after the NEW process boots, verifies runningVersion ===
+          // expectedVersion, and only THEN emits the notification.
+          //
+          // When no handshake is wired (older agents, tests), fall back to
+          // the previous immediate-notify behavior so nothing regresses.
+          const previousVersion = this.updateChecker.getInstalledVersion();
+          if (this.config.restartHandshake) {
+            try {
+              this.config.restartHandshake.writePendingHandshake({
+                expectedVersion: newVersion,
+                previousVersion,
+                deferredNotification: `Just updated to v${newVersion}. Restarting to pick up the changes.`,
+              });
+            } catch (err) {
+              // Handshake write failed — fall back to immediate notify so
+              // the user isn't left without any signal.
+              console.warn(
+                `[AutoUpdater] Handshake write failed; falling back to immediate notify: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              await this.notify(
+                `Just updated to v${newVersion}. Restarting to pick up the changes.`,
+              );
+            }
+          } else {
+            await this.notify(
+              `Just updated to v${newVersion}. Restarting to pick up the changes.`,
+            );
+          }
         }
         // Give sessions a moment to checkpoint
         const delaySecs = this.config.preRestartDelaySecs;

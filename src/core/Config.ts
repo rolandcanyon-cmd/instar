@@ -650,7 +650,13 @@ export function loadConfig(projectDir?: string): InstarConfig {
 
   const scheduler: JobSchedulerConfig = {
     jobsFile: fileConfig.scheduler?.jobsFile || path.join(stateDir, 'jobs.json'),
-    enabled: fileConfig.scheduler?.enabled ?? false,
+    // Default-on. Autonomous-continuity tasks (org-intent drift audits,
+    // threadline sync, post-update self-healing) only fire when the
+    // scheduler runs; defaulting to off silently broke continuity for
+    // codex-instar agents whose configs didn't ship an explicit enabled
+    // field. ConfigDefaults.ts also backfills the field idempotently in
+    // PostUpdateMigrator. codex-instar audit Item 5.
+    enabled: fileConfig.scheduler?.enabled ?? true,
     maxParallelJobs: fileConfig.scheduler?.maxParallelJobs ?? DEFAULT_MAX_PARALLEL_JOBS,
     quotaThresholds: fileConfig.scheduler?.quotaThresholds || {
       normal: 75,

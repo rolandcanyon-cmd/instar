@@ -179,6 +179,7 @@ export class PostUpdateMigrator {
     this.migrateScripts(result);
     this.migrateSettings(result);
     this.migrateConfig(result);
+    this.migrateLegacyMaxSessions(result);
     this.migratePrPipelineArtifacts(result);
     this.migrateBackupManifest(result);
     this.migrateGitignore(result);
@@ -2168,6 +2169,43 @@ setTimeout(() => process.exit(0), 2000);
     let patched = false;
     const port = this.config.port;
 
+    // Cross-Agent Communication Discipline (anti-confabulation) — codex-instar
+    // audit Item 11. Existing agents need this section even if they were
+    // initialized before it existed. The check uses a content-sniffing marker
+    // distinctive enough to avoid false positives but stable enough to be
+    // idempotent.
+    if (!content.includes('Cross-Agent Communication Discipline (anti-confabulation)')) {
+      const antiConfabulationSection = `
+### Cross-Agent Communication Discipline (anti-confabulation)
+
+**Never narrate cross-agent work as if it happened. Only state work I actually completed.**
+
+When coordinating with another agent, two failure modes are easy to fall into and both burn the other agent's trust irrecoverably:
+
+**1. Describing a tool call instead of making one.**
+Writing "I sent Echo a cross-agent handoff covering the fundamental fix list" is not the same as calling \`threadline_send\`. If I describe the send without making the call, the other agent never receives anything, and my report is a fabrication.
+
+Rule: every claim about a cross-agent action must be preceded by the actual tool call that performed it. If the tool call wasn't made, the claim doesn't get written.
+
+**2. Authoring messages in the other agent's voice in shared files.**
+Coordination files (e.g. \`echo_chat.md\`, \`team-sync.md\`) are append-only multi-agent logs. Sections are stamped with the author's identity. Writing a section labeled "from <other-agent>" — even as a synthesis or "what they might say" — is impersonation: it pollutes the log with content the other agent didn't write, and any reader (including my own monitors!) downstream treats it as real.
+
+Rule: in shared coordination files, I only write sections in my own voice. If I'm summarizing what another agent said, I quote them with attribution to a specific real timestamped section they actually wrote — never paraphrase their position into a new section labeled as theirs.
+
+**3. Registering state inside another agent's system without an ACK.**
+Saying "I registered ACT-148 in Echo's commitments" only counts when Echo's commitment registry actually shows ACT-148 with an authenticated origin. Cross-agent state-mutation goes through Threadline (or an explicit HTTP call to the other agent's authenticated endpoint), and the other agent's system records the entry. Until I see that record (via \`threadline_history\` or a direct probe), nothing has been "registered" in their system.
+
+Rule: I do not state that work landed inside another agent's state unless I have an ACK from that agent's tools showing the record exists. If the tool failed or returned no record, I say so honestly — never paper over it with a description of what I intended.
+
+**The metafailure:** all three patterns share the same root — narrating intentions as if they were completed actions. Catching myself: any sentence about cross-agent work that doesn't have a corresponding tool-call trace within the same response is a flag to stop, run the actual call, and rewrite the sentence to match the outcome.
+
+(Source: codex-instar audit Item 11, 2026-05-22 confabulation incident where one agent fabricated an ACK from another, then logged its own fabrication as evidence of progress.)
+`;
+      content += '\n' + antiConfabulationSection;
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Cross-Agent Communication Discipline (anti-confabulation) section');
+    }
+
     // Version-Skew Self-Recovery section
     // Tells the agent what's happening when the lifeline+server temporarily
     // mismatch versions during an auto-update. Without this, agents diagnose
@@ -3526,6 +3564,92 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
    * Generate self-knowledge tree for agents that don't have one.
    * Uses managed/unmanaged merge if one already exists.
    */
+  /**
+   * Canonical maxSessions migration — codex-instar audit Item 10.
+   *
+   * Older agent configs used a top-level `maxSessions` field; the current
+   * canonical location is `sessions.maxSessions`. Some agents (echo as of
+   * 2026-05-22) carry BOTH keys, with divergent values — the legacy key is
+   * dead in code today (after audit Item 2's fallback chain reads canonical
+   * first), but it's still cruft and still misleading to anyone reading the
+   * file.
+   *
+   * Logic:
+   *  - If only canonical key → no-op (skip).
+   *  - If neither key → no-op (skip).
+   *  - If only legacy key → copy to canonical, delete legacy.
+   *  - If both → keep canonical, delete legacy (canonical wins; legacy is
+   *    presumed stale because it was historically the only source).
+   *
+   * Idempotent: subsequent runs find no legacy key and skip.
+   */
+  private migrateLegacyMaxSessions(result: MigrationResult): void {
+    const configPath = path.join(this.config.stateDir, 'config.json');
+    if (!fs.existsSync(configPath)) {
+      result.skipped.push('legacy maxSessions migration (config.json not found)');
+      return;
+    }
+
+    let config: Record<string, unknown>;
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch (err) {
+      result.errors.push(`legacy maxSessions migration: ${err instanceof Error ? err.message : String(err)}`);
+      return;
+    }
+
+    const hasLegacy = typeof config.maxSessions === 'number';
+    const sessionsBlock = (config.sessions as Record<string, unknown> | undefined) ?? undefined;
+    const hasCanonical = sessionsBlock !== undefined && typeof sessionsBlock.maxSessions === 'number';
+
+    if (!hasLegacy) {
+      result.skipped.push('legacy maxSessions migration (no legacy key present)');
+      return;
+    }
+
+    const legacyValue = config.maxSessions as number;
+
+    if (!hasCanonical) {
+      // Only legacy key exists — promote to canonical.
+      const newSessions: Record<string, unknown> = sessionsBlock
+        ? { ...sessionsBlock, maxSessions: legacyValue }
+        : { maxSessions: legacyValue };
+      config.sessions = newSessions;
+      delete config.maxSessions;
+      result.upgraded.push(`config.json: promoted legacy maxSessions=${legacyValue} to sessions.maxSessions`);
+    } else {
+      // Both keys exist — keep canonical, delete legacy.
+      const canonicalValue = (config.sessions as Record<string, unknown>).maxSessions as number;
+      delete config.maxSessions;
+      if (canonicalValue !== legacyValue) {
+        result.upgraded.push(`config.json: removed stale legacy maxSessions=${legacyValue} (canonical sessions.maxSessions=${canonicalValue} retained)`);
+      } else {
+        result.upgraded.push(`config.json: removed duplicate legacy maxSessions=${legacyValue} (matched canonical)`);
+      }
+    }
+
+    try {
+      const bak = configPath + '.bak';
+      const tmp = configPath + '.tmp';
+      fs.copyFileSync(configPath, bak);
+      fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
+      fs.renameSync(tmp, configPath);
+
+      try {
+        const securityLogPath = path.join(this.config.stateDir, 'security.jsonl');
+        const auditEntry = {
+          event: 'config-migration-legacy-maxsessions',
+          timestamp: new Date().toISOString(),
+          changes: result.upgraded.filter(u => u.includes('legacy maxSessions') || u.includes('canonical sessions.maxSessions')),
+          source: 'PostUpdateMigrator.migrateLegacyMaxSessions',
+        };
+        fs.appendFileSync(securityLogPath, JSON.stringify(auditEntry) + '\n');
+      } catch { /* audit log is best-effort */ }
+    } catch (err) {
+      result.errors.push(`legacy maxSessions migration write: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   private migrateSelfKnowledgeTree(result: MigrationResult): void {
     const treeFilePath = path.join(this.config.stateDir, 'self-knowledge-tree.json');
 

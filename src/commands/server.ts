@@ -33,6 +33,7 @@ import { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.j
 import { DispatchManager } from '../core/DispatchManager.js';
 import { UpdateChecker } from '../core/UpdateChecker.js';
 import { AutoUpdater } from '../core/AutoUpdater.js';
+import { UpdateRestartHandshake, verifyRestartHandshake } from '../core/UpdateRestartHandshake.js';
 import { AutoDispatcher } from '../core/AutoDispatcher.js';
 import { DispatchExecutor } from '../core/DispatchExecutor.js';
 import { registerAgent, unregisterAgent, startHeartbeat } from '../core/AgentRegistry.js';
@@ -4787,6 +4788,53 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }).catch(() => { /* ignore startup check failures */ });
 
+    // codex-instar audit Item 4 — restart-handshake verification.
+    //
+    // If the previous process applied an update and triggered a restart, it
+    // wrote a pending-handshake marker describing what version it expected
+    // to be running and the notification it would have sent. We now verify
+    // that against the NEW process's runningVersion. The "Just updated, ...
+    // restarting" notification only fires AFTER the restart actually took
+    // effect — eliminating the bug where users were told the update was
+    // live before it really was.
+    const restartHandshake = new UpdateRestartHandshake(config.stateDir);
+    try {
+      const outcome = verifyRestartHandshake({
+        handshake: restartHandshake,
+        runningVersion: processIntegrity.runningVersion,
+      });
+      if (outcome.kind === 'verified') {
+        const topicId = state.get<number>('agent-updates-topic') || 0;
+        if (telegram && topicId) {
+          try {
+            await telegram.sendToTopic(topicId, outcome.deferredNotification);
+          } catch (err) {
+            console.warn(`[restart-handshake] verified notification failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          console.log(`[restart-handshake] verified v${outcome.expectedVersion} (no telegram/topic — skipping notification)`);
+        }
+        restartHandshake.clearHandshake();
+      } else if (outcome.kind === 'failed') {
+        const msg = outcome.escalate
+          ? `Heads up — I tried to update to v${outcome.expectedVersion} but the restart didn't pick up the new code. Still running v${outcome.runningVersion}. Retry ${outcome.retryCount}.`
+          : `Update to v${outcome.expectedVersion} was applied but I'm still running v${outcome.runningVersion}. The next restart should pick it up.`;
+        const topicId = state.get<number>('agent-updates-topic') || 0;
+        if (telegram && topicId) {
+          try {
+            await telegram.sendToTopic(topicId, msg);
+          } catch (err) {
+            console.warn(`[restart-handshake] failure notification failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        } else {
+          console.warn(`[restart-handshake] ${msg}`);
+        }
+      }
+    } catch (err) {
+      // Verification must never block startup — log and continue.
+      console.warn(`[restart-handshake] verification error (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // Start auto-updater — periodic check + auto-apply + notify + restart
     // Notifications routed dynamically to Updates topic (see getNotificationTopicId)
     const autoUpdater = new AutoUpdater(
@@ -4799,6 +4847,9 @@ export async function startServer(options: StartOptions): Promise<void> {
         autoRestart: true,
         restartWindow: config.updates?.restartWindow ?? null,
         restartCascadeDampenerWindowMs: config.updates?.restartCascadeDampenerWindowMs,
+        // codex-instar audit Item 4 — wire the handshake into AutoUpdater so
+        // the pre-restart notification is DEFERRED into the marker file.
+        restartHandshake,
       },
       telegram,
       liveConfig,
@@ -6416,6 +6467,15 @@ export async function startServer(options: StartOptions): Promise<void> {
     let spawnManager: SpawnRequestManager;
     spawnManager = new SpawnRequestManager({
       maxSessions: config.sessions.maxSessions ?? 5,
+      // Live accessor — read config on every admission check so operators
+      // raising sessions.maxSessions don't have to rebuild the manager.
+      // Resolves the split-brain where /status reflected the new cap but
+      // spawn denials kept reporting the constructor value (codex-instar
+      // audit Item 2). Reads the canonical key first; if absent, falls back
+      // to the legacy top-level maxSessions for older configs.
+      getMaxSessions: () => config.sessions?.maxSessions
+        ?? (config as { maxSessions?: number }).maxSessions
+        ?? 5,
       getActiveSessions: () => sessionManager.listRunningSessions(),
       spawnSession: async (prompt, opts) => {
         const session = await sessionManager.spawnSession({

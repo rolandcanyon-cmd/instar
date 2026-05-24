@@ -45,6 +45,48 @@ describe('ConfigDefaults', () => {
       expect(defaults.threadline).toBeDefined();
       expect((defaults.threadline as any).relayEnabled).toBe(false);
     });
+
+    it('default-enables the scheduler for new agents (autonomy continuity)', () => {
+      // Regression for codex-instar audit Item 5: agents shipping without
+      // an explicit scheduler.enabled lost org-intent drift audits,
+      // threadline sync, post-update self-healing — anything that runs on
+      // the scheduler. New agents must get enabled:true by default.
+      for (const t of ['managed-project', 'standalone'] as const) {
+        const defaults = getInitDefaults(t);
+        expect((defaults.scheduler as any)?.enabled).toBe(true);
+      }
+      const mig = getMigrationDefaults('managed-project');
+      expect((mig.scheduler as any)?.enabled).toBe(true);
+    });
+
+    it('backfills scheduler.enabled into existing scheduler blocks that lack it', () => {
+      const config: Record<string, unknown> = {
+        scheduler: { maxParallelJobs: 4, jobsFile: '/some/path/jobs.json' },
+      };
+      const defaults = getMigrationDefaults('managed-project');
+      const { patched, changes } = applyDefaults(config, defaults);
+
+      expect(patched).toBe(true);
+      expect((config.scheduler as any).enabled).toBe(true);
+      expect((config.scheduler as any).maxParallelJobs).toBe(4);
+      expect((config.scheduler as any).jobsFile).toBe('/some/path/jobs.json');
+      expect(changes.some(c => c === 'scheduler.enabled (added)')).toBe(true);
+    });
+
+    it('does NOT override an explicit scheduler.enabled=false (operator choice wins)', () => {
+      // An operator who explicitly disabled the scheduler must keep their
+      // setting on update. applyDefaults only adds MISSING keys; never
+      // overrides. Tests this contract for the scheduler field specifically
+      // because the audit explicitly raised it.
+      const config: Record<string, unknown> = {
+        scheduler: { enabled: false, maxParallelJobs: 2 },
+      };
+      const defaults = getMigrationDefaults('managed-project');
+      applyDefaults(config, defaults);
+
+      expect((config.scheduler as any).enabled).toBe(false);
+      expect((config.scheduler as any).maxParallelJobs).toBe(2);
+    });
   });
 
   describe('getMigrationDefaults', () => {
