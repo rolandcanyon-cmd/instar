@@ -3939,7 +3939,27 @@ export function createRoutes(ctx: RouteContext): Router {
       return;
     }
     const sinceMs = parseSinceMs(req.query.since);
-    res.json({ sinceMs, summary: ctx.tokenLedger.summary({ sinceMs }) });
+    // `summary` = Claude token_events (unchanged; this is what BurnDetector reads).
+    // `codex` = the separate Codex-rollout rollup — additive, observability-only.
+    res.json({
+      sinceMs,
+      summary: ctx.tokenLedger.summary({ sinceMs }),
+      codex: ctx.tokenLedger.codexSummary({ sinceMs }),
+    });
+  });
+
+  router.get('/tokens/codex-sessions', (req, res) => {
+    if (!ctx.tokenLedger) {
+      res.status(503).json({ error: 'token ledger unavailable' });
+      return;
+    }
+    const sinceMs = parseSinceMs(req.query.since);
+    let limit = 50;
+    if (typeof req.query.limit === 'string' && /^\d+$/.test(req.query.limit)) {
+      const n = Number(req.query.limit);
+      if (n > 0 && n <= 500) limit = n;
+    }
+    res.json({ sinceMs, limit, sessions: ctx.tokenLedger.codexSessions({ limit, sinceMs }) });
   });
 
   router.get('/tokens/sessions', (req, res) => {

@@ -160,3 +160,15 @@ Fix (same recipe as Secret Drop): a new agent-facing **Commitments & Follow-Thro
 ### Awareness-parity guard + Publishing/Attention Queue (close the class)
 
 After fixing Secret Drop and Commitments one at a time, added the durable class-fix: a build guard that **fails CI if any agent-facing capability is missing from the OpenAI-engine/Gemini briefing** (the shadow-capability markers). This turns "keep the two briefings in sync" from a hope into a guarantee — the exact Structure-over-Willpower move. Completing the guard surfaced two more capabilities the briefing had been silently dropping — public Publishing (Telegraph) and the Attention Queue — both now added and propagated. Verified on codey: the migration mirrored both into its OpenAI-engine briefing with no duplication. 70 affected tests green.
+
+---
+
+### Token ledger now sees Codex usage (observability — all frameworks)
+
+The usage tracker only ever read Claude Code's transcripts, so agents on the OpenAI/Codex engine were invisible to it — their token usage went uncounted and the dashboard showed nothing for them (worse, stale Claude data could masquerade as theirs). This is the "ledger blind to Codex" gap found during the codey live test.
+
+Fix: a new reader for Codex's persisted session "rollout" files (`$CODEX_HOME/sessions/.../rollout-*.jsonl`), which carry a cumulative per-session token total plus the account's real subscription usage percentages. Codex sessions land in a **separate** `codex_token_sessions` table — deliberately NOT the Claude `token_events` table — so the BurnDetector (which reads `summary()`/`byAttributionKey()`) is provably unaffected; this change is observability-only. The poller scans them each tick, attributed to the agent by working directory. `GET /tokens/summary` now returns a `codex` rollup alongside the Claude summary, and a new `GET /tokens/codex-sessions` lists per-session Codex rows.
+
+Verified live on codey: 473 real Codex sessions / 50.5M tokens surfaced, with real subscription usage (primary 11% / secondary 2%), all correctly attributed to the codey project; the Claude total stays separate. 27 tests across tiers (pure parser, ledger ingest + two BurnDetector-isolation tests, poller wiring + filesystem walk, HTTP routes).
+
+Note: surfacing Codex's native rate-limit percentages *as the budget-alarm signal* (to replace the token-projection heuristic that fired a false "100% of budget" alarm on stale data) is a deliberate follow-up — it changes alerting behavior across burn-detection, so it's gated on an explicit decision + side-effects review. The data is captured and visible; the behavior change is not yet wired. <!-- tracked: ACT-150 -->
