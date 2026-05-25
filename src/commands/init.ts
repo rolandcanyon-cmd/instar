@@ -59,6 +59,7 @@ import type { InstarConfig } from '../core/types.js';
 import { SafeGitExecutor } from '../core/SafeGitExecutor.js';
 import { installBuiltinJobs } from '../scheduler/InstallBuiltinJobs.js';
 import { renderNonClaudeIdentityShadows } from '../core/IdentityRenderer.js';
+import { installCodexHooks } from '../core/installCodexHooks.js';
 
 /**
  * Find a free port in the default range (4040-4099) by checking if anything
@@ -3445,6 +3446,17 @@ export function refreshHooksAndSettings(projectDir: string, stateDir: string): v
     installClaudeSettings(projectDir, serverPort);
     refreshClaudeMd(projectDir, stateDir);
   }
+
+  // Codex enforcement-hook layer: wire instar's safety gates into the Codex
+  // agent's native (Claude-compatible, blocking) hook system. Mirror of
+  // installClaudeSettings for the codex-cli framework. Writes the per-project
+  // <projectDir>/.codex/hooks.json (NOT the global ~/.codex — that would leak
+  // gates into the operator's personal Codex). Spec: docs/specs/codex-enforcement-hook-layer.md
+  const codexEnabled = enabledFrameworks.includes('codex-cli');
+  if (codexEnabled) {
+    installCodexHooks(projectDir);
+  }
+
   refreshJobs(stateDir);
   refreshScripts(projectDir, stateDir);
 
@@ -3843,7 +3855,18 @@ function installHooks(stateDir: string): void {
 # Dangerous command guard — safety infrastructure for autonomous agents.
 # Supports safety.level in .instar/config.json:
 #   Level 1 (default): Block and ask user. Level 2: Agent self-verifies.
+# Input: Claude passes the command as arg \$1; Codex (stdin-only) delivers the
+# hook event as JSON on stdin. Claude uses tool_input.command; Codex's exec_command
+# tool uses tool_input.cmd — accept either (verified live 2026-05-24).
 INPUT="$1"
+if [ -z "$INPUT" ]; then
+  INPUT="$(cat 2>/dev/null | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin); ti=d.get('tool_input',{}) or {}
+    print(ti.get('command') or ti.get('cmd') or '')
+except Exception:
+    print('')" 2>/dev/null)"
+fi
 INSTAR_DIR="\${CLAUDE_PROJECT_DIR:-.}/.instar"
 
 # Read safety level from config

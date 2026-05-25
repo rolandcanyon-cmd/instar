@@ -49,6 +49,7 @@ import {
   PR_GATE_SETUP_MD_SHA256,
 } from '../data/pr-gate-artifacts.js';
 import { SafeFsExecutor } from './SafeFsExecutor.js';
+import { installCodexHooks } from './installCodexHooks.js';
 import { DegradationReporter } from '../monitoring/DegradationReporter.js';
 import {
   MigratorStepEngine,
@@ -1509,6 +1510,21 @@ export class PostUpdateMigrator {
       result.upgraded.push('hooks/instar/external-operation-gate.js (MCP tool safety gate)');
     } catch (err) {
       result.errors.push(`external-operation-gate.js: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // Codex enforcement-hook registration (migration parity): existing Codex
+    // agents get the per-project .codex/hooks.json on update. installCodexHooks
+    // otherwise runs only via init's refreshHooksAndSettings — so without this an
+    // existing Codex agent would receive the updated gate SCRIPTS but never the
+    // registration that makes Codex actually fire them. Idempotent; preserves
+    // any user-added Codex hooks. The referenced gate scripts are written above.
+    if (this.getEnabledFrameworks().includes('codex-cli')) {
+      try {
+        installCodexHooks(this.config.projectDir);
+        result.upgraded.push('.codex/hooks.json (Codex enforcement-hook registration)');
+      } catch (err) {
+        result.errors.push(`codex hooks: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     try {
@@ -4605,7 +4621,18 @@ echo "=== END SESSION START ==="
 # Dangerous command guard — safety infrastructure for autonomous agents.
 # Supports safety.level in .instar/config.json:
 #   Level 1 (default): Block and ask user. Level 2: Agent self-verifies.
+# Input: Claude passes the command as arg \$1; Codex (stdin-only) delivers the
+# hook event as JSON on stdin. Claude uses tool_input.command; Codex's exec_command
+# tool uses tool_input.cmd — accept either (verified live 2026-05-24).
 INPUT="$1"
+if [ -z "$INPUT" ]; then
+  INPUT="$(cat 2>/dev/null | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin); ti=d.get('tool_input',{}) or {}
+    print(ti.get('command') or ti.get('cmd') or '')
+except Exception:
+    print('')" 2>/dev/null)"
+fi
 INSTAR_DIR="\${CLAUDE_PROJECT_DIR:-.}/.instar"
 
 # Read safety level from config
@@ -4683,9 +4710,19 @@ done
 # The 164th Lesson (Dawn): Advisory hooks are insufficient.
 # Grounding must be automatic — content injected, not pointed to.
 #
-# Installed by instar during setup. Runs as a Claude Code PreToolUse hook on Bash.
+# Installed by instar during setup. Runs as a PreToolUse hook (Claude: Bash arg;
+# Codex: stdin JSON — tool_input.command for Claude, tool_input.cmd for Codex's
+# exec_command tool; accept either).
 
 INPUT="$1"
+if [ -z "$INPUT" ]; then
+  INPUT="$(cat 2>/dev/null | python3 -c "import sys,json
+try:
+    d=json.load(sys.stdin); ti=d.get('tool_input',{}) or {}
+    print(ti.get('command') or ti.get('cmd') or '')
+except Exception:
+    print('')" 2>/dev/null)"
+fi
 
 # Detect messaging commands (telegram-reply, email sends, API message posts, etc.)
 if echo "$INPUT" | grep -qE "(telegram-reply|send-email|send-message|POST.*/telegram/reply|POST.*/message|/reply)"; then
