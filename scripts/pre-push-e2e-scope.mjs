@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// safe-git-allow: pre-push bootstrap — read-only git only (merge-base / rev-parse
+// / diff --name-only); runs before TS is compiled, so it can't use SafeGitExecutor.
 /**
  * pre-push-e2e-scope — run the END-TO-END suite for the area being pushed.
  *
