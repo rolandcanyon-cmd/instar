@@ -37,21 +37,12 @@ import { SafeFsExecutor } from '../../../src/core/SafeFsExecutor.js';
  */
 class TestThreadResumeMap extends ThreadResumeMap {
   /**
-   * Override get() to use the raw data without JSONL verification.
-   * We access the internal load() and isExpired() by reading the file directly.
+   * Phase 2a: ThreadResumeMap is a view over ConversationStore. The only thing
+   * tests need to bypass is the JSONL-existence guard (no real Claude session
+   * files in tests); the rest of get() uses the real view logic.
    */
-  get(threadId: string): import('../../../src/threadline/ThreadResumeMap.js').ThreadResumeEntry | null {
-    // Read the file directly to bypass JSONL check
-    const filePath = (this as any).filePath;
-    try {
-      if (!fs.existsSync(filePath)) return null;
-      const map = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-      const entry = map[threadId];
-      if (!entry) return null;
-      return entry;
-    } catch {
-      return null;
-    }
+  protected jsonlExists(): boolean {
+    return true;
   }
 }
 import { AgentDiscovery } from '../../../src/threadline/AgentDiscovery.js';
