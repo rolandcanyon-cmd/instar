@@ -302,8 +302,9 @@ export class ThreadResumeMap {
     return now - new Date(ref).getTime() > MAX_AGE_MS;
   }
 
-  /** Check if a JSONL file exists for the given session UUID. */
-  private jsonlExists(uuid: string): boolean {
+  /** Check if a JSONL file exists for the given session UUID. (protected so
+   *  tests can bypass the filesystem check via a subclass.) */
+  protected jsonlExists(uuid: string): boolean {
     if (!uuid) return false;
     const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
     if (!fs.existsSync(claudeProjectsDir)) return false;
