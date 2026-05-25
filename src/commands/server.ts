@@ -99,6 +99,8 @@ import { SpawnRequestManager } from '../messaging/SpawnRequestManager.js';
 import { ThreadlineRouter } from '../threadline/ThreadlineRouter.js';
 import { resolveThreadlineMcpEntry } from '../threadline/mcpEntry.js';
 import { ThreadResumeMap } from '../threadline/ThreadResumeMap.js';
+import { ConversationStore } from '../threadline/ConversationStore.js';
+import { WarrantsReplyGate, evaluateAndRecordInbound } from '../threadline/WarrantsReplyGate.js';
 import { ListenerSessionManager } from '../threadline/ListenerSessionManager.js';
 import { SystemReviewer } from '../monitoring/SystemReviewer.js';
 import { createSessionProbes } from '../monitoring/probes/SessionProbe.js';
@@ -6477,6 +6479,12 @@ export async function startServer(options: StartOptions): Promise<void> {
     const messageStore = new MessageStore(path.join(config.stateDir, 'messages'));
     await messageStore.initialize();
     const threadResumeMap = new ThreadResumeMap(config.stateDir, config.stateDir);
+    // Threadline Phase 1 keystone: the Conversation single-source-of-truth +
+    // the warrants-a-reply gate. The gate runs once at the relay inbound funnel
+    // (below), upstream of all three routing branches, with turn/novelty state
+    // living on the Conversation (the one-shot worker can't self-police a loop).
+    const conversationStore = new ConversationStore(config.stateDir);
+    const warrantsReplyGate = new WarrantsReplyGate({ intelligence: sharedIntelligence });
     const messageFormatter = new MessageFormatter();
     const tmuxBin = config.sessions.tmuxPath;
     const tmuxOps: TmuxOperations = {
@@ -7059,6 +7067,47 @@ export async function startServer(options: StartOptions): Promise<void> {
               .catch(err => console.warn(`[tg-bridge] mirrorInbound: ${err instanceof Error ? err.message : err}`));
           }
 
+          // Phase 1 keystone: warrants-a-reply gate. Runs ONCE here, UPSTREAM of
+          // all three routing branches (pipe-spawn / warm-listener / cold-spawn),
+          // so a no-reply verdict short-circuits ALL of them — the observed
+          // ack-loop rides the pipe/listener branches, which never reach
+          // ThreadlineRouter, so a router-only gate would not stop it. Turn +
+          // novelty state lives on the Conversation, not the one-shot worker.
+          {
+            const gateThreadId = msg.threadId ?? getSyntheticThreadId(senderFingerprint);
+            try {
+              // Relay inbound is agent-to-agent → autonomous (stricter). The
+              // human-in-loop exemption is derived ONLY from our own records and
+              // is never set from anything the peer sends (unforgeable).
+              const decision = await evaluateAndRecordInbound(warrantsReplyGate, conversationStore, {
+                threadId: gateThreadId,
+                text: textContent,
+                senderFingerprint,
+                senderName,
+                trustLevel,
+                humanInLoop: false,
+              });
+              if (decision.suppress) {
+                console.log(`[relay] warrants-reply gate suppressed reply (${decision.verdict.signal}) for ${senderName} thread ${gateThreadId.slice(0, 8)}`);
+                // On budget exhaustion, escalate ONE attention item — never silently drop.
+                if (decision.verdict.budgetExhausted && telegram) {
+                  telegram.createAttentionItem({
+                    id: `threadline-loop-${gateThreadId.slice(0, 12)}`,
+                    title: `Threadline conversation loop wound down (${senderName})`,
+                    summary: `Stopped auto-replying to an agent-to-agent thread that kept going with no new content.`,
+                    description: `An agent-to-agent thread with ${senderName} kept exchanging messages with no new content, so I stopped auto-replying to keep it from looping. Thread ${gateThreadId.slice(0, 8)}. Let me know if you want me to re-engage.`,
+                    category: 'threadline-loop-gate',
+                    priority: 'LOW',
+                  }).catch(escErr => console.warn(`[relay] loop-gate attention escalation failed: ${escErr instanceof Error ? escErr.message : escErr}`));
+                }
+                return; // short-circuit ALL three routing branches
+              }
+            } catch (gateErr) {
+              // Gate failure → fail toward responsive (never silently drop a message).
+              console.warn(`[relay] warrants-reply gate error (defaulting responsive): ${gateErr instanceof Error ? gateErr.message : gateErr}`);
+            }
+          }
+
           // Phase 2a: Pipe-mode session for simple queries (lightweight, auto-exit)
           // Rapid-fire same-thread guard: if an active pipe session already exists for this
           // thread, fall through to the listener/cold-spawn path so messages queue serially
@@ -7615,7 +7664,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       });
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, rateLimitSentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, proxyCoordinator, topicIntentStore, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, workingMemory, taskFlowRegistry, threadlineFlowBridge });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, rateLimitSentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, conversationStore, warrantsReplyGate, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, proxyCoordinator, topicIntentStore, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, workingMemory, taskFlowRegistry, threadlineFlowBridge });
     // Boot-recovery (tunnel-failure-resilience spec Part 6): if the agent
     // died mid-relay-episode, the persisted tunnel.json carries
     // rotationPending=true. Rotate the dashboard PIN + authToken BEFORE
