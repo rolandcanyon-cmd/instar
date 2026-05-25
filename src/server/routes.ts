@@ -175,6 +175,7 @@ import { verifyAgentToken, getAgentToken } from '../messaging/AgentTokenManager.
 import type { WorkingMemoryAssembler } from '../memory/WorkingMemoryAssembler.js';
 import type { QuotaManager } from '../monitoring/QuotaManager.js';
 import type { ThreadlineRouter } from '../threadline/ThreadlineRouter.js';
+import { evaluateAndRecordInbound } from '../threadline/WarrantsReplyGate.js';
 import type { HandshakeManager } from '../threadline/HandshakeManager.js';
 import { createThreadlineRoutes } from '../threadline/ThreadlineEndpoints.js';
 import type { UnifiedTrustSystem } from '../threadline/UnifiedTrustWiring.js';
@@ -568,6 +569,12 @@ export interface RouteContext {
   subagentTracker: SubagentTracker | null;
   instructionsVerifier: InstructionsVerifier | null;
   threadlineRouter: ThreadlineRouter | null;
+  /** Threadline Phase 1 keystone — the Conversation single-source-of-truth and
+   *  the warrants-a-reply gate, exposed on ctx so the LOCAL co-located inbound
+   *  path (/messages/relay-agent) gates identically to the relay funnel. Without
+   *  this, same-machine agents bypass the loop gate (caught in test-as-self). */
+  conversationStore?: import('../threadline/ConversationStore.js').ConversationStore;
+  warrantsReplyGate?: import('../threadline/WarrantsReplyGate.js').WarrantsReplyGate;
   /** ThreadResumeMap — exposed on ctx so /threadline/relay-send can stamp
    *  originTopicId on outbound sends. Per THREAD-TOPIC-LINKAGE-SPEC.md. */
   threadResumeMap: import('../threadline/ThreadResumeMap.js').ThreadResumeMap | null;
@@ -11777,6 +11784,46 @@ export function createRoutes(ctx: RouteContext): Router {
             }
           } catch (err) {
             if (err instanceof Error) console.error('[routes] ThreadlineFlowBridge error:', err.message);
+          }
+        }
+
+        // Threadline Phase 1 keystone: the warrants-a-reply gate must cover the
+        // LOCAL co-located inbound path too — this route delivers straight to
+        // handleInboundMessage and bypasses the relay funnel's gate, so without
+        // this a same-machine agent (the original echo↔codey loop) would never
+        // be gated (caught in test-as-self). Run the gate ONCE here; on a
+        // no-reply verdict, record the inbound on the Conversation and
+        // short-circuit BEFORE spawning.
+        if (ctx.conversationStore && ctx.warrantsReplyGate) {
+          try {
+            const gThreadId = envelope.message?.threadId;
+            const body = envelope.message?.body;
+            const gText = typeof body === 'string'
+              ? body
+              : (typeof body === 'object' && body !== null
+                  ? String((body as Record<string, unknown>).content ?? (body as Record<string, unknown>).text ?? '')
+                  : '');
+            if (gThreadId && gText) {
+              const senderAgentName = envelope.message?.from?.agent ?? 'unknown';
+              const decision = await evaluateAndRecordInbound(ctx.warrantsReplyGate, ctx.conversationStore, {
+                threadId: gThreadId,
+                text: gText,
+                senderFingerprint: senderAgentName,
+                senderName: senderAgentName,
+                trustLevel: 'verified',
+                // Local agent↔agent delivery is autonomous; humanInLoop derived
+                // only from our own records (never the peer), default false.
+                humanInLoop: false,
+              });
+              if (decision.suppress) {
+                console.log(`[relay-agent] warrants-reply gate suppressed reply (${decision.verdict.signal}) from ${senderAgentName} thread ${gThreadId.slice(0, 8)}`);
+                res.json({ ok: true, threadline: { handled: true, threadId: gThreadId, spawned: false, suppressed: true, signal: decision.verdict.signal } });
+                return;
+              }
+            }
+          } catch (gateErr) {
+            // Fail toward responsive — never silently drop a local message.
+            console.warn(`[relay-agent] warrants-reply gate error (defaulting responsive): ${gateErr instanceof Error ? gateErr.message : gateErr}`);
           }
         }
 

@@ -151,6 +151,10 @@ export class AgentServer {
     subagentTracker?: import('../monitoring/SubagentTracker.js').SubagentTracker;
     instructionsVerifier?: import('../monitoring/InstructionsVerifier.js').InstructionsVerifier;
     threadlineRouter?: import('../threadline/ThreadlineRouter.js').ThreadlineRouter;
+    /** Threadline Phase 1 keystone — Conversation store + warrants-a-reply gate,
+     *  so the local co-located inbound path gates like the relay funnel. */
+    conversationStore?: import('../threadline/ConversationStore.js').ConversationStore;
+    warrantsReplyGate?: import('../threadline/WarrantsReplyGate.js').WarrantsReplyGate;
     /** ThreadResumeMap — for topic-linkage outbound capture on /threadline/relay-send.
      *  Per THREAD-TOPIC-LINKAGE-SPEC.md. */
     threadResumeMap?: import('../threadline/ThreadResumeMap.js').ThreadResumeMap;
@@ -471,6 +475,8 @@ export class AgentServer {
       subagentTracker: options.subagentTracker ?? null,
       instructionsVerifier: options.instructionsVerifier ?? null,
       threadlineRouter: options.threadlineRouter ?? null,
+      conversationStore: options.conversationStore,
+      warrantsReplyGate: options.warrantsReplyGate,
       threadResumeMap: options.threadResumeMap ?? null,
       topicLinkageHandler: options.topicLinkageHandler ?? null,
       handshakeManager: options.handshakeManager ?? null,

@@ -27,6 +27,7 @@ import { ConversationStore } from '../../../src/threadline/ConversationStore.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const serverSrc = fs.readFileSync(path.resolve(__dirname, '../../../src/commands/server.ts'), 'utf-8');
+const routesSrc = fs.readFileSync(path.resolve(__dirname, '../../../src/server/routes.ts'), 'utf-8');
 
 describe('Threadline keystone — wiring integrity (feature alive)', () => {
   it('imports the keystone modules into the server', () => {
@@ -62,6 +63,20 @@ describe('Threadline keystone — wiring integrity (feature alive)', () => {
     );
     expect(block).toMatch(/if\s*\(\s*decision\.suppress\s*\)/);
     expect(block).toMatch(/return;\s*\/\/ short-circuit/);
+  });
+
+  it('ALSO gates the local co-located path (/messages/relay-agent), upstream of handleInboundMessage', () => {
+    // The local-delivery path bypasses the relay funnel — without gating here a
+    // same-machine agent (the original echo↔codey loop) would never be gated.
+    // This was caught in test-as-self; the assertion guards against regression.
+    const relayAgentIdx = routesSrc.indexOf("router.post('/messages/relay-agent'");
+    expect(relayAgentIdx).toBeGreaterThan(0);
+    const route = routesSrc.slice(relayAgentIdx, relayAgentIdx + 8000);
+    const gateIdx = route.indexOf('evaluateAndRecordInbound(ctx.warrantsReplyGate, ctx.conversationStore');
+    const routerIdx = route.indexOf('ctx.threadlineRouter.handleInboundMessage(envelope)');
+    expect(gateIdx).toBeGreaterThan(0);
+    expect(routerIdx).toBeGreaterThan(gateIdx); // gate runs BEFORE the spawn
+    expect(route.slice(gateIdx, routerIdx)).toMatch(/if\s*\(\s*decision\.suppress\s*\)/);
   });
 
   it('the funnel helper is exported, importable, and operates end-to-end', async () => {
