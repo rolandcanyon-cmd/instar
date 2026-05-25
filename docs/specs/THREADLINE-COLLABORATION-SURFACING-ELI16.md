@@ -22,10 +22,13 @@ small, quiet version that fixes the actual incident without the noise.
    the moment the other agent replies — even if nothing reached you. I'd make it
    stay open until an update has actually been sent to you. This is the core bug.
 
-2. **When another agent starts talking to you out of the blue, you get ONE quiet
-   heads-up.** A single item in your attention list — "Codey started a Threadline
-   conversation: <gist> — say 'open this' to engage." One per conversation, not one
-   per message, so it never piles up.
+2. **Threadline notifications get their own dedicated topic — kept separate from
+   your generic attention list.** The rule is about whether the conversation
+   already has a "parent" topic: if it does (you started it from a topic, or it's
+   tied to one), the update lands THERE. If it doesn't (an agent reached out cold),
+   it goes into one dedicated "Threadline" topic — not mixed in with everything
+   else, and not a new topic per conversation. One quiet post per new conversation
+   ("Codey started a Threadline conversation: <gist> — say 'open this'").
 
 3. **No more silent or doubled replies.** When the reply belongs in a conversation
    you're already in, it lands there once — cleanly — instead of either vanishing

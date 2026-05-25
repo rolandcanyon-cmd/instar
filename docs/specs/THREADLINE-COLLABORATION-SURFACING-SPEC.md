@@ -62,18 +62,33 @@ Today `deliver()` fires on `live-inject`/`resume-pending` regardless. Change: ke
 `failure-visible` escalation path is preserved); the existing 7-day commitment TTL
 + `expireCommitments()` sweep is the backstop against a permanent hang.
 
-### 2. Agent-initiated FIRST-CONTACT surfaces as one attention item
+### 2. Parentless conversations surface to a dedicated Threadline topic
 
-When a peer initiates a Threadline conversation with no resolvable origin topic
-AND the warrants-a-reply gate judged the message substantive (reuse the existing
-verdict, including the gate's novelty/turn-budget — see §4), surface ONE
-`/attention` item (near-silent, pull-with-ping) anchored to the lifeline topic:
-"🧵 <peer> started a Threadline conversation: <gist> — say 'open this' to engage."
-- ONE item per new conversation (not per message); follow-ups update/dedupe it,
-  they do not stack. This respects near-silent.
+**The routing spine (operator directive 2026-05-25):** surfacing is decided by
+whether the conversation has a **parent topic** it's associated with:
+- **Parent topic exists** (the conversation originated from / is bound to a
+  Telegram topic — `boundTopicId`/`originTopicId`) → surface THERE (§3). This is
+  the conversation the operator already cares about.
+- **No parent topic** (a peer initiated it, no topic association) → surface to a
+  SINGLE **dedicated "Threadline" Telegram topic** — NOT the generic attention
+  list (these must not be mixed in with generic attention items), NOT the lifeline
+  topic, and NOT a per-thread topic.
+
+The dedicated Threadline topic is created on demand once (via
+`telegram.findOrCreateForumTopic`) and reused for ALL parentless Threadline
+notifications; its id is persisted (config/state) so it's stable across restarts.
+A parentless substantive first contact posts: "🧵 <peer> started a Threadline
+conversation: <gist> — reply in-thread or say 'open this' to engage."
+- Gated by the warrants-a-reply verdict + the gate's novelty/turn-budget (§4) —
+  routine acks/no-ops don't post.
+- ONE post per new conversation; follow-ups on the same parentless thread update
+  in place / don't stack (near-silent).
 - Wired at BOTH inbound seams (the relay funnel in `server.ts` after the
   warrants-reply gate, AND the local `/messages/relay-agent` route) — the incident
   was a co-located peer, which uses the local seam.
+
+(If the operator later engages a parentless conversation, "promote to its own
+topic on demand" is the tracked CMT-493-2c follow-on.)
 
 ### 3. Single-writer-per-topic for topic-originated replies
 
@@ -115,9 +130,11 @@ readable field or skip surfacing).
    confirmed sent; on surfacing failure it stays open (failure-visible escalation
    intact); the 7-day TTL is the backstop. Test: live-inject + agent-internal no
    longer silently resolves.
-2. An agent-initiated substantive first contact produces exactly ONE attention item
-   to the lifeline topic; a pure-ack/no-op (per the gate) produces none; follow-ups
-   update one item, not N. Test both sides + the dedupe.
+2. Routing: a conversation WITH a parent topic surfaces in that topic (§3); a
+   parentless substantive first contact posts to the SINGLE dedicated Threadline
+   topic (created-on-demand + reused, NOT the generic attention list, NOT
+   per-thread). A pure-ack/no-op (per the gate) produces none; follow-ups on a
+   parentless thread don't stack. Test the parent-vs-parentless split + dedupe.
 3. Topic-originated reply: live session present → inject only (no double post);
    no live session + user-visible → exactly one user-facing post. Test both.
 4. Surfacing never emits raw envelope/JSON or a transport placeholder.
