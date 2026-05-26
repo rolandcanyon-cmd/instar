@@ -50,8 +50,13 @@ export interface TopicLinkageDeps {
   commitmentTracker: CommitmentTracker;
   salienceGate: SalienceGate;
   messageStore?: MessageStore | null;
-  /** Inject text into a live tmux session. */
-  injectIntoSession: (sessionName: string, text: string) => boolean;
+  /**
+   * Inject text into a live tmux session, returning whether the session
+   * actually CONSUMED it (not merely dispatched). May be async — production
+   * confirms submission across the paste-recovery window. A `false`/rejected
+   * result means the inject stalled, so the caller must fall back to surfacing.
+   */
+  injectIntoSession: (sessionName: string, text: string) => boolean | Promise<boolean>;
   /** Check if a tmux session is alive. */
   isSessionAlive: (sessionName: string) => boolean;
   /** Post a notification to a Telegram topic. */
@@ -402,7 +407,7 @@ export class TopicLinkageHandler {
     // surface the awaited reply through the topic's existing wake path.
     if (sessionName && this.deps.isSessionAlive(sessionName)) {
       try {
-        const ok = this.deps.injectIntoSession(sessionName, payload);
+        const ok = await this.deps.injectIntoSession(sessionName, payload);
         if (ok) {
           deliveryMode = 'live-inject';
         }
@@ -424,12 +429,26 @@ export class TopicLinkageHandler {
     // Telegram surface. User-visible verdicts post a notification. failure-
     // visible delivery mode forces a notification regardless of verdict so the
     // user always knows something arrived even if our auto-pickup failed.
+    // Surface to Telegram UNLESS we CONFIRMED the live session consumed the
+    // reply — in that case the agent itself relays it, so a deterministic
+    // surface would double-post. A stalled inject yields 'failure-visible'
+    // here, so the safety-net surface fires exactly when the live hand-off
+    // didn't actually take (the A2 fix).
     const shouldSurface =
-      verdictResult.verdict === 'user-visible' ||
-      deliveryMode === 'failure-visible' ||
-      deliveryMode === 'resume-pending';
+      deliveryMode !== 'live-inject' &&
+      (verdictResult.verdict === 'user-visible' ||
+        deliveryMode === 'failure-visible' ||
+        deliveryMode === 'resume-pending');
 
-    if (shouldSurface && this.passesRateLimit(threadId) && this.passesTopicRateLimit(topicId)) {
+    // Rate-limit the surface: per-thread (no double-fire within the window) AND
+    // per-topic (anti-flood/bypass guard against many threads against one topic).
+    // No first-reply carve-out: a thread's FIRST reply has no prior surface so it
+    // passes the per-thread limit naturally, and the per-topic cap must hold even
+    // for first replies (otherwise N rotating threads = N surfaces = the flood).
+    // A carve-out would also misfire once the commitment is delivered, since
+    // findByThreadId then returns null and isFirstReply flips true again.
+    const rateOk = this.passesRateLimit(threadId) && this.passesTopicRateLimit(topicId);
+    if (shouldSurface && rateOk) {
       try {
         const surfaceText = this.buildTelegramSurface({
           message,
@@ -464,20 +483,20 @@ export class TopicLinkageHandler {
 
     // CMT-509 §1: a "report back" commitment must NOT resolve until the reply was
     // actually surfaced TO THE USER. The user is surfaced when either:
-    //   - `telegramSent` — a user-facing post landed in the topic, OR
-    //   - `live-inject`  — the payload went into the topic's LIVE session, which
-    //                      relays to the user per the Telegram-reply rule.
-    // Previously this also resolved on `resume-pending` unconditionally — but a
-    // resume-pending whose Telegram surface failed or was rate-limited (so
-    // `telegramSent === false`) means the user saw NOTHING, yet the commitment
-    // closed. That is the premature-resolution bug the 2026-05-25 incident
-    // exposed. Now resume-pending only resolves if its surface actually posted.
-    // `failure-visible` (and any un-surfaced path) leaves the commitment OPEN so
-    // PromiseBeacon keeps heartbeating; the 7-day commitment TTL +
-    // expireCommitments() sweep is the backstop against a permanent hang.
-    const surfacedToUser =
-      deliveryMode === 'live-inject' ||
-      (deliveryMode === 'resume-pending' && telegramSent);
+    //   - `live-inject` — CONFIRMED consumption: the payload was submitted into
+    //                     the topic's LIVE session, which relays to the user per
+    //                     the Telegram-reply rule (a stalled inject is NOT
+    //                     'live-inject' — it degraded to 'failure-visible'), OR
+    //   - `telegramSent` — a user-facing post actually landed in the topic, on
+    //                     ANY delivery mode (resume-pending OR the failure-visible
+    //                     safety-net). telegramSent is the authoritative "the user
+    //                     saw it" signal.
+    // Any un-surfaced path (telegramSent false AND not a confirmed live-inject —
+    // e.g. a stalled inject whose surface was rate-limited, or no Telegram
+    // configured) leaves the commitment OPEN so PromiseBeacon keeps heartbeating;
+    // the 7-day TTL + expireCommitments() sweep is the backstop. This is the fix
+    // for the 2026-05-25 premature-resolution incident.
+    const surfacedToUser = deliveryMode === 'live-inject' || telegramSent;
     let commitmentDelivered = false;
     if (commitment && surfacedToUser) {
       try {

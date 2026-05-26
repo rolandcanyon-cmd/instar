@@ -264,6 +264,10 @@ describe('TopicLinkageHandler.tryRouteReplyToTopic', () => {
     const deps = makeDeps(stateDir, {
       sendTelegramToTopic: sendTg,
       isSessionAlive: vi.fn().mockReturnValue(true),
+      // Inject does not confirm (stuck) → failure-visible → the deterministic
+      // surface fires, which is what the per-topic cap must throttle. (A
+      // confirmed live-inject would suppress the surface entirely.)
+      injectIntoSession: vi.fn().mockReturnValue(false),
       now: () => mockNow,
     });
     const handler = new TopicLinkageHandler(deps);
@@ -345,6 +349,9 @@ describe('TopicLinkageHandler.tryRouteReplyToTopic', () => {
     const deps = makeDeps(stateDir, {
       sendTelegramToTopic: sendTg,
       isSessionAlive: vi.fn().mockReturnValue(true),
+      // Stuck inject → failure-visible → deterministic surface fires (the path
+      // under test). A confirmed live-inject would relay via the session instead.
+      injectIntoSession: vi.fn().mockReturnValue(false),
     });
     const handler = new TopicLinkageHandler(deps);
     handler.captureOriginOnSend({ threadId: 't-slow', remoteAgent: 'ai-guy', originTopicId: 9210 });
@@ -432,14 +439,12 @@ describe('TopicLinkageHandler.tryRouteReplyToTopic', () => {
     expect(out.kind).toBe('routed');
     if (out.kind === 'routed') {
       expect(out.deliveryMode === 'resume-pending' || out.deliveryMode === 'failure-visible').toBe(true);
-      // resume-pending now marks delivered too (the user has been told via Telegram
-      // surface and the message is durably stored for topic-wake). Only failure-
-      // visible leaves the commitment open.
-      if (out.deliveryMode === 'resume-pending') {
-        expect(out.commitmentDelivered).toBe(true);
-      } else {
-        expect(out.commitmentDelivered).toBe(false);
-      }
+      // The Telegram surface fired (default mock) on this first reply, so the
+      // user has been told regardless of delivery mode → commitment resolves.
+      // (surfacedToUser = live-inject || telegramSent.) Only a path where NO
+      // surface posts leaves the commitment open — covered by the next test.
+      expect(out.telegramSent).toBe(true);
+      expect(out.commitmentDelivered).toBe(true);
     }
     // cleanup the claude dir we created
     try { SafeFsExecutor.safeRmSync(claudeDir, { recursive: true, force: true, operation: 'tests/unit/TopicLinkageHandler.test.ts:cleanup' }); } catch { /* noop */ }
@@ -480,11 +485,13 @@ describe('TopicLinkageHandler.tryRouteReplyToTopic', () => {
     try { SafeFsExecutor.safeRmSync(claudeDir, { recursive: true, force: true, operation: 'tests/unit/TopicLinkageHandler.test.ts:cleanup' }); } catch { /* noop */ }
   });
 
-  it('fires Telegram surface on user-visible first reply', async () => {
+  it('fires Telegram surface on user-visible first reply when the live inject does not confirm', async () => {
     const sendTg = vi.fn().mockResolvedValue(undefined);
     const deps = makeDeps(stateDir, {
       sendTelegramToTopic: sendTg,
       isSessionAlive: vi.fn().mockReturnValue(true),
+      // Inject stalls (the real A2 failure) → failure-visible → surface fires.
+      injectIntoSession: vi.fn().mockReturnValue(false),
     });
     const handler = new TopicLinkageHandler(deps);
     handler.captureOriginOnSend({ threadId: 't-tg', remoteAgent: 'ai-guy', originTopicId: 9210 });
@@ -506,6 +513,8 @@ describe('TopicLinkageHandler.tryRouteReplyToTopic', () => {
     const deps = makeDeps(stateDir, {
       sendTelegramToTopic: sendTg,
       isSessionAlive: vi.fn().mockReturnValue(true),
+      // Stuck inject → failure-visible → surface path is exercised + rate-limited.
+      injectIntoSession: vi.fn().mockReturnValue(false),
       now: () => mockNow,
     });
     const handler = new TopicLinkageHandler(deps);
@@ -529,5 +538,52 @@ describe('TopicLinkageHandler.tryRouteReplyToTopic', () => {
       threadEntry: { remoteAgent: 'ai-guy', originTopicId: 9210 },
     });
     expect(sendTg).toHaveBeenCalledTimes(2);
+  });
+
+  it('A2: a CONFIRMED live-inject does NOT also fire a Telegram surface (no double-post)', async () => {
+    // The core no-double-surface guarantee: when the live session genuinely
+    // consumes the inject (injectIntoSession resolves true), the agent itself
+    // relays the reply, so the deterministic Telegram surface must NOT fire.
+    const sendTg = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps(stateDir, {
+      sendTelegramToTopic: sendTg,
+      isSessionAlive: vi.fn().mockReturnValue(true),
+      injectIntoSession: vi.fn().mockResolvedValue(true), // CONFIRMED consumption
+    });
+    const handler = new TopicLinkageHandler(deps);
+    handler.captureOriginOnSend({ threadId: 't-nodouble', remoteAgent: 'ai-guy', originTopicId: 9210 });
+    const out = await handler.tryRouteReplyToTopic({
+      envelope: buildEnvelope({ threadId: 't-nodouble', body: 'the answer' }),
+      threadEntry: { remoteAgent: 'ai-guy', originTopicId: 9210 },
+    });
+    expect(out.kind).toBe('routed');
+    if (out.kind === 'routed') {
+      expect(out.deliveryMode).toBe('live-inject');
+      expect(out.telegramSent).toBe(false);       // NO double-post
+      expect(out.commitmentDelivered).toBe(true);  // resolved via the live session
+    }
+    expect(sendTg).not.toHaveBeenCalled();
+  });
+
+  it('A2: a STALLED live-inject (session alive but inject unconfirmed) falls back to the surface and resolves on telegramSent', async () => {
+    const sendTg = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps(stateDir, {
+      sendTelegramToTopic: sendTg,
+      isSessionAlive: vi.fn().mockReturnValue(true),
+      injectIntoSession: vi.fn().mockResolvedValue(false), // dispatched but NOT consumed
+    });
+    const handler = new TopicLinkageHandler(deps);
+    handler.captureOriginOnSend({ threadId: 't-stall', remoteAgent: 'ai-guy', originTopicId: 9210 });
+    const out = await handler.tryRouteReplyToTopic({
+      envelope: buildEnvelope({ threadId: 't-stall', body: 'the answer' }),
+      threadEntry: { remoteAgent: 'ai-guy', originTopicId: 9210 },
+    });
+    expect(out.kind).toBe('routed');
+    if (out.kind === 'routed') {
+      expect(out.deliveryMode).toBe('failure-visible'); // inject never confirmed
+      expect(out.telegramSent).toBe(true);               // safety-net surface fired
+      expect(out.commitmentDelivered).toBe(true);        // resolved on telegramSent
+    }
+    expect(sendTg).toHaveBeenCalledTimes(1);
   });
 });

@@ -142,8 +142,17 @@ export class ThreadResumeMap {
     }
     if (!c) return null;
     const entry = conversationToEntry(c);
-    // Resume guard: the session JSONL must still exist (unless pinned).
-    if (!entry.pinned && !this.jsonlExists(entry.uuid)) return null;
+    // Resume guard: the session JSONL must still exist (unless pinned). A
+    // topic-linkage entry (originTopicId set) is exempt — its liveness is the
+    // Telegram topic's, not a Claude-session transcript's. These entries are
+    // stamped with an empty/non-JSONL uuid (see TopicLinkageHandler.captureOriginOnSend),
+    // so the JSONL guard would wrongly null them — dropping inbound replies to
+    // spawnNewThread (A1) and breaking threadline_history lookups (C). Dead
+    // topic-linkage entries still expire via ConversationStore's TTL, and the
+    // topic's real liveness is re-checked at route time (TopicLinkageHandler.topicActive).
+    if (!entry.pinned && entry.originTopicId === undefined && !this.jsonlExists(entry.uuid)) {
+      return null;
+    }
     return entry;
   }
 

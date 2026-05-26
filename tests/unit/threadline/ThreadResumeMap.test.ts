@@ -551,4 +551,31 @@ describe('ThreadResumeMap', () => {
       expect(result!.uuid).toBe(testUuid);
     });
   });
+
+  describe('topic-linkage JSONL-guard exemption (Fix 1 / A1+C)', () => {
+    let temp2: ReturnType<typeof createTempDir>;
+    let map2: ThreadResumeMap;
+    beforeEach(() => { temp2 = createTempDir(); map2 = new ThreadResumeMap(temp2.stateDir, temp2.dir); });
+    afterEach(() => { temp2.cleanup(); cleanupFakeJsonl(); });
+
+    it('RETURNS a topic-bound entry (originTopicId set) even when no session JSONL exists', () => {
+      // No fake JSONL is created → jsonlExists(uuid) is false. Before the fix
+      // this entry was nulled (the A1/C root cause: inbound replies fell through
+      // to spawnNewThread and threadline_history 404'd).
+      map2.save('t-topicbound', makeEntry({ uuid: 'no-jsonl-uuid-00000000000000', originTopicId: 12304 }));
+      const entry = map2.get('t-topicbound');
+      expect(entry).not.toBeNull();
+      expect(entry!.originTopicId).toBe(12304);
+    });
+
+    it('still NULLS a non-topic entry whose session JSONL is gone (guard intact for the original case)', () => {
+      map2.save('t-plain', makeEntry({ uuid: 'gone-uuid-11111111111111111111', originTopicId: undefined }));
+      expect(map2.get('t-plain')).toBeNull();
+    });
+
+    it('still RETURNS a pinned non-topic entry without JSONL (pinned exemption unchanged)', () => {
+      map2.save('t-pinned', makeEntry({ uuid: 'gone-uuid-22222222222222222222', originTopicId: undefined, pinned: true }));
+      expect(map2.get('t-pinned')).not.toBeNull();
+    });
+  });
 });
