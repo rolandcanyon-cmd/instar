@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// safe-git-allow: release analyzer runs before TS source is compiled; read-only git only.
 /**
  * Release Change Analyzer
  *
@@ -24,11 +25,10 @@
  *   node scripts/analyze-release.js --recommend-only   # Just recommend bump type
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SafeGitExecutor } from '../src/core/SafeGitExecutor.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -43,18 +43,26 @@ function log(msg) {
 
 // ── Git Helpers ──────────────────────────────────────────────────────
 
+function gitRead(args) {
+  return execFileSync('git', args, {
+    cwd: ROOT,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
 function getLastReleaseTag() {
   try {
-    return SafeGitExecutor.readSync(['describe', '--tags', '--abbrev=0'], { cwd: ROOT, encoding: 'utf-8', operation: 'scripts/analyze-release.js:48' }).trim();
+    return gitRead(['describe', '--tags', '--abbrev=0']).trim();
   } catch {
     // No tags at all — diff against the initial commit
-    return SafeGitExecutor.readSync(['rev-list', '--max-parents=0', 'HEAD'], { cwd: ROOT, encoding: 'utf-8', operation: 'scripts/analyze-release.js:52' }).trim();
+    return gitRead(['rev-list', '--max-parents=0', 'HEAD']).trim();
   }
 }
 
 function getCommitsSinceTag(tag) {
   try {
-    const raw = SafeGitExecutor.readSync(['log', `${tag}..HEAD`, '--oneline', '--no-merges'], { cwd: ROOT, encoding: 'utf-8', operation: 'scripts/analyze-release.js:getCommitsSinceTag' });
+    const raw = gitRead(['log', `${tag}..HEAD`, '--oneline', '--no-merges']);
     return raw.trim().split('\n').filter(Boolean).map(line => {
       const [hash, ...rest] = line.split(' ');
       return { hash, message: rest.join(' ') };
@@ -66,7 +74,7 @@ function getCommitsSinceTag(tag) {
 
 function getDiffStat(tag) {
   try {
-    return SafeGitExecutor.readSync(['diff', `${tag}..HEAD`, '--stat'], { cwd: ROOT, encoding: 'utf-8', operation: 'scripts/analyze-release.js:getDiffStat' }).trim();
+    return gitRead(['diff', `${tag}..HEAD`, '--stat']).trim();
   } catch {
     return '';
   }
@@ -74,7 +82,7 @@ function getDiffStat(tag) {
 
 function getChangedFiles(tag) {
   try {
-    const raw = SafeGitExecutor.readSync(['diff', `${tag}..HEAD`, '--name-status'], { cwd: ROOT, encoding: 'utf-8', operation: 'scripts/analyze-release.js:getChangedFiles' });
+    const raw = gitRead(['diff', `${tag}..HEAD`, '--name-status']);
     return raw.trim().split('\n').filter(Boolean).map(line => {
       const [status, ...pathParts] = line.split('\t');
       return { status: status.charAt(0), file: pathParts.join('\t') };
@@ -86,7 +94,7 @@ function getChangedFiles(tag) {
 
 function getFileDiff(tag, file) {
   try {
-    return SafeGitExecutor.readSync(['diff', `${tag}..HEAD`, '--', file], { cwd: ROOT, encoding: 'utf-8', operation: 'scripts/analyze-release.js:getFileDiff' });
+    return gitRead(['diff', `${tag}..HEAD`, '--', file]);
   } catch {
     return '';
   }

@@ -54,6 +54,9 @@ describe('PostUpdateMigrator — Codex enforcement-hook registration (migration 
     const cfg = JSON.parse(fs.readFileSync(hooksPath, 'utf-8'));
     const pre = cfg.hooks.PreToolUse.flatMap((g: any) => g.hooks.map((h: any) => h.command));
     expect(pre.some((c: string) => c.includes('dangerous-command-guard.sh'))).toBe(true);
+    const stop = cfg.hooks.Stop.flatMap((g: any) => g.hooks.map((h: any) => h.command));
+    expect(stop.some((c: string) => c.includes('stop-gate-router.js'))).toBe(true);
+    expect(fs.existsSync(path.join(projectDir, '.instar', 'hooks', 'instar', 'stop-gate-router.js'))).toBe(true);
     expect(result.errors).toEqual([]);
     expect(result.upgraded.some((u) => u.includes('.codex/hooks.json'))).toBe(true);
   });

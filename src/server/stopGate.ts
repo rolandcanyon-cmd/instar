@@ -1,8 +1,10 @@
 /**
  * stopGate.ts — UnjustifiedStopGate server infrastructure (PR0a).
  *
- * Provides the read-side API surface that the future stop-hook router
- * consumes (PR3). State is in-memory for PR0a; PR3 migrates to SQLite.
+ * Provides the read-side API surface that the stop-hook router consumes.
+ * Runtime mode persists to disk so shadow-mode rollout survives server
+ * restarts; per-session hot-path state remains process-local and is
+ * repopulated by hook events.
  *
  * Spec: docs/specs/context-death-pitfall-prevention.md
  *
@@ -34,7 +36,7 @@ import path from 'node:path';
 export const GATE_ROUTE_VERSION = 1;
 export const GATE_ROUTE_MINIMUM_VERSION = 1;
 
-// ── Mode + kill-switch state (in-memory, PR0a) ───────────────────────────
+// ── Mode + kill-switch state ─────────────────────────────────────────────
 //
 // Mode is the operating mode of the gate. Default 'off' so PR0a ships
 // completely inert — the spec's PR4 lands the CLI that flips to shadow.
@@ -46,6 +48,7 @@ export type GateMode = 'off' | 'shadow' | 'enforce';
 interface GateState {
   mode: GateMode;
   killSwitch: boolean;
+  modeFilePath: string | null;
   // sessionStartTs is keyed by sessionId; populated by SessionStart hook
   // events received via /hooks/events. PR3 migrates to a sessions(sessions
   // table) row.
@@ -55,8 +58,49 @@ interface GateState {
 const state: GateState = {
   mode: 'off',
   killSwitch: false,
+  modeFilePath: null,
   sessionStartTs: new Map(),
 };
+
+function readPersistedMode(filePath: string): GateMode | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as { mode?: unknown };
+    const mode = parsed.mode;
+    if (mode === 'off' || mode === 'shadow' || mode === 'enforce') return mode;
+  } catch {
+    // Missing/unreadable state is not fatal; caller supplies default.
+  }
+  return null;
+}
+
+function persistMode(): void {
+  if (!state.modeFilePath) return;
+  try {
+    fs.mkdirSync(path.dirname(state.modeFilePath), { recursive: true });
+    fs.writeFileSync(
+      state.modeFilePath,
+      JSON.stringify({ mode: state.mode, updatedAt: new Date().toISOString() }, null, 2) + '\n',
+      { mode: 0o600 },
+    );
+  } catch {
+    // Fail open. The route still returns the in-memory mode; persistence
+    // failure is reported by the caller's normal health/degradation path.
+  }
+}
+
+export function configureStopGateState(opts: {
+  modeFilePath?: string;
+  defaultMode?: GateMode;
+} = {}): GateMode {
+  if (opts.modeFilePath) {
+    state.modeFilePath = opts.modeFilePath;
+    state.mode = readPersistedMode(opts.modeFilePath) ?? (opts.defaultMode ?? state.mode);
+    persistMode();
+    return state.mode;
+  }
+  if (opts.defaultMode) state.mode = opts.defaultMode;
+  return state.mode;
+}
 
 export function getMode(): GateMode {
   return state.mode;
@@ -64,6 +108,7 @@ export function getMode(): GateMode {
 
 export function setMode(mode: GateMode): void {
   state.mode = mode;
+  persistMode();
 }
 
 export function getKillSwitch(): boolean {
@@ -108,6 +153,7 @@ export function getSessionStartTs(sessionId: string): number | null {
 export function _resetForTests(): void {
   state.mode = 'off';
   state.killSwitch = false;
+  state.modeFilePath = null;
   state.sessionStartTs.clear();
 }
 

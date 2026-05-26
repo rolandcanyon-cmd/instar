@@ -1754,6 +1754,13 @@ export class PostUpdateMigrator {
     }
 
     try {
+      fs.writeFileSync(path.join(instarHooksDir, 'stop-gate-router.js'), this.getStopGateRouterHook(), { mode: 0o755 });
+      result.upgraded.push('hooks/instar/stop-gate-router.js (unjustified Stop gate router)');
+    } catch (err) {
+      result.errors.push(`stop-gate-router.js: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    try {
       fs.writeFileSync(path.join(instarHooksDir, 'auto-approve-permissions.js'), this.getAutoApprovePermissionsHook(), { mode: 0o755 });
       result.upgraded.push('hooks/instar/auto-approve-permissions.js (subagent permission unblocking)');
     } catch (err) {
@@ -1867,6 +1874,7 @@ export class PostUpdateMigrator {
       'scope-coherence-collector.js', 'scope-coherence-checkpoint.js',
       'instructions-loaded-tracker.js', 'subagent-start-tracker.js',
       'free-text-guard.sh', 'claim-intercept.js', 'claim-intercept-response.js', 'response-review.js',
+      'stop-gate-router.js',
       'auto-approve-permissions.js',
     ];
 
@@ -2238,15 +2246,24 @@ export class PostUpdateMigrator {
       e.hooks?.some(h => h.command?.includes('autonomous-stop-hook')),
     );
     if (!hasAutonomousHook) {
-      // Must be first in the Stop chain so it blocks before other hooks run
-      (hooks.Stop as unknown[]).unshift({
+      // Keep stop-gate-router first when present so shadow telemetry sees every
+      // Stop event before legacy autonomous blocking can short-circuit the chain.
+      const autonomousEntry = {
         matcher: '',
         hooks: [{
           type: 'command',
           command: 'bash ${CLAUDE_PROJECT_DIR}/.claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
           timeout: 10000,
         }],
-      });
+      };
+      const stopGateIndex = stopEntries.findIndex(e =>
+        e.hooks?.some(h => h.command?.includes('stop-gate-router.js')),
+      );
+      if (stopGateIndex >= 0) {
+        stopEntries.splice(stopGateIndex + 1, 0, autonomousEntry);
+      } else {
+        stopEntries.unshift(autonomousEntry);
+      }
       result.upgraded.push('.claude/settings.json: registered autonomous stop hook (structural enforcement)');
       patched = true;
     }
@@ -3698,6 +3715,25 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
       this.migrateSettingsHookPaths(hooks.PostToolUse as unknown[], result);
       patched = true;
     }
+    {
+      const stopHooks = (hooks.Stop ?? []) as Array<{ matcher?: string; hooks?: Array<{ command?: string; type?: string; timeout?: number }> }>;
+      const hasStopGateRouter = stopHooks.some(e =>
+        e.hooks?.some(h => h.command?.includes('stop-gate-router.js')),
+      );
+      if (!hasStopGateRouter) {
+        stopHooks.unshift({
+          matcher: '',
+          hooks: [{
+            type: 'command',
+            command: 'node ${CLAUDE_PROJECT_DIR}/.instar/hooks/instar/stop-gate-router.js',
+            timeout: 5000,
+          }],
+        });
+        hooks.Stop = stopHooks;
+        patched = true;
+        result.upgraded.push('.claude/settings.json: added Stop stop-gate-router hook');
+      }
+    }
     if (hooks.Stop) {
       this.migrateSettingsHookPaths(hooks.Stop as unknown[], result);
       patched = true;
@@ -4379,7 +4415,7 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
    * Get the content of a named hook template.
    * Used by init.ts to share canonical hook content without duplication.
    */
-  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'slopcheck-guard' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review' | 'auto-approve-permissions' | 'skill-usage-telemetry' | 'build-stop-hook'): string {
+  getHookContent(name: 'session-start' | 'compaction-recovery' | 'external-operation-gate' | 'deferral-detector' | 'slopcheck-guard' | 'post-action-reflection' | 'external-communication-guard' | 'scope-coherence-collector' | 'scope-coherence-checkpoint' | 'claim-intercept' | 'claim-intercept-response' | 'telegram-topic-context' | 'response-review' | 'stop-gate-router' | 'auto-approve-permissions' | 'skill-usage-telemetry' | 'build-stop-hook'): string {
     switch (name) {
       case 'session-start': return this.getSessionStartHook();
       case 'compaction-recovery': return this.getCompactionRecovery();
@@ -4394,6 +4430,7 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
       case 'claim-intercept-response': return this.getClaimInterceptResponseHook();
       case 'telegram-topic-context': return this.getTelegramTopicContextHook();
       case 'response-review': return this.getResponseReviewHook();
+      case 'stop-gate-router': return this.getStopGateRouterHook();
       case 'auto-approve-permissions': return this.getAutoApprovePermissionsHook();
       case 'skill-usage-telemetry': return this.getSkillUsageTelemetryHook();
       case 'build-stop-hook': return this.getBuildStopHook();
@@ -6970,6 +7007,176 @@ process.stdin.on('end', async () => {
   } catch {
     // JSON parse error on stdin — fail open
     process.exit(0);
+  }
+});
+`;
+  }
+
+  private getStopGateRouterHook(): string {
+    const port = this.config.port;
+    return `#!/usr/bin/env node
+// Unjustified Stop Gate router.
+//
+// Thin client: reads Stop-hook JSON from stdin, asks the local Instar server
+// for hot-path state, and in shadow/enforce mode submits trusted evidence
+// metadata to /internal/stop-gate/evaluate. Shadow mode only records telemetry;
+// enforce mode blocks only on a server-side "continue" decision.
+
+const _r = require;
+const fs = _r('fs');
+const path = _r('path');
+const childProcess = _r('child_process');
+
+const projectDir = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+const configPath = path.join(projectDir, '.instar', 'config.json');
+let serverPort = ${port};
+let authToken = '';
+try {
+  const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  serverPort = cfg.port || ${port};
+  authToken = cfg.authToken || '';
+} catch {}
+
+function postJson(urlPath, payload, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+  return fetch('http://127.0.0.1:' + serverPort + urlPath, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + authToken,
+    },
+    body: JSON.stringify(payload),
+    signal: controller.signal,
+  }).then(async function (res) {
+    clearTimeout(timer);
+    if (!res.ok) throw new Error('http ' + res.status);
+    return res.json();
+  }, function (err) {
+    clearTimeout(timer);
+    throw err;
+  });
+}
+
+function getJson(urlPath, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(function () { controller.abort(); }, timeoutMs);
+  return fetch('http://127.0.0.1:' + serverPort + urlPath, {
+    headers: { 'Authorization': 'Bearer ' + authToken },
+    signal: controller.signal,
+  }).then(async function (res) {
+    clearTimeout(timer);
+    if (!res.ok) throw new Error('http ' + res.status);
+    return res.json();
+  }, function (err) {
+    clearTimeout(timer);
+    throw err;
+  });
+}
+
+function git(args) {
+  try {
+    return childProcess.execFileSync('git', ['-C', projectDir].concat(args), {
+      encoding: 'utf-8',
+      timeout: 800,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function firstLine(value) {
+  return String(value || '').split(/\\r?\\n/).filter(Boolean)[0] || null;
+}
+
+function listEvidenceArtifacts(sessionStartTs) {
+  const out = git(['ls-files']);
+  if (!out) return [];
+  const files = out.split(/\\r?\\n/).filter(function (file) {
+    if (!file) return false;
+    if (!/\\.(md|markdown|json|jsonl|txt)$/i.test(file)) return false;
+    return /(^|\\/)(docs\\/specs|specs|plans?|tasks?|upgrades|MEMORY\\.md|AGENTS\\.md)|spec|plan|handoff|todo|next|round/i.test(file);
+  }).slice(0, 30);
+  return files.map(function (file) {
+    const introducingCommit = firstLine(git(['log', '--follow', '--format=%H', '--reverse', '--', file]));
+    const latestCommit = firstLine(git(['log', '--format=%H', '-1', '--', file]));
+    let createdThisSession = false;
+    let modifiedThisSession = false;
+    if (sessionStartTs && latestCommit) {
+      const ts = Number(firstLine(git(['show', '-s', '--format=%ct', latestCommit])) || '0') * 1000;
+      modifiedThisSession = ts >= sessionStartTs;
+      if (introducingCommit) {
+        const createdTs = Number(firstLine(git(['show', '-s', '--format=%ct', introducingCommit])) || '0') * 1000;
+        createdThisSession = createdTs >= sessionStartTs;
+      }
+    }
+    return {
+      path: file,
+      introducingCommit: introducingCommit,
+      latestCommit: latestCommit,
+      createdThisSession: createdThisSession,
+      modifiedThisSession: modifiedThisSession,
+    };
+  });
+}
+
+function buildSignals(stopReason, message) {
+  const text = String(stopReason || '') + '\\n' + String(message || '');
+  return {
+    mentionsContextLimit: /context|window|token|compact/i.test(text),
+    mentionsFreshSession: /fresh session|new session|restart|continue in a new/i.test(text),
+    claimsShouldStopForContext: /stop|pause|wrap up|hand off/i.test(text) && /context|fresh|compact/i.test(text),
+  };
+}
+
+function exitOpen() {
+  process.exit(0);
+}
+
+let data = '';
+process.stdin.on('data', function (chunk) { data += chunk; });
+process.stdin.on('end', async function () {
+  let input;
+  try {
+    input = data ? JSON.parse(data) : {};
+  } catch {
+    exitOpen();
+    return;
+  }
+
+  if (input.stop_hook_active) exitOpen();
+  const sessionId = String(input.session_id || input.sessionId || process.env.INSTAR_SESSION_ID || 'unknown');
+
+  try {
+    const hot = await getJson('/internal/stop-gate/hot-path?session=' + encodeURIComponent(sessionId), 1500);
+    if (!hot || hot.killSwitch || hot.mode === 'off' || hot.compactionInFlight) exitOpen();
+
+    const message = String(input.last_assistant_message || '');
+    const stopReason = String(input.stop_reason || input.reason || message || '');
+    const evidenceMetadata = {
+      artifacts: listEvidenceArtifacts(hot.sessionStartTs || null),
+      signals: buildSignals(stopReason, message),
+      sessionStartTs: hot.sessionStartTs || null,
+    };
+
+    const result = await postJson('/internal/stop-gate/evaluate', {
+      sessionId: sessionId,
+      evidenceMetadata: evidenceMetadata,
+      untrustedContent: {
+        stopReason: stopReason,
+        recentTurns: message ? [{ source: 'agent', text: message }] : [],
+      },
+    }, 2500);
+
+    if (hot.mode === 'enforce' && result && result.decision === 'continue' && result.reminder) {
+      process.stdout.write(JSON.stringify({ decision: 'block', reason: result.reminder }));
+      process.exit(2);
+      return;
+    }
+    exitOpen();
+  } catch {
+    exitOpen();
   }
 });
 `;
