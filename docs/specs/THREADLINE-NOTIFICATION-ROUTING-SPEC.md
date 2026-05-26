@@ -1,7 +1,7 @@
 ---
 name: threadline-notification-routing
 review-convergence: 2026-05-25T22:00:00Z
-approved: false
+approved: true
 eli16-overview: THREADLINE-NOTIFICATION-ROUTING-ELI16.md
 ---
 
@@ -56,7 +56,7 @@ Resolution:
 2. Else delegate to the existing **CollaborationSurfacer** hub path (single `dedicatedTopicId`, deduped). 
 3. **Never** calls `createAttentionItem` / `createForumTopic` per event.
 
-Coalescing + rate-limit mirror SentinelNotifier + the existing CollaborationSurfacer dedupe (per-thread one-surface, follow-ups suppressed). This is a **delivery sink, not a gate** — no new blocking authority (signal-vs-authority compliant).
+Coalescing + rate-limit mirror SentinelNotifier + the existing CollaborationSurfacer dedupe (per-thread one-surface; repeat posts on an already-surfaced thread are suppressed). This is a **delivery sink, not a gate** — no new blocking authority (signal-vs-authority compliant).
 
 ### Fix 2 — migrate the loop-gate to the router
 

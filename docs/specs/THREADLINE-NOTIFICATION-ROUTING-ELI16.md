@@ -29,3 +29,7 @@ Then the usual: build it in isolation, write tests for every branch, deploy it o
 ## What I need from you
 
 A thumbs-up on this plan. Both your calls (#1 keep housekeeping out of our working topics, #2 keep the Threadline topic silent) are baked in. After your ok I build it end-to-end and report back when it's live — no check-ins in between.
+
+---
+
+_Status: approved 2026-05-25 (Justin, topic 12304); implemented in this PR with 3-tier tests + a concurring second-pass review. Both decisions baked in: housekeeping stays out of working topics, and the Threadline hub stays silent (no "waiting" framing)._
