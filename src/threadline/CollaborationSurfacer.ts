@@ -242,11 +242,15 @@ export class CollaborationSurfacer {
             return { dedicatedTopicId: data.dedicatedTopicId, surfaced: data.surfaced as SurfacedThreadRecord[] };
           }
           if (Array.isArray(data.surfacedThreads)) {
-            // Legacy → records.
-            const surfaced: SurfacedThreadRecord[] = (data.surfacedThreads as string[]).map(threadId => ({
+            // Legacy → records. The legacy array is append-ordered (newest last),
+            // so stamp surfacedAt by INDEX (not a constant epoch) to preserve that
+            // ordering — otherwise mostRecentUnbound() can't tell legacy entries
+            // apart (D3). index+1 ms keeps them all in 1970 (older than any real
+            // `new Date()` surfacing) while ordering them by original arrival.
+            const surfaced: SurfacedThreadRecord[] = (data.surfacedThreads as string[]).map((threadId, index) => ({
               threadId,
               peerName: 'An agent',
-              surfacedAt: new Date(0).toISOString(),
+              surfacedAt: new Date(index + 1).toISOString(),
               bound: false,
             }));
             return { dedicatedTopicId: data.dedicatedTopicId, surfaced };

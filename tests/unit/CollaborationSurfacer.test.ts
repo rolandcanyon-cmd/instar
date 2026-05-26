@@ -176,4 +176,16 @@ describe('CollaborationSurfacer', () => {
     expect(r.reason).toBe('already-surfaced');
     expect(tg.created).toBe(0); // reused the persisted hub topic id, no re-create
   });
+
+  it('CMT-529 D3: legacy migration preserves ORDER — mostRecentUnbound is the last-appended', () => {
+    const tg = fakeTelegram();
+    const dir = path.join(stateDir, 'threadline');
+    fs.mkdirSync(dir, { recursive: true });
+    // Legacy array is append-ordered (newest last).
+    fs.writeFileSync(path.join(dir, 'collaboration-surface.json'), JSON.stringify({ dedicatedTopicId: 7777, surfacedThreads: ['t-oldest', 't-middle', 't-newest'] }));
+    const s = new CollaborationSurfacer({ telegram: tg, stateDir });
+    const mru = s.mostRecentUnbound();
+    expect(mru.record?.threadId).toBe('t-newest'); // not arbitrary / not all-epoch-tied
+    expect(mru.ambiguous).toBe(true);
+  });
 });

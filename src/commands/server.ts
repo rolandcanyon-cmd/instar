@@ -1149,6 +1149,9 @@ function wireTelegramRouting(
   topicMemory?: TopicMemory,
   userManager?: UserManager,
   fixCommandHandler?: (topicId: number, text: string) => Promise<boolean>,
+  // Late-bound: the threadline hub deps are constructed AFTER this is wired, so
+  // resolve them at message-time (CMT-529 deterministic "open this" intercept).
+  getHubDeps?: () => import('../threadline/hubCommands.js').HubBindDeps | null,
 ): void {
   // Guard: tracks which topic IDs have a spawn in progress.
   // Prevents duplicate concurrent spawns for the same topic when messages
@@ -1203,6 +1206,36 @@ function wireTelegramRouting(
         }
       })();
       return;
+    }
+
+    // ── Threadline hub commands: "open this" / "tie this to <topic>" (CMT-529) ──
+    // When a message in the Threadline HUB topic is a deterministic hub command,
+    // bind the conversation to a topic STRUCTURALLY — before any agent interprets
+    // it. This onTopicMessage seam is the convergence both inbound paths reach
+    // (lifeline-forward AND server-polling), so one intercept covers both modes.
+    // FAIL-OPEN: any error falls through to normal routing.
+    const hubDeps = getHubDeps?.() ?? null;
+    if (hubDeps) {
+      try {
+        let hubTopicId: number | undefined;
+        try { hubTopicId = hubDeps.collaborationSurfacer.getHubTopicId(); } catch { hubTopicId = undefined; }
+        if (hubTopicId !== undefined && Number(topicId) === Number(hubTopicId)) {
+          const { parseHubCommand, bindHubConversation } = await import('../threadline/hubCommands.js');
+          const cmd = parseHubCommand(text);
+          if (cmd) {
+            const result = await bindHubConversation(hubDeps, { ...cmd, autoPick: true }); // human "open this" → auto-pick most-recent, never 409
+            if (!result.ok) {
+              await telegram.sendToTopic(topicId, result.status === 404
+                ? 'Nothing waiting in the hub to open right now.'
+                : `Couldn't open that — ${result.error}`).catch(() => { });
+            }
+            // On success bindHubConversation already posted the hub confirmation.
+            return; // structural: never inject the command into a session
+          }
+        }
+      } catch (err) {
+        console.warn(`[telegram] hub-command intercept error (fail-open): ${err instanceof Error ? err.message : err}`);
+      }
     }
 
     // ── Fix commands from notification messages ──────────────────────
@@ -2991,7 +3024,8 @@ export async function startServer(options: StartOptions): Promise<void> {
       const userManagerSendOnly = new UserManager(config.stateDir, config.users);
       _fixDeps = { state, liveConfig, sessionManager, telegram, config };
       wireTelegramRouting(telegram, sessionManager, quotaTracker, topicMemory, userManagerSendOnly,
-        (topicId, text) => handleFixCommand(topicId, text, _fixDeps!));
+        (topicId, text) => handleFixCommand(topicId, text, _fixDeps!),
+        () => (collaborationSurfacer && conversationStore && telegram) ? { collaborationSurfacer, conversationStore, commitmentTracker, telegram } : null);
       wireTelegramCallbacks(telegram, sessionManager, state, quotaTracker, undefined, config.sessions.claudePath, topicMemory);
       console.log(pc.green('  Telegram routing + command callbacks wired (send-only)'));
     }
@@ -3178,7 +3212,8 @@ export async function startServer(options: StartOptions): Promise<void> {
 
       // Wire up topic → session routing and session management callbacks
       wireTelegramRouting(telegram, sessionManager, quotaTracker, topicMemory, userManager,
-        (topicId, text) => handleFixCommand(topicId, text, _fixDeps!));
+        (topicId, text) => handleFixCommand(topicId, text, _fixDeps!),
+        () => (collaborationSurfacer && conversationStore && telegram) ? { collaborationSurfacer, conversationStore, commitmentTracker, telegram } : null);
       wireTelegramCallbacks(telegram, sessionManager, state, quotaTracker, accountSwitcher, config.sessions.claudePath, topicMemory);
 
       // Wire up unknown-user handling (Multi-User Setup Wizard Phase 4.5)
