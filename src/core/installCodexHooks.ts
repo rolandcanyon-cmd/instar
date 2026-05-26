@@ -88,7 +88,8 @@ export function buildInstarCodexHookGroups(
     PermissionRequest: [
       { matcher: '.*', hooks: [node('external-operation-gate.js')] },
     ],
-    // End-of-turn review trio — MUST MIRROR the Claude Stop trio
+    // End-of-turn review chain — starts with the unjustified-stop router
+    // (shadow by default), then MUST MIRROR the Claude Stop trio
     // (settings-template.json): response-review + claim-intercept-response +
     // scope-coherence-checkpoint. (Earlier this wrongly substituted
     // deferral-detector — a PreToolUse hook whose `tool_name==='Bash'` guard
@@ -100,7 +101,7 @@ export function buildInstarCodexHookGroups(
     // `approve` and self-throttles (depth threshold + 30-min cooldown), so it
     // can't loop an autonomous Codex run.
     Stop: [
-      { matcher: '', hooks: [{ ...node('response-review.js'), timeout: 10000 }, node('claim-intercept-response.js'), node('scope-coherence-checkpoint.js')] },
+      { matcher: '', hooks: [node('stop-gate-router.js'), { ...node('response-review.js'), timeout: 10000 }, node('claim-intercept-response.js'), node('scope-coherence-checkpoint.js')] },
     ],
     // Identity/context injection.
     SessionStart: [

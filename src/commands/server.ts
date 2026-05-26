@@ -7338,6 +7338,49 @@ export async function startServer(options: StartOptions): Promise<void> {
     const outboundDedupGate = new OutboundDedupGate();
     console.log(pc.green('  Outbound dedup gate: active (word-3gram Jaccard, threshold 0.7, 5min window)'));
 
+    // Unjustified Stop Gate — observe-only by default. The routes and authority
+    // already fail open; constructing both pieces here is what makes the Stop
+    // router produce real shadow-mode telemetry instead of a dark endpoint.
+    let unjustifiedStopGate: import('../core/UnjustifiedStopGate.js').UnjustifiedStopGate | undefined;
+    let stopGateDb: import('../core/StopGateDb.js').StopGateDb | undefined;
+    {
+      const { configureStopGateState } = await import('../server/stopGate.js');
+      const modeFilePath = path.join(config.stateDir, 'server-data', 'stop-gate-mode.json');
+      try {
+        const { StopGateDb } = await import('../core/StopGateDb.js');
+        stopGateDb = new StopGateDb({
+          dbPath: path.join(config.stateDir, 'server-data', 'stop-gate.db'),
+        });
+      } catch (err) {
+        DegradationReporter.getInstance().report({
+          feature: 'unjustifiedStopGate.db',
+          primary: 'SQLite decision log for Stop-gate evaluations',
+          fallback: 'fail-open → no Stop-gate persistence',
+          reason: err instanceof Error ? err.message : String(err),
+          impact: 'Stop events are allowed and not recorded until the database opens.',
+        });
+      }
+      if (sharedIntelligence && stopGateDb) {
+        try {
+          const { UnjustifiedStopGate } = await import('../core/UnjustifiedStopGate.js');
+          unjustifiedStopGate = new UnjustifiedStopGate({ intelligence: sharedIntelligence });
+        } catch (err) {
+          DegradationReporter.getInstance().report({
+            feature: 'unjustifiedStopGate.authority',
+            primary: 'LLM authority for unjustified Stop-event detection',
+            fallback: 'fail-open → allow',
+            reason: err instanceof Error ? err.message : String(err),
+            impact: 'Stop events are allowed until the authority can initialize.',
+          });
+        }
+      }
+      const activeMode = configureStopGateState({
+        modeFilePath,
+        defaultMode: unjustifiedStopGate && stopGateDb ? 'shadow' : 'off',
+      });
+      console.log(pc.green(`  Unjustified Stop Gate: ${activeMode}${unjustifiedStopGate && stopGateDb ? ' (authority + SQLite wired)' : ' (degraded, fail-open)'}`));
+    }
+
     // Response Review Pipeline (Coherence Gate) — evaluates agent responses before delivery.
     // Prefers the shared IntelligenceProvider (subscription-compatible) so the gate works
     // even without ANTHROPIC_API_KEY. Falls back to direct Anthropic API if a key is set
@@ -7856,7 +7899,7 @@ export async function startServer(options: StartOptions): Promise<void> {
       ));
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, rateLimitSentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, conversationStore, warrantsReplyGate, collaborationSurfacer, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, proxyCoordinator, topicIntentStore, usherSignalStore, intelligence: sharedIntelligence ?? undefined, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, workingMemory, taskFlowRegistry, threadlineFlowBridge, sessionReaper });
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, rateLimitSentinel, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, conversationStore, warrantsReplyGate, collaborationSurfacer, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, proxyCoordinator, topicIntentStore, usherSignalStore, intelligence: sharedIntelligence ?? undefined, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, workingMemory, taskFlowRegistry, threadlineFlowBridge, sessionReaper, unjustifiedStopGate, stopGateDb });
     // Boot-recovery (tunnel-failure-resilience spec Part 6): if the agent
     // died mid-relay-episode, the persisted tunnel.json carries
     // rotationPending=true. Rotate the dashboard PIN + authToken BEFORE

@@ -75,12 +75,11 @@ describe('installCodexHooks', () => {
     expect(cfg.hooks.PermissionRequest[0].matcher).toBe('.*');
   });
 
-  it('wires the Stop review trio mirroring Claude: response-review + claim-intercept-response + scope-coherence', () => {
+  it('wires the Stop gate router before the review trio', () => {
     installCodexHooks(projectDir);
     const cfg = read();
     const stopCommands = cfg.hooks.Stop[0].hooks.map((h: any) => h.command);
-    // MUST mirror the Claude Stop trio (settings-template.json). Codex honors
-    // {decision:'block', reason} on Stop, so these grounding checks apply.
+    expect(stopCommands[0]).toContain('stop-gate-router.js');
     expect(stopCommands.some((c: string) => c.includes('response-review.js'))).toBe(true);
     expect(stopCommands.some((c: string) => c.includes('claim-intercept-response.js'))).toBe(true);
     expect(stopCommands.some((c: string) => c.includes('scope-coherence-checkpoint.js'))).toBe(true);

@@ -1907,7 +1907,19 @@ export function createRoutes(ctx: RouteContext): Router {
     // event so a malformed payload doesn't break the gate.
     if (req.body?.event === 'SessionStart') {
       const sid = (req.body?.sessionId || req.body?.session_id || '').toString();
-      if (sid) recordSessionStart(sid, Date.now());
+      if (sid) {
+        const startedAt = Date.now();
+        recordSessionStart(sid, startedAt);
+        try {
+          ctx.stopGateDb?.recordSessionStart(
+            sid,
+            ctx.config.projectName ?? 'unknown',
+            startedAt,
+          );
+        } catch {
+          // Best-effort hot-path enrichment; evaluation still fail-opens.
+        }
+      }
     }
 
     const payload = req.body;

@@ -3955,6 +3955,10 @@ done
   // Stop hook that calls /review/evaluate for LLM-powered response quality checking.
   fs.writeFileSync(path.join(hooksDir, 'response-review.js'), migrator.getHookContent('response-review'), { mode: 0o755 });
 
+  // Unjustified Stop Gate router — Stop hook that calls the server-side gate.
+  // Shadow-mode by default; enforcement is controlled server-side.
+  fs.writeFileSync(path.join(hooksDir, 'stop-gate-router.js'), migrator.getHookContent('stop-gate-router'), { mode: 0o755 });
+
   // Hook event reporter — posts hook events to the Instar server for observability
   // and session resumption (claudeSessionId). Uses command hooks because Claude Code
   // HTTP hooks (type: "http") silently fail to fire as of v2.1.78.
@@ -4732,16 +4736,25 @@ function installClaudeSettings(projectDir: string, serverPort?: number): void {
   }
 
   // Register autonomous stop hook — structural enforcement for /autonomous mode.
-  // Must be FIRST in the Stop chain so it blocks exit before other hooks run.
+  // Keep stop-gate-router first when present so shadow telemetry sees every
+  // Stop event before legacy autonomous blocking can short-circuit the chain.
   const hasAutonomousHook = stopHooks.some(e =>
     e.hooks?.some(h => h.command?.includes('autonomous-stop-hook')),
   );
   if (!hasAutonomousHook) {
-    (hooks.Stop as unknown[]).unshift({ matcher: '', hooks: [{
+    const autonomousEntry = { matcher: '', hooks: [{
       type: 'command',
       command: 'bash ${CLAUDE_PROJECT_DIR}/.claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
       timeout: 10000,
-    }] });
+    }] };
+    const stopGateIndex = stopHooks.findIndex(e =>
+      e.hooks?.some(h => h.command?.includes('stop-gate-router.js')),
+    );
+    if (stopGateIndex >= 0) {
+      stopHooks.splice(stopGateIndex + 1, 0, autonomousEntry);
+    } else {
+      stopHooks.unshift(autonomousEntry);
+    }
   }
 
   // PermissionRequest: auto-approve all — subagents don't inherit --dangerously-skip-permissions.
