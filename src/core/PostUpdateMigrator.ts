@@ -2467,18 +2467,24 @@ Threadline activity NEVER spawns a new Telegram topic per event. Notices route o
 - A conversation **bound to a parent topic** → its real replies surface THERE (handled automatically).
 - A **parentless** conversation + any **status/housekeeping** notice → a single, SILENT **"Threadline" hub topic**. It does not buzz the user — agent-to-agent chatter isn't the user's job by default; the hub is a calm, browsable record.
 
-When the user is reading the Threadline hub topic and says **"open this"** or **"tie this to &lt;an existing topic&gt;"**, act on it by calling the bind endpoint — do NOT just reply inline:
-\`\`\`bash
-# open this → create a fresh topic and bind the conversation (most-recent unbound, or pass threadId)
-curl -X POST -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' http://localhost:${port}/threadline/hub/bind -d '{"action":"open"}'
-# tie this to an existing topic
-curl -X POST -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' http://localhost:${port}/threadline/hub/bind -d '{"action":"tie","targetTopicId":1234}'
-\`\`\`
-After binding, that conversation's future updates flow to the bound topic automatically. If more than one conversation is unbound, the endpoint returns 409 — ask the user which one (pass its \`threadId\`).
+When the user is reading the Threadline hub topic and says **"open this"** or **"tie this to &lt;an existing topic&gt;"**, this is handled **structurally** — the system intercepts those exact commands in the hub topic and binds the conversation automatically (bare "open this" opens the most-recent one) BEFORE the message reaches me. I will not see "open this" as a message to interpret, and must NOT reply to it conversationally. (Also available as \`POST /threadline/hub/bind\` \`{action:"open"|"tie", ...}\` for scripted use.) After binding, that conversation's future updates flow to the bound topic automatically.
 `;
       content += '\n' + hubSection;
       patched = true;
-      result.upgraded.push('CLAUDE.md: added Threadline hub + "open this"/bind guidance (CMT-519)');
+      result.upgraded.push('CLAUDE.md: added Threadline hub + "open this" guidance (CMT-519)');
+    }
+
+    // CMT-529 — agents migrated under CMT-519 got the OLD "call the bind endpoint"
+    // wording; "open this" is now a STRUCTURAL intercept (handled before the agent).
+    // Re-patch the stale sentence so the agent doesn't try to call the endpoint /
+    // reply to a command it will never actually see.
+    if (content.includes('act on it by calling the bind endpoint')) {
+      content = content.replace(
+        /When the user is reading the Threadline hub topic and says \*\*"open this"\*\*[\s\S]*?(?:returns 409 — ask the user which one \(pass its `threadId`\)\.)/,
+        `When the user is reading the Threadline hub topic and says **"open this"** or **"tie this to <an existing topic>"**, this is handled **structurally** — the system intercepts those exact commands and binds the conversation automatically (bare "open this" opens the most-recent one) BEFORE the message reaches me. I will not see "open this" as a message to interpret, and must NOT reply to it conversationally.`,
+      );
+      patched = true;
+      result.upgraded.push('CLAUDE.md: updated "open this" guidance to structural-intercept (CMT-529)');
     }
 
     // Multi-Session Autonomy awareness (Agent Awareness Standard). Existing

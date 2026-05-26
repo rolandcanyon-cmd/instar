@@ -13141,63 +13141,27 @@ export function createRoutes(ctx: RouteContext): Router {
       res.status(503).json({ error: 'Threadline hub not available (telegram/conversation store required)' });
       return;
     }
-    const action = req.body?.action;
-    if (action !== 'open' && action !== 'tie') {
-      res.status(400).json({ error: '"action" must be "open" or "tie"' });
-      return;
-    }
-    // Resolve the conversation: explicit threadId, else the hub's most-recent unbound.
-    let threadId: string | undefined =
-      typeof req.body?.threadId === 'string' && req.body.threadId ? req.body.threadId : undefined;
-    if (!threadId) {
-      const mru = ctx.collaborationSurfacer.mostRecentUnbound();
-      if (!mru.record) {
-        res.status(404).json({ error: 'No unbound Threadline conversation in the hub to open' });
-        return;
-      }
-      if (mru.ambiguous) {
-        res.status(409).json({ error: 'More than one unbound conversation in the hub — specify which threadId to open' });
-        return;
-      }
-      threadId = mru.record.threadId;
-    }
-    try {
-      // Resolve the target topic.
-      let topicId: number;
-      let topicName: string;
-      if (action === 'tie') {
-        if (typeof req.body?.targetTopicId === 'number') {
-          topicId = req.body.targetTopicId;
-          topicName = typeof req.body?.targetTopicName === 'string' ? req.body.targetTopicName : `topic ${topicId}`;
-        } else if (typeof req.body?.targetTopicName === 'string' && req.body.targetTopicName) {
-          const t = await ctx.telegram.findOrCreateForumTopic(req.body.targetTopicName);
-          topicId = t.topicId; topicName = t.name;
-        } else {
-          res.status(400).json({ error: 'tie requires targetTopicId or targetTopicName' });
-          return;
-        }
-      } else {
-        // open: create a uniquely-named topic for this conversation (peer + short
-        // threadId so two same-subject conversations never collide on the name).
-        const existing = ctx.conversationStore.get(threadId);
-        const peer = (existing?.participants?.peers?.[0] ?? 'agent').replace(/[^\w-]/g, '').slice(0, 24) || 'agent';
-        const name = `${peer} · ${threadId.slice(0, 8)}`;
-        const t = await ctx.telegram.findOrCreateForumTopic(name);
-        topicId = t.topicId; topicName = t.name;
-      }
-      // Authoritative bind.
-      await ctx.conversationStore.mutate(threadId, (c) => { c.boundTopicId = topicId; return c; });
-      const commitment = ctx.commitmentTracker?.findByThreadId(threadId);
-      if (commitment && ctx.commitmentTracker) {
-        try { await ctx.commitmentTracker.mutate(commitment.id, (c) => { c.topicId = topicId; return c; }); }
-        catch (e) { console.warn(`[hub/bind] commitment topicId update failed: ${e instanceof Error ? e.message : e}`); }
-      }
-      ctx.collaborationSurfacer.markBound(threadId);
-      await ctx.telegram.sendToTopic(topicId, `🧵 This Threadline conversation is now tied to this topic — updates will land here.`).catch(() => { });
-      await ctx.collaborationSurfacer.noteInHub(`Opened conversation ${threadId.slice(0, 8)} → "${topicName}".`);
-      res.json({ ok: true, action, threadId, topicId, topicName });
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    // Shared logic with the deterministic onTopicMessage intercept (CMT-529).
+    // API path leaves autoPick=false so a scripted caller gets the explicit 409.
+    const { bindHubConversation } = await import('../threadline/hubCommands.js');
+    const result = await bindHubConversation(
+      {
+        collaborationSurfacer: ctx.collaborationSurfacer,
+        conversationStore: ctx.conversationStore,
+        commitmentTracker: ctx.commitmentTracker,
+        telegram: ctx.telegram,
+      },
+      {
+        action: req.body?.action,
+        threadId: typeof req.body?.threadId === 'string' ? req.body.threadId : undefined,
+        targetTopicId: typeof req.body?.targetTopicId === 'number' ? req.body.targetTopicId : undefined,
+        targetTopicName: typeof req.body?.targetTopicName === 'string' ? req.body.targetTopicName : undefined,
+      },
+    );
+    if (result.ok) {
+      res.json({ ok: true, action: result.action, threadId: result.threadId, topicId: result.topicId, topicName: result.topicName });
+    } else {
+      res.status(result.status).json({ error: result.error });
     }
   });
 

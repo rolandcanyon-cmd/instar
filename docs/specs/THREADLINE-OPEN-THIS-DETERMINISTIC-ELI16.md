@@ -27,3 +27,7 @@ Build in isolation; unit-test the command matching (so "open this" fires but "ca
 ## What I need from you
 
 A thumbs-up. After that I build it end-to-end and report back when it's live.
+
+---
+
+_Status: approved 2026-05-26 (Justin, topic 12304); implemented in this PR with 3-tier tests + a concurring second-pass review. Both decisions baked in: deterministic structural intercept (no agent judgment), auto-pick the most-recent on bare "open this"._

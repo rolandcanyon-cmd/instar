@@ -1,7 +1,7 @@
 ---
 name: threadline-open-this-deterministic
 review-convergence: 2026-05-26T20:10:00Z
-approved: false
+approved: true
 eli16-overview: THREADLINE-OPEN-THIS-DETERMINISTIC-ELI16.md
 ---
 
@@ -9,7 +9,7 @@ eli16-overview: THREADLINE-OPEN-THIS-DETERMINISTIC-ELI16.md
 
 **Status:** DRAFT — pre-convergence
 **Author:** Echo · **Date:** 2026-05-26 · **Base:** JKHeadley/main @ v1.3.0
-**Tracks:** CMT-529 · topic 12304 · Layer-2 follow-up to PR #392 (CMT-519)
+**Tracks:** CMT-529 · topic 12304 · Layer-2 continuation of PR #392 (CMT-519)
 
 ---
 
