@@ -165,6 +165,27 @@ export class PostUpdateMigrator {
     return this.stepEngine;
   }
 
+  private templateCandidates(subdir: 'hooks' | 'scripts' | 'playbook', filename: string): string[] {
+    return [
+      path.resolve(__dirname, '..', 'templates', subdir, filename),
+      path.resolve(__dirname, '..', '..', 'src', 'templates', subdir, filename),
+    ];
+  }
+
+  /**
+   * Read a built-in template from the compiled layout when templates have
+   * been copied to dist, or from the packaged source-template layout used by
+   * current npm publishes.
+   */
+  private loadTemplate(subdir: 'hooks' | 'scripts' | 'playbook', filename: string): string | null {
+    for (const candidate of this.templateCandidates(subdir, filename)) {
+      if (fs.existsSync(candidate)) {
+        return fs.readFileSync(candidate, 'utf-8');
+      }
+    }
+    return null;
+  }
+
   /**
    * Run all post-update migrations. Safe to call multiple times —
    * each migration is idempotent.
@@ -550,31 +571,11 @@ export class PostUpdateMigrator {
   private migrateConversationalCatalogPlaybookManifest(result: MigrationResult): void {
     const builtinDir = path.join(this.config.stateDir, 'playbook', 'builtin-manifests');
     const targetPath = path.join(builtinDir, 'conversational-catalog.json');
-    // Resolve template path via module-local __dirname (from
-    // fileURLToPath(import.meta.url)). Two candidates: dist install layout
-    // (dist/core/ → ../templates/...) and dev source layout
-    // (src/core/ → ../templates/... already, but tsc may resolve __dirname
-    // to dist; src fallback added for robustness in dev runs).
-    const candidates = [
-      path.resolve(__dirname, '..', 'templates', 'playbook', 'conversational-catalog-manifest.json'),
-      path.resolve(__dirname, '..', '..', 'src', 'templates', 'playbook', 'conversational-catalog-manifest.json'),
-    ];
-    let templatePath = '';
-    for (const cand of candidates) {
-      if (fs.existsSync(cand)) { templatePath = cand; break; }
-    }
-    if (!templatePath) {
+    const templateContent = this.loadTemplate('playbook', 'conversational-catalog-manifest.json');
+    if (templateContent === null) {
       // Built-in template missing — should never happen post-install, but
       // don't error out the update; just skip.
       result.skipped.push('conversational-catalog-playbook: template not found in package install');
-      return;
-    }
-
-    let templateContent: string;
-    try {
-      templateContent = fs.readFileSync(templatePath, 'utf-8');
-    } catch (err) {
-      result.errors.push(`conversational-catalog-playbook: template read failed: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
 
@@ -650,20 +651,12 @@ export class PostUpdateMigrator {
     // Always-overwrite the wrapper (Migration Parity Standard for hook
     // scripts: built-in templates are authoritative).
     const wrapperTargetPath = path.join(binDir, 'instar-worktree-create.sh');
-    const templateCandidates = [
-      path.resolve(__dirname, '..', 'templates', 'scripts', 'instar-worktree-create.sh'),
-      path.resolve(__dirname, '..', '..', 'src', 'templates', 'scripts', 'instar-worktree-create.sh'),
-    ];
-    let templatePath = '';
-    for (const cand of templateCandidates) {
-      if (fs.existsSync(cand)) { templatePath = cand; break; }
-    }
-    if (!templatePath) {
+    const templateContent = this.loadTemplate('scripts', 'instar-worktree-create.sh');
+    if (templateContent === null) {
       result.skipped.push('worktree-convention: wrapper template not found in package install');
       return;
     }
     try {
-      const templateContent = fs.readFileSync(templatePath, 'utf-8');
       const existing = fs.existsSync(wrapperTargetPath)
         ? fs.readFileSync(wrapperTargetPath, 'utf-8')
         : null;
@@ -1025,17 +1018,8 @@ export class PostUpdateMigrator {
     const scriptPath = path.join(os.homedir(), '.instar', 'instar-watchdog.sh');
     const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'ai.instar.watchdog.plist');
 
-    // Locate the template (dev: src/core/ → ../../src/templates/...
-    //                     dist: dist/core/ → ../templates/...)
-    const candidates = [
-      path.resolve(__dirname, '..', 'templates', 'scripts', 'instar-watchdog.sh'),
-      path.resolve(__dirname, '..', '..', 'src', 'templates', 'scripts', 'instar-watchdog.sh'),
-    ];
-    let scriptBody = '';
-    for (const cand of candidates) {
-      if (fs.existsSync(cand)) { scriptBody = fs.readFileSync(cand, 'utf-8'); break; }
-    }
-    if (!scriptBody) {
+    const scriptBody = this.loadTemplate('scripts', 'instar-watchdog.sh');
+    if (scriptBody === null) {
       result.skipped.push('fleet-watchdog: template not found in dist or src');
       return;
     }
@@ -6254,17 +6238,7 @@ process.stdin.on('end', async () => {
    * a healthy install). The caller is responsible for handling the null case.
    */
   private loadRelayTemplate(filename: string): string | null {
-    const modDir = __dirname;
-    const candidates = [
-      path.resolve(modDir, '..', 'templates', 'scripts', filename),
-      path.resolve(modDir, '..', '..', 'src', 'templates', 'scripts', filename),
-    ];
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
-        return fs.readFileSync(candidate, 'utf-8');
-      }
-    }
-    return null;
+    return this.loadTemplate('scripts', filename);
   }
 
   private getTelegramReplyScript(): string {
@@ -6334,16 +6308,9 @@ echo "[\$(date -Iseconds)] Server restart initiated"
   private getConvergenceCheck(): string {
     // Read the convergence check template from the templates directory.
     // This file is the heuristic quality gate that runs before external messaging.
-    // In dev: src/core/ → ../../src/templates/scripts/convergence-check.sh
-    // In dist: dist/core/ → ../templates/scripts/convergence-check.sh
-    const candidates = [
-      path.resolve(__dirname, '..', 'templates', 'scripts', 'convergence-check.sh'),
-      path.resolve(__dirname, '..', '..', 'src', 'templates', 'scripts', 'convergence-check.sh'),
-    ];
-    for (const candidate of candidates) {
-      if (fs.existsSync(candidate)) {
-        return fs.readFileSync(candidate, 'utf-8');
-      }
+    const template = this.loadTemplate('scripts', 'convergence-check.sh');
+    if (template !== null) {
+      return template;
     }
     // Fallback: use inline version so migration doesn't fail
     return this.getConvergenceCheckInline();
@@ -6629,8 +6596,13 @@ process.stdin.on('end', async () => {
   private getFreeTextGuardHook(): string {
     // Read the hook from the templates directory instead of inline generation.
     // This avoids multi-layer escaping issues (TypeScript -> bash -> Python -> regex).
-    const hookPath = path.join(__dirname, '..', 'templates', 'hooks', 'free-text-guard.sh');
-    return fs.readFileSync(hookPath, 'utf-8');
+    const template = this.loadTemplate('hooks', 'free-text-guard.sh');
+    if (template !== null) {
+      return template;
+    }
+    throw new Error(
+      `free-text-guard.sh template not found; checked ${this.templateCandidates('hooks', 'free-text-guard.sh').join(', ')}`,
+    );
   }
 
   private getClaimInterceptHook(): string {
