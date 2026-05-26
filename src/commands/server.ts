@@ -6807,10 +6807,13 @@ export async function startServer(options: StartOptions): Promise<void> {
         salienceGate,
         messageStore,
         localAgent: config.projectName,
-        injectIntoSession: (sessionName: string, text: string) => {
+        injectIntoSession: async (sessionName: string, text: string) => {
+          // Confirm the inject actually submitted (not left stuck at the prompt
+          // by the paste-end race). A bare dispatch returning true is the A2 bug:
+          // a stalled inject must NOT count as delivered, so the Telegram fallback
+          // surfaces the reply instead.
           try {
-            sessionManager.injectPasteNotification(sessionName, text);
-            return true;
+            return await sessionManager.injectPasteNotificationConfirmed(sessionName, text);
           } catch { return false; }
         },
         isSessionAlive: (sessionName: string) => {
@@ -7240,8 +7243,18 @@ export async function startServer(options: StartOptions): Promise<void> {
             }
           }
 
-          // Phase 2b: Route to warm listener if available and appropriate
-          if (listenerManager && listenerManager.shouldUseListener(trustLevel, textContent.length)) {
+          // Phase 2b: Route to warm listener if available and appropriate.
+          // EXCEPT topic-bound replies: a reply on a thread bound to a Telegram
+          // topic must reach handleInboundMessage → TopicLinkageHandler so it
+          // surfaces in the bound topic. The listener inbox is a side-channel
+          // that never surfaces to the topic — routing a topic-bound reply there
+          // is exactly the relay-path leak (A1-relay) that makes the reply vanish
+          // for the user even though transport succeeded. (The pipe-spawn branch
+          // above is already excluded for topic-bound threads via its
+          // `!threadResumeMap.get(...)` guard, now that get() no longer nulls them.)
+          const isTopicBoundReply =
+            !!msg.threadId && threadResumeMap.get(msg.threadId)?.originTopicId !== undefined;
+          if (listenerManager && listenerManager.shouldUseListener(trustLevel, textContent.length) && !isTopicBoundReply) {
             listenerManager.writeToInbox({ from: senderFingerprint, senderName, trustLevel, threadId: msg.threadId ?? getSyntheticThreadId(senderFingerprint), text: textContent });
             console.log(`[relay] Routed to listener inbox from ${senderName} (trust: ${trustLevel})`);
             return;

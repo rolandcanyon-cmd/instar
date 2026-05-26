@@ -1883,12 +1883,12 @@ rm()  { "${shimRunner}" rm  "$@"; }
    * Uses the same injection path as Telegram/WhatsApp messages
    * so InputGuard provenance checks apply.
    */
-  injectPasteNotification(tmuxSession: string, notification: string): void {
+  injectPasteNotification(tmuxSession: string, notification: string): string {
     const FILE_THRESHOLD = 500;
 
     if (notification.length <= FILE_THRESHOLD) {
       this.injectMessage(tmuxSession, notification);
-      return;
+      return notification;
     }
 
     // Write to temp file for large notifications
@@ -1900,6 +1900,44 @@ rm()  { "${shimRunner}" rm  "$@"; }
 
     const ref = `[paste] Content notification saved to ${filepath} — read it to see the details.`;
     this.injectMessage(tmuxSession, ref);
+    return ref;
+  }
+
+  /**
+   * Inject a paste notification and CONFIRM it actually submitted (was not left
+   * stuck at the prompt by the paste-end Enter race). Returns true only when the
+   * injected marker is no longer sitting at the input prompt within the recovery
+   * window — i.e. the session genuinely consumed the message. Observes outcome
+   * across the same window verifyInjection (fired by injectMessage) uses to resend
+   * Enter, so this does NOT duplicate recovery; it only reports the result.
+   *
+   * Used by topic-linkage reply surfacing, which must not treat a
+   * dispatched-but-stuck inject as "delivered to the user" (the A2 bug: a stalled
+   * inject silently resolved the commitment and suppressed the Telegram fallback).
+   */
+  async injectPasteNotificationConfirmed(tmuxSession: string, notification: string): Promise<boolean> {
+    let injected: string;
+    try {
+      injected = this.injectPasteNotification(tmuxSession, notification);
+    } catch {
+      return false;
+    }
+    const marker = injected.replace(/^\s+/, '').slice(0, 40).trim();
+    // Marker too short to verify reliably — treat dispatch as success.
+    if (!marker || marker.length < 8) return true;
+
+    // Absolute times-from-injection (ms) at which to check. Extends just past
+    // verifyInjection's last recovery attempt (6500ms) so we observe the final state.
+    const schedule = [1000, 3000, 5000, 7500];
+    let prev = 0;
+    for (const t of schedule) {
+      await new Promise((r) => setTimeout(r, t - prev));
+      prev = t;
+      if (!this.tmuxSessionExists(tmuxSession)) return false;
+      const pane = this.captureOutput(tmuxSession, 30) || '';
+      if (!this.isMarkerStuckAtPrompt(pane, marker)) return true; // submitted
+    }
+    return false; // still stuck after the full recovery window
   }
 
   injectTelegramMessage(tmuxSession: string, topicId: number, text: string, topicName?: string, senderName?: string, telegramUserId?: number): boolean {

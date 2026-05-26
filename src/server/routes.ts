@@ -12854,6 +12854,11 @@ export function createRoutes(ctx: RouteContext): Router {
                     originServer: `http://localhost:${ctx.config.port ?? 4042}`,
                     nonce: `${randomUUID()}:${now}`,
                     timestamp: now,
+                    // Stamp the sender's originating topic so the PEER can attribute
+                    // this thread to one of ITS topics on reply (B). Opaque per-chat
+                    // integer; the peer maps it via its own table and never echoes it
+                    // back as a routing target (preserves the F1 anti-poisoning guard).
+                    ...(resolvedOriginTopicId !== undefined ? { originTopicId: resolvedOriginTopicId } : {}),
                   },
                   delivery: {
                     phase: 'received' as const,
@@ -12889,6 +12894,18 @@ export function createRoutes(ctx: RouteContext): Router {
                     : tl?.handled === false ? 'queued (no live session)'
                     : 'accepted';
                   console.log(`[relay-send] Local delivery to ${localTarget.name}:${localTarget.port} (thread: ${effectiveThreadId}) — ${outcome}`);
+
+                  // Persist our OWN outbound leg into the thread history so
+                  // getThread()/threadline_history return BOTH halves of the
+                  // conversation (the D bug: only the peer's inbound leg was
+                  // ever stored on this fast-path). Non-fatal, idempotent.
+                  if (ctx.messageRouter) {
+                    try {
+                      await ctx.messageRouter.recordLocalOutbound(envelope as unknown as import('../messaging/types.js').MessageEnvelope);
+                    } catch (err) {
+                      console.warn(`[relay-send] recordLocalOutbound failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+                    }
+                  }
 
                   // Canonical outbox write — single source of truth for outbound messages
                   // across BOTH delivery paths (local + relay). Powers the dashboard

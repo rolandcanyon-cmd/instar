@@ -37,3 +37,7 @@ Build it in an isolated copy, write tests for every one of these (including the 
 ## What I need from you
 
 A thumbs-up on this plan. That's instar's own rule — I'm not allowed to write the code until the design is approved (it's the guardrail that stops me from charging off and building the wrong thing). After your ok, I run the whole thing start to finish and report back when it's live, no check-ins in between.
+
+---
+
+_Status: approved 2026-05-25 (Justin, topic 12304); implemented in this PR with 3-tier tests + a concurring second-pass review. During build, the "first-reply always surfaces" idea was dropped (a first reply already passes the per-thread limit, and forcing it would defeat the per-topic anti-flood cap), and "delivered" was tightened to mean a confirmed live hand-off OR an actual notification — never a stalled hand-off._

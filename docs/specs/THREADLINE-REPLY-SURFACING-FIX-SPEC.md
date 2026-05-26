@@ -1,6 +1,13 @@
+---
+name: threadline-reply-surfacing-fix
+review-convergence: 2026-05-25T17:45:00Z
+approved: true
+eli16-overview: THREADLINE-REPLY-SURFACING-FIX-ELI16.md
+---
+
 # THREADLINE-REPLY-SURFACING-FIX-SPEC
 
-**Status:** CONVERGED v2 — awaiting user ratification
+**Status:** APPROVED 2026-05-25 (Justin, topic 12304)
 **Author:** Echo · **Date:** 2026-05-25 · **Base:** JKHeadley/main @ v1.2.80
 **Tracks:** CMT-515 (surfacing), CMT-508 (send-path), bilateral E2E-PAIR baseline with instar-codey
 **Convergence:** 2 parallel reviewers grounded against v1.2.80 source (correctness + side-effects). Their findings are folded in below; the most important were a *missed relay path* and a *Fix-2 over-correction*.
@@ -25,7 +32,7 @@ A co-located agent (Codey) replies on a Threadline thread bound to a Telegram to
 
 - **D — only the inbound leg persists on the local fast-path.** Relay-send POSTs to the peer and persists no outbound leg into the sender's thread history (only an observability outbox entry) → each node holds only the other agent's half. Confirmed bilaterally (46 envelope files, all `codey→echo`).
 
-- **E — duplicate-send / ack-loop flooding.** Operational hardening (Codey-side 3-copy send is Codey-owned, out of scope).
+- **E — duplicate-send / ack-loop flooding.** Operational hardening. The Codey-side 3-copy send is Codey-owned — flagged to Codey, tracked <!-- tracked: CMT-508 -->; our-side inbound dedup-by-message-id already exists in `relay()`/`store.save` and is covered by a regression test in this PR.
 
 ---
 
@@ -114,8 +121,8 @@ Pure `src/` changes shipped in the dist → existing agents get them via the nor
 - **originTopicId leak:** low; opaque per-chat integer; peer never echoes it back as a routing target.
 - **Rollback:** localized to ThreadResumeMap / TopicLinkageHandler / ThreadlineRouter / SessionManager.injectPasteNotification / relay-send route / gate-passed handler — clean revert.
 
-## 7. Open questions (for ratification)
+## 7. Resolutions (decided during implementation)
 
-1. Fix 2: direct confirmed-consumption (preferred) vs. deferred-beacon fallback — impl will pick based on whether `injectPasteNotification` can confirm within a bounded window.
-2. Coalescing window (30 vs 60 s) and digest format.
-3. Whether Fix 5 ships here or as a fast-follow (lean: inbound id-dedup here).
+1. Fix 2: implemented direct confirmed-consumption — `SessionManager.injectPasteNotificationConfirmed` observes the paste-recovery window (checks at 1/3/5/7.5s) and returns whether the marker left the prompt; `injectIntoSession` is now async and returns that verdict. No beacon variant was needed.
+2. Anti-flood: the existing per-thread (60s) + per-topic (3/60s) rate limits are retained as the throttle. The originally-considered first-reply carve-out was DROPPED during implementation — a thread's first reply has no prior surface so it already passes the per-thread limit, and the per-topic cap must hold even for first replies (otherwise N rotating threads = N surfaces = the very flood the cap prevents; a carve-out would also misfire once the commitment is delivered, since findByThreadId then returns null and isFirstReply flips true again). A buffering/coalescing digest was judged unnecessary given the per-topic cap already limits a topic to 3 surfaces/min.
+3. Fix 5 ships in this PR: our-side inbound dedup-by-message-id already exists (`relay()` line ~233 + `store.save` dedup) and is locked in by a regression test.
