@@ -487,6 +487,18 @@ export const CAPABILITY_INDEX: readonly CapabilityEntry[] = [
     }),
   },
   {
+    key: 'mentorOnboarding',
+    prefixes: ['/mentor'],
+    description: 'Framework-Onboarding Mentor job — dormant by default (mentor.enabled=false); never gates',
+    build: ({ ctx }) => ({
+      enabled: !!ctx.mentorRunner,
+      endpoints: [
+        'GET /mentor/status — mentor mode + mentee framework (off by default)',
+        'POST /mentor/tick — run one mentor heartbeat (returns {ran:false,reason:"disabled"} until enabled)',
+      ],
+    }),
+  },
+  {
     key: 'skipLedger',
     prefixes: ['/skip-ledger'],
     description: 'Skip-ledger — workload-aware idempotency',

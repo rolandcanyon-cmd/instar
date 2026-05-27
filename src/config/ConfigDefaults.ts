@@ -99,6 +99,18 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
       enabled: true,
     },
   },
+  // Framework-Onboarding Mentor System (§19.4). Ships DORMANT: enabled:false +
+  // mode:'off' so POST /mentor/tick returns {ran:false,reason:'disabled'} and
+  // nothing spawns or spends. Promotion off → dry-run → live is the human's, via
+  // the graduated-rollout track. See docs/specs/FRAMEWORK-ONBOARDING-MENTOR-SPEC.md.
+  mentor: {
+    enabled: false,
+    mode: 'off',
+    menteeFramework: 'codex-cli',
+    minIntervalMs: 600000, // 10-min floor between ticks (anti-forced-cadence)
+    maxRoundsPerDay: 24,
+    dailySpendCapUsd: 0.5,
+  },
   // Spec-review standards-conformance gate (rung-3 normative slice). Default-on:
   // the gate reads docs/STANDARDS-REGISTRY.md and signals possible standard
   // violations in a draft spec. Signal-only (never blocks); 503-stubs where the
