@@ -219,9 +219,26 @@
       have `messaging: []` (no Telegram). So the over-Telegram conductor test REQUIRES an mmtest
       Telegram bot token — only Justin can mint it (BotFather). Requested via topic 13481.**
       The exactly-once GATE alone is testable without telegram (forward route + sessionManager),
-      but the headline live-handoff needs the token. To run when token arrives: mmtest config +=
-      a telegram bot + exactlyOnceIngress:true on BOTH; redeploy my dist to both; restart; mesh;
-      drive a convo through planned handoff + hard failover; assert from the chair; RESTORE.
+      but the headline live-handoff needs telegram on mmtest.
+      **FALSE-BLOCKER CORRECTED (Justin, 2026-05-27): I HAVE Telegram access via a Playwright
+      profile (web.telegram.org, logged in as Justin) — the test-as-self channel. I can mint bot
+      tokens via @BotFather + drive convos MYSELF. See [[reference_telegram_access_via_playwright]].**
+      DONE this session: minted the test bot MYSELF via BotFather (verified token) =
+      `echo_mmtest_seam_b27x_bot`; token + remaining steps in `.instar/mmtest-seamless-test.local.json`
+      (LOCAL, not git/chat). REMAINING live-run sequence (resume here):
+        1. Telegram (Playwright): create a group (basic group likely suffices — message_thread_id
+           defaults; forum/topics optional), add the bot as admin, capture the chat id.
+        2. mmtest config.json on BOTH (laptop ~/.instar/agents/mmtest, mini ~/instar-mmtest):
+           messaging:[{platform:telegram, botToken, ...}] + the group/chat id + multiMachine
+           .exactlyOnceIngress:true. (config.json is local-per-machine — do NOT commit to the shared repo.)
+        3. Deploy my dist: laptop runs from worktree dist; mini rsync dist→shadow-install
+           (backup dist.bak first, keep v24 node_modules), restart both servers.
+        4. Confirm mesh healthy (one captain) + telegram adapter live (conductor wires now).
+        5. Drive via Playwright: send a msg in the topic; agent replies; POST /handoff/initiate;
+           send another; assert no loss/dup/re-greet across handoff; then hard-failover (kill awake).
+        6. RESTORE: mini dist.bak swap-back; revert configs; @BotFather /deletebot the test bot.
+      NOTE: Playwright web snapshots are large/context-heavy + the MCP server's snapshot dir isn't
+      under the worktree (use browser_evaluate to extract specific text, not full browser_snapshot).
 - [ ] **H** — final report to Justin (topic 13481) + memory update + upgrade note.
 
 ## Hard rules in play
