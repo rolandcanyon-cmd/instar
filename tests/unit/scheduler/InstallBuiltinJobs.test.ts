@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { installBuiltinJobs } from '../../../src/scheduler/InstallBuiltinJobs.js';
-import { validateManifest } from '../../../src/scheduler/AgentMdJobLoader.js';
+import { validateManifest, loadAgentMdJobs } from '../../../src/scheduler/AgentMdJobLoader.js';
 import { SafeFsExecutor } from '../../../src/core/SafeFsExecutor.js';
 
 describe('installBuiltinJobs', () => {
@@ -96,6 +96,45 @@ describe('installBuiltinJobs', () => {
     for (const slug of report.installed) {
       const m = JSON.parse(fs.readFileSync(path.join(scheduleDir, `${slug}.json`), 'utf-8'));
       expect(() => validateManifest(m, slug), `manifest for "${slug}" must pass the loader`).not.toThrow();
+    }
+  });
+
+  it('GAP-CLOSER: every real shipped template loads end-to-end through loadAgentMdJobs with valid scheduling', () => {
+    // The blind spot that let jobCount=0 ship: the regression test above validates
+    // the JSON MANIFEST, but the real loader ALSO validates the `.md` frontmatter
+    // (which carries scheduling keys). Driving the install output through the FULL
+    // loadAgentMdJobs path — and asserting the scheduling VALUES, not just a count —
+    // is the assertion that would have caught the live failure.
+    const repoRoot = path.resolve(__dirname, '..', '..', '..');
+    const realAgentDir = path.join(workspace, 'real-agent-e2e', '.instar');
+    fs.mkdirSync(realAgentDir, { recursive: true });
+    const report = installBuiltinJobs({ agentStateDir: realAgentDir, packageRoot: repoRoot, port: 4042 });
+    expect(report.errors).toEqual([]);
+
+    const installedCount = report.installed.length; // derived, never hardcoded
+    expect(installedCount).toBeGreaterThanOrEqual(10);
+
+    const scheduleDir = path.join(realAgentDir, 'jobs', 'schedule');
+    const jobsRootDir = path.join(realAgentDir, 'jobs');
+    const result = loadAgentMdJobs(scheduleDir, jobsRootDir);
+
+    // (b) ZERO frontmatter rejections — the exact failure mode being fixed.
+    const fmProblems = result.problems.filter((p) => p.kind === 'agentmd-frontmatter-invalid');
+    expect(fmProblems, `frontmatter rejections: ${JSON.stringify(fmProblems)}`).toEqual([]);
+
+    // (a) Every installed template actually loads.
+    expect(result.jobs.length).toBe(installedCount);
+
+    // (c) Scheduling VALUES are valid — the test cannot pass while a job loads
+    // with garbage scheduling (test-can-encode-the-bug guard).
+    const validPriorities = new Set(['critical', 'high', 'medium', 'low']);
+    for (const job of result.jobs) {
+      expect(typeof job.schedule === 'string' && job.schedule.trim().length > 0,
+        `job "${job.slug}" must have a non-empty schedule`).toBe(true);
+      expect(validPriorities.has(job.priority as string),
+        `job "${job.slug}" priority "${job.priority}" must be valid`).toBe(true);
+      expect((job.expectedDurationMinutes ?? 0) > 0,
+        `job "${job.slug}" expectedDurationMinutes must be > 0`).toBe(true);
     }
   });
 
