@@ -10,9 +10,9 @@ eli16-overview: FRAMEWORK-ONBOARDING-MENTOR-SPEC.eli16.md
 depends_on: CODEX-INTELLIGENCE-PROVIDER-CLEAN-CALL-SPEC.md
 ships-staged: true
 supervision: tier2
-review-convergence: "2026-05-27T01:58:24.866Z"
-review-iterations: 3
-review-completed-at: "2026-05-27T01:58:24.866Z"
+review-convergence: "2026-05-27T02:15:20.710Z"
+review-iterations: 5
+review-completed-at: "2026-05-27T02:15:20.710Z"
 review-report: "docs/specs/reports/FRAMEWORK-ONBOARDING-MENTOR-SPEC-convergence.md"
 ---
 
@@ -56,7 +56,8 @@ issue he hits becomes a reusable lesson for onboarding the next framework.
 - An **auto-captured, bucket-tagged issue ledger** — the durable product.
 - A **framework-onboarding playbook** generated from generalizable ledger entries, applied
   recursively to the next framework.
-- Codey does *real* instar improvement work (fuel = feedback backlog + parity long-tail).
+- Codey does *real* instar improvement work (fuel = the curated local feature backlog — planned
+  work + parity long-tail — primary; the feedback backlog only via a human triage gate; §7.3).
 
 **Non-goals**
 - Not a replacement for the FrameworkParitySentinel (it watches primitive *renderings*; this
@@ -225,10 +226,45 @@ also derives only from authenticated-sender signals, plus a hard minimum-interva
 cannot force back-to-back ticks.
 
 ### 7.3 The fuel
-- The **feedback backlog** (Dawn's feedback system Echo is taking over) — real instar tasks.
-- The **parity long-tail** — the ~48 unshipped primitive parity rules.
-- Each task carries a **difficulty tag assigned by the backlog source, not by Echo** (so the
-  graduation metric can't be gamed by easing the workload — §8). Each is tracked as an initiative.
+The task source is itself an anti-gaming surface (§8): if Echo could shape *what's in the pool* or
+*how hard each item is*, it could manufacture a flattering graduation curve by feeding Codey easy
+wins. So the assignable pool is **pre-existing, independently-authored planned work** that Echo did
+not create for this purpose, and difficulty rides on the artifact — not on Echo's judgment at
+assignment time.
+
+**Primary source — the curated local feature backlog (preferred).** Planned/in-progress instar work
+that already exists as independent artifacts: tracked **deferral markers** (e.g. ACT-* follow-ups,
+deferred sub-phases), **InitiativeTracker / `/projects`** entries, and the **parity long-tail** (~48
+unshipped primitive parity rules). These are already vetted and scoped, and each carries (or is
+assigned at planning time, by the artifact's author) a difficulty estimate. This is the better fuel
+precisely because it's curated and pre-tagged — the firehose isn't.
+
+**Secondary source — the feedback backlog as a candidate feeder, NOT a direct source.** Items from
+Dawn's feedback system (which Echo is taking over) are *unvetted user requests*. They enter the
+assignable pool ONLY after passing a **human triage gate** that admits them and sets their
+difficulty. Echo may *propose* triage (surface candidates) but does not *admit* them — admission is
+the human's, mirroring the §6/§8 "Echo proposes, authority elsewhere" pattern. This closes the
+otherwise-reopened gaming vector: if Echo could triage feedback into the pool and tag its difficulty,
+that would hand back the exact lever §8 removed.
+
+**The non-Echo-difficulty admission invariant (covers BOTH sources).** The subtle gap the feedback
+gate alone leaves open: Echo *authors* a subset of the primary-source artifacts too (ACT-* deferrals
+via `commit-action`, auto-registered InitiativeTracker entries from its own merged specs), so for
+those, an "artifact-borne" difficulty is still an Echo-set difficulty. Therefore the structural rule
+is on the *difficulty attestation*, not the artifact's origin story:
+- **An item is assignable only once it carries a difficulty attested by a non-Echo party** (a human,
+  or an independent author who is not the running mentor). Artifacts inherently authored by others —
+  the parity long-tail, other agents'/Justin's initiatives — satisfy this on entry. **Echo-authored
+  artifacts require the same one-time non-Echo difficulty confirmation as the feedback source** before
+  they become assignable. The assignable-pool admission filters on `difficultyAttestedBy != echo` —
+  a field the Stage-A/mentor context cannot write. This replaces the unfalsifiable "did not create
+  for this purpose" intent test with a structural check.
+- **Assignment selection is not free-form.** Stage A's `assign-next` (§3.1) does not let Echo pick an
+  arbitrary item in an arbitrary order to shape the curve. The next task is drawn **deterministically**
+  (backlog-source priority / FIFO) or **randomized within a difficulty band** — Echo does not choose
+  which item or sequence. This closes the composition/sequencing lever that difficulty-tag provenance
+  alone leaves open.
+- Each assigned task is tracked as an initiative.
 - **Assignment bounds:** ≤N concurrent open assignments, ≤M assignments/day (§16).
 
 ## 8. Graduation: junior → senior (externally-anchored, not self-graded)
@@ -239,7 +275,10 @@ controls the interventions is trivially gameable. Fixed:
   issues resolved-and-verified, clean test-as-self runs scored against a fixed rubric with logged
   transcripts.
 - **Intervention is an auditable ledger event**, not an Echo self-report; the intervention rate is
-  computed from those records and **normalized by task difficulty** (the source-assigned tag).
+  computed from those records using the **non-Echo-attested difficulty** (§7.3), and is **stratified
+  by difficulty band** — reported per-band, not as a single aggregate normalized number. Stratification
+  makes the composition/sequencing lever ineffective: front-loading easy tasks can't mask the
+  high-difficulty band, because each band is scored on its own.
 - **Justin ratifies every milestone transition** (consistent with §6 — no self-promotion). A
   weekly review surfaces the evidence; the transition is Justin's.
 - Tracked via the Graduated-Feature-Rollout pattern (review-driver job + evidence gates).
@@ -258,7 +297,7 @@ mentor for Stage B forensics, or it stays in dry-run until the cross-machine log
 - **FrameworkParitySentinel** → *upstream feeder*: a flagged primitive-rendering drift auto-creates
   an `instar-integration-gap` ledger candidate.
 - **Graduated-Feature-Rollout** → *graduation engine* (§8) + this feature's own staged rollout.
-- **InitiativeTracker / `/projects`** → *task tracking* (§7).
+- **InitiativeTracker / `/projects`** → *task tracking* AND a **primary curated-backlog source** (§7.3).
 - **Scheduled jobs** → the mentor job ships as a built-in job at `.instar/jobs/instar/` (§14.1).
 - **Provider-neutral evolution mode** → referenced as aspirational/in-flight (a Codey spec, not yet
   in repo). **This is explicitly NON-BLOCKING** — this spec stands alone on existing primitives and

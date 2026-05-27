@@ -2,7 +2,7 @@
 
 **Spec:** `docs/specs/FRAMEWORK-ONBOARDING-MENTOR-SPEC.md`
 **ELI16 companion:** `docs/specs/FRAMEWORK-ONBOARDING-MENTOR-SPEC.eli16.md`
-**Converged:** iteration 3 (0 material findings in the final round)
+**Converged:** iteration 5 (0 material findings in the final round; iterations 4–5 were a re-convergence triggered by a post-approval-prep task-source refinement — see below)
 **Reviewers:** security, scalability, adversarial, integration, lessons-aware (5 internal Claude perspectives, all rounds). External cross-model (GPT/Gemini/Grok) deferred per abbreviated-convergence allowance for an internal-tooling spec; the mandatory lessons-aware reviewer ran every round.
 
 ---
@@ -86,6 +86,8 @@ must ship in the first PR.
 | 1 | security (7), scalability (8), adversarial (10), integration (8), lessons-aware (11) | 44 | Full rewrite: §4 structural two-hats, §6 governance + cross-agent termination + budget, §8 externally-anchored graduation, §13 anti-poisoning storage, §15 telemetry, §16 config, §17 security, §18 testing, §3.3 topology, §14 migration |
 | 2 | adversarial (2), integration (1), lessons-aware (3); security 0, scalability 0 | 6 | §6 concrete persist-only delivery + fail-closed live-gate; §6 fresh-thread-per-task (argv overflow); §4.3+§18 leakage-detector positive-control + canary; §6 dispute non-response default; §14.1/§10/§19 built-in-job mechanism pinned; §9 per-framework co-location precondition |
 | 3 | (converged) | 0 | none |
+| 4 | adversarial (2) | 2 | Task-source refinement (Justin): curated local backlog made primary, feedback demoted to a human-triage-gated feeder. Adversarial flagged the refinement reopened two levers → §7.3 non-Echo-difficulty admission invariant (`difficultyAttestedBy != echo`) + deterministic/within-band assignment selection; §8 stratified-by-difficulty-band metric |
+| 5 | (converged) | 0 | none |
 
 ---
 
@@ -148,7 +150,32 @@ check (LOW). → Resolved across §6, §3/§6 (round 2), §4, §8, frontmatter s
   fresh-thread-per-task + threadId-handoff (fetch history via tool, not inline argv).
 - **(lessons, LOW)** §9 recursion should restate the §3.3 co-location precondition per-framework. → §9.
 
-### Iteration 3 — 0 material findings (converged)
+### Iteration 4 — task-source refinement (2 material findings)
+
+After iteration-3 convergence, while prepping for approval, Justin observed that a **curated local
+backlog of planned/in-progress features** is better task fuel for Codey than the raw feedback
+firehose. Echo agreed and made it the primary source (feedback demoted to a human-triage-gated
+feeder). The adversarial reviewer correctly flagged that the refinement, as first drafted, reopened
+two gaming levers §8 had closed:
+- **Echo authors a subset of the primary-source artifacts** (ACT-* deferrals, auto-registered
+  initiatives), so "artifact-borne difficulty" was still Echo-set for those; the "did not create for
+  this purpose" guard was unfalsifiable intent. → §7.3 **non-Echo-difficulty admission invariant**:
+  an item is assignable only once difficulty is attested by a non-Echo party; the assignable-pool
+  filters on `difficultyAttestedBy != echo`, a field the mentor context cannot write.
+- **Assignment selection/ordering was unconstrained** — sequencing could shape the difficulty-
+  normalized curve. → §7.3 deterministic/FIFO-or-within-band selection (Echo doesn't choose item or
+  order) + §8 intervention rate **stratified by difficulty band** (front-loading easy tasks can't
+  mask a band).
+
+### Iteration 5 — 0 material findings (re-converged)
+
+Adversarial confirmed both iteration-4 findings RESOLVED with structural checks (not intent tests)
+and no new gaming vector. Lessons-aware confirmed the `difficultyAttestedBy != echo` gate is genuine
+structure consistent with the signal-vs-authority pattern, and that the non-Echo attestation does
+NOT create an impractical human bottleneck (the parity long-tail + others' initiatives satisfy it on
+entry; only the Echo-authored minority needs a one-time stamp on the existing triage gate).
+
+### Iteration 3 — 0 material findings (first convergence, before the task-source refinement)
 
 All five perspectives clean. Adversarial confirmed the leakage-detector positive-control + canary
 and the dispute non-response default close their round-2 gaps with no new issue. Integration confirmed
@@ -161,8 +188,13 @@ precondition, and that fresh-thread-per-task + threadId-handoff genuinely fixes 
 
 ## Convergence verdict
 
-**Converged at iteration 3. No material findings in the final round across all five reviewer
-perspectives.** The spec is ready for user review and approval.
+**Converged at iteration 5 (re-converged after a task-source refinement). No material findings in
+the final round.** The spec is ready for user review and approval.
+
+The task source is now a **curated local feature backlog** (planned work + parity long-tail) as the
+primary fuel, with the feedback backlog demoted to a human-triage-gated candidate feeder — and the
+anti-gaming property is preserved structurally via the `difficultyAttestedBy != echo` admission
+invariant + per-difficulty-band graduation scoring.
 
 The four structural risks the review existed to catch — willpower-masquerading-as-structure in the
 two-hats separation, the self-grading feedback loop, the cross-agent spawn-loop + argv-overflow, and
