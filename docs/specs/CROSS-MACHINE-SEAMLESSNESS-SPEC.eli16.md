@@ -68,6 +68,18 @@ You told me this has to be tunable — balance smoothness against wasted effort.
 
 How an agent *installs itself* onto a new machine in the first place (the SSH-and-git access we set up by hand today) is a separate, related write-up — your "agent does it all after one yes" standard. I'm keeping the two specs separate so each stays focused, but they're cousins, and today's hands-on run feeds both.
 
+## What the formal review tightened (and why it matters to you)
+
+I ran the draft through the formal review — five different expert "hats" plus an outside-model reviewer. They agreed on a handful of real holes, and fixing them genuinely made the design safer. In plain terms:
+
+- **"One captain" now uses numbered tickets, not a clock.** The first draft picked the captain by "who checked in most recently," which a machine with a wrong clock could win unfairly. Now there's a single numbered badge (each new captain takes the next number), and you can only act as captain if you're holding the current badge. Clocks can't game it anymore.
+- **No double-replies is now a hard lock, not a hope.** The draft assumed "only one machine listens, so no double answers." Reviewers pointed out that during a messy handoff both machines can briefly think they're listening. So now every incoming message gets a ticket and is only ever *answered once* — even if it arrives twice, the second one is recognized and ignored. Double replies become structurally impossible, not just unlikely.
+- **The private wire between your machines is now locked down.** The conversation copy that flows to the backup can contain sensitive stuff. The draft left that "to be decided" — now it's required to be encrypted, the receiving machine has to prove it's really yours, and any secrets get stripped before they cross.
+- **One manager runs the whole handoff.** Instead of five parts each doing a piece (which is how things fall through cracks), one component owns the handoff start-to-finish and won't let go of the baton until the other machine has *proven* it caught up.
+- **It won't spam your repo or your phone.** Heartbeats no longer get written into permanent history (which would've bloated things), and if the two machines genuinely can't agree, you get *one* clear question — not a buzz every 30 seconds.
+
+The honest bar you set survived intact: a handoff is still allowed to feel like a quick compaction pause. What review added is that it's *never* allowed to lose or double-answer a message while doing it.
+
 ## Bottom line
 
 The foundation is real and works. The "seamless" part is now three clearly-defined pieces instead of a vague wish — and we know they're the right three because we watched the system miss exactly those on real hardware. And thanks to your nudge, the bar is now honest: a handoff should feel no worse than a compaction pause or a fresh-session catch-up — quick, and back up to speed — not a magic trick we'd over-engineer chasing.
