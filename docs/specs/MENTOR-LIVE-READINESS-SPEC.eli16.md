@@ -1,64 +1,76 @@
-# Making the mentor actually testable with Codey — in plain terms
+# Mentor live-readiness — plain-English summary (for your approval)
 
-## What this fixes
+## What this is, in one paragraph
 
-Today the mentor system is built but can't truly run against Codey, for three reasons we
-caught during the dry-run yesterday:
+The mentor's "user-hat" side now uses Telegram (your channel for talking to Codey), the
+way you said it should. To make that work cleanly and reusably I'm also building a small
+**building-block primitive** any two of my agents can use to talk over Telegram
+*knowingly* — every agent-to-agent message carries a visible tag like
+`[a2a:from=echo to=instar-codey role=mentor id=… corr=… ts=… v=1]`, the receiver checks
+the sender is actually a known bot (not a human who typed the tag — real defense), and
+the receive side has the anti-bounce machinery baked in (it knows not to send courtesy
+replies, replies are tagged back with a matching id, etc.). The mentor is just its
+first consumer.
 
-1. The "is Codey free to be mentored right now?" check isn't actually about Codey — it
-   just looks at whether *I* have anything going on, which I always do. So it'd back off
-   forever and never run.
-2. The "budget" cap is a dollar amount, but we're on a Claude subscription, not a per-token
-   bill. The setting was never read by any code anyway, and nothing would ping you if it
-   tripped.
-3. When the mentor decides to send Codey a note, my side writes the note to a file — but
-   nothing on Codey's side reads that file. So a "live test" today would write into the
-   void.
+## The three live-readiness fixes (mentor)
 
-## How we fix all three
+1. **Is-Codey-free check** — Codey adds a tiny public status page (`/idle`) so my probe
+   has a real signal instead of asking the wrong question. If anything is ambiguous
+   I treat him as busy.
+2. **Talk to Codey via Telegram** — I mint a dedicated mentor bot (per your option C),
+   message Codey from that bot in a dedicated Mentor topic on his setup, he processes
+   it as a user-style prompt, replies tagged back, my Stage-B reads the reply.
+3. **Budget on real units** — I gate against your quota meter (5-hour / weekly) and a
+   token ceiling, NOT pretend dollars. **Honest scope note**: today the ceiling only
+   captures the Stage-B analysis spend; the spawned Stage-A session's tokens go to the
+   ledger without a mentor tag, so they bypass the ceiling. I'm shipping the cap with
+   the honest name (`stageBTokenCeiling`) and a tracked follow-up to bring Stage-A
+   under the same cap — rather than claiming coverage I don't have.
 
-**1. A real "is Codey free?" check.** Codey adds a small public status page on his side
-that simply says: am I busy or free right now, plus when I last started up. I check that
-page before each mentor cycle. If anything's off — page unreachable, weird response, just-
-restarted, anything ambiguous — I treat him as busy and wait. Better to skip a cycle than
-to mentor at a bad moment.
+## What round-1 file-based design got, and what the substrate change cost
 
-**2. The budget gets recast in the right units.** Instead of pretend dollars, I use your
-real quota meter (the one tracking your 5-hour and weekly limits) and a token-spend
-ceiling — and I ping you the *first* time we hit the cap, and again when we recover. If we
-trip and recover and re-trip the same day, you hear about all three. The state is written
-to disk so a server restart doesn't re-spam you with old alerts.
+The earlier file-based version is gone — Justin caught the substrate mistake and a
+substantial amount of round-1 hardening (symlink defenses, schema versioning between
+two files, cross-agent file writes, file-poll job on Codey's side) just drops out. In
+exchange, the new substrate brings new concerns the reviewers caught:
 
-**3. The note actually reaches Codey.** I keep writing my notes to a file (that part was
-the *deliberate* safe choice — no spawning, no loops). Codey adds a small background job
-on his side that wakes up every minute, reads any new notes from that file, and feeds them
-to him as if you'd typed them. Then he writes his reply back to a second file my side
-reads.
+- **The existing TelegramAdapter wasn't built for two bots in one process.** It writes
+  state to fixed filenames; two bots would clobber each other. Fix: give the second bot
+  its own namespaced sub-folder for its state, plus a flag to skip auto-creating a
+  duplicate Lifeline topic.
+- **The Adapter only allows one incoming-message handler at a time.** The "agent
+  handler runs before normal user handling" rule needed a real implementation: I'm
+  wrapping at the registration site so the agent-handler runs first and falls through
+  to the existing user handler if the message isn't an agent message.
+- **A real user could type the agent tag and trick the system.** Defense: the receive
+  side checks the sender is actually a bot (Telegram's `is_bot` flag and the bot ID),
+  not just trust the tag text. A user typing the tag gets dropped, audited, never
+  routed to the mentor handler.
+- **The "ping-pong" Justin worried about could come back slower.** If a single
+  round-trip takes longer than my 15-minute tick, a naive next-tick would re-send.
+  Fix: I track outstanding prompts; the tick refuses to send while one is in flight,
+  and if it's still unanswered after 20 minutes I surface that as a degradation event
+  + Attention queue entry. The same tracker tells me "Codey never replied" so silent
+  reply-loss is observable.
+- **A compromised Codey shouldn't be able to side-channel** by sending unexpected role
+  types to my mentor bot. Fix: the accept-list is per-source — Codey-from-Echo's-
+  perspective is allowed exactly one incoming role (`mentor-reply`) and nothing else.
 
-Codey himself designed his side (he picked the simpler, more crash-survivable approach and
-specified the message format with built-in safety checks). The whole loop has eight rules
-that make it structurally impossible for us to bounce messages back and forth — and we
-hardened those rules so they're enforced by the code shape itself, not just by good
-intentions.
+## The honesty/learning thread
 
-## What we learned from yesterday — baked in
+The earlier file-based draft was hardened across **two** convergence rounds before
+Justin caught the substrate mistake. That was instructive: convergence reviewers ask
+"is this design sound?" but not "is the framing correct?" — that's the user's call.
+Recorded in memory as a durable lesson (`feedback_fix_at_the_right_level`). Also today:
+when the spec cited a code line, it must be the line I actually read (one wrong line
+number — 1327 vs the real 1592 — caught by a round-3 reviewer; corrected). Every spec
+claim about a code surface now cites the line I verified.
 
-You called out two things I should have caught: the busy-check was bogus, and the budget
-was a dead setting. My new rule (now durable in my memory): before I tell you a gate, limit,
-or delivery "works," I read the actual code and tell you which file:line I checked. The
-revised spec applies this everywhere — every claim cites the code, and a third gap I caught
-*myself* this morning (the file Codey never reads) only surfaced because I applied that rule
-before claiming "live test, ready to go."
+## What's next after your nod
 
-## What's next
-
-This spec went through two rounds of multi-reviewer convergence (three reviewers each
-round). The reviewers caught the original "/sessions has no idle field and needs auth"
-blocker that would've broken the live test, plus the symlink/restart/concurrency edge cases
-worth defending against ahead of time. All addressed.
-
-Codey has agreed to his side of the design (verified on Threadline). I'm sending him the
-final spec to confirm the two small new requests on his side that came out of convergence
-(the small /idle endpoint and pinning a shared contract version). Once you approve, I'll
-build my side through our normal gate, Codey builds his, both ship, then we run **one
-supervised live cycle against him with you watching** — the actual test.
+- I send Codey the final spec for confirmation on his side (small `/idle` endpoint + the
+  receive-side handler + `sendAgentMessage` on his end — he agreed to all of this in
+  round 2; only changes he might push back on are the round-3 additions I made today).
+- I build my side through our normal gate. Codey builds his side in his repo.
+- Both halves ship.
+- Then we do **one supervised live cycle with you watching** — the actual test.
