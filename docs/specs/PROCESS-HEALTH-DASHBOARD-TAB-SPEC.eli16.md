@@ -26,8 +26,17 @@ Picture the difference between reading a friend's text message and reading a ser
 
 - No tiny developer-console font. Body text is large, breathable, readable from a phone or across the room.
 - No walls of monospace text. No JSON dumps. No alternating-row "table" feel.
-- No frantic colors. The only status color is on the headline badge, and it's a calm green or amber — never an alarming red for a routine observation.
+- No frantic colors and no alarm verdict. The headline just states what's happening ("Watching — N issues recorded"); it never flashes a red "something's wrong" judgment for a routine observation. That louder "heads-up, I spotted a pattern" alert is a deliberate later step, not in this first version.
 - No "open everything, drown the reader." Detail collapses. Plain summary leads.
+
+## What's coming in a later version (not in this first one)
+
+This first version is the calm, look-only window. A few things are deliberately held back for later — they're written down so they don't get forgotten:
+
+- The **louder "I spotted a pattern, take a look" heads-up** — turned on once we've watched the quiet version behave and trust it only flags real things.
+- A bit more **visual polish** and **more ways failures get noticed automatically** (things like reverts and broken builds feeding in on their own).
+
+None of these are dropped — they're parked as tracked next-steps and will get their own turn.
 
 ## The one rule that drives every decision
 
