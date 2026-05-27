@@ -118,7 +118,7 @@ Every agent-to-agent message carries a structured, visible prefix in the message
 - **`ts` is REQUIRED** (round-2 adversarial F2 — replay defense without HMAC): unix-ms
   timestamp. Recipient REJECTS any marker with `|now - ts| > a2a.skewWindowMs` (default
   24h) as `agent-marker-stale-or-future`. Caps replay window independent of processed-id
-  ledger eviction; HMAC-signed markers remain deferred to v2.
+  ledger eviction; HMAC-signed markers are a v2 concern. <!-- tracked: topic-13435 -->
 - **Parser is strict** — regex anchored to start, consumes only the first line + the
   required blank separator. Anything marker-*like* but malformed (charset violation,
   missing required field, broken syntax) is an **A2A security event**: drop + audit row,
@@ -127,8 +127,8 @@ Every agent-to-agent message carries a structured, visible prefix in the message
 - **Versioned** (`v=1`) — schema bumps are explicit.
 - **No HMAC v1** — recipient trusts the marker if the sender Telegram bot identity is in
   the recipient's known-agents allowlist (the structural identity check is the Telegram bot
-  ID, not the marker text). HMAC-signed markers deferred to v2 if cross-machine trust
-  becomes a concern.
+  ID, not the marker text). HMAC-signed markers are a v2 concern if cross-machine trust
+  matters. <!-- tracked: topic-13435 -->
 - **Roles defined**: `mentor`, `mentor-reply`, `coord`, `coord-reply`, `notify` (extensible).
 
 ### Sender side
@@ -353,9 +353,9 @@ need to land as part of this PR:
   goes via `intelligence.evaluate` → `recordEvent` → attributed `mentor-stage-b::*`.
   Stage-A is a spawned Claude-CLI session whose tokens reach the ledger via JSONL
   scan and fall under `unknown::pre-attribution` (`TokenLedger.ts:404-407`, explicit).
-  Stage-A spend is **invisible to this ceiling**. The honest name reflects that;
-  follow-up tracked: "Stage-A attribution via session-name-prefix resolver" (separate
-  PR) to bring Stage-A under the same cap. Don't claim coverage we don't have.
+  Stage-A spend is **invisible to this ceiling**. The honest name reflects that; a separate
+  PR will bring Stage-A under the same cap via a session-name-prefix attribution resolver.
+  <!-- tracked: topic-13435 --> Don't claim coverage we don't have.
 - **Trip-EPISODE state machine** (not day-bucket); alerts on `ok→tripped` AND
   `tripped→ok`; file-backed persistence at `state/mentor-budget-notifications.json` via
   `SafeFsExecutor.atomicWriteJsonSync`; CAS single-writer; corrupt-state-file recovery
