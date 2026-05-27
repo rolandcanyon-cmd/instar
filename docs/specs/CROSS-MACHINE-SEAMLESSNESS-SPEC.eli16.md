@@ -6,7 +6,7 @@
 
 Picture one employee — call her Luna — who has a desk in two offices. You should be able to walk into either office and it's the same Luna: she remembers the conversation you were just having, the task she was halfway through, everything. You never notice she's actually in two places. That's the goal: **one agent that follows you across machines with no amnesia.**
 
-**The crucial point: "seamless" is judged entirely from the user's chair, in the actual channel — Telegram.** It's not about clever syncing under the hood; it's about what the person texting the agent experiences. The test is simple: someone is mid-conversation on Telegram, the agent quietly switches machines underneath them, and they notice *nothing* —
+**The crucial point: "seamless" is judged entirely from the user's chair, in whatever channel they're using.** Telegram is the default and the one we test first, but the exact same promise has to hold on Slack and any other channel we add — so we build it as a general rule of the channel layer, not a Telegram special case. It's not about clever syncing under the hood; it's about what the person messaging the agent experiences. The test is simple: someone is mid-conversation (on Telegram, Slack, wherever), the agent quietly switches machines underneath them, and they notice *nothing* —
 
 - no message of theirs gets lost,
 - they never get the same answer twice,
@@ -45,7 +45,9 @@ And the headline feature — handing the conversation from one live machine to a
 
 2. **Automatic filing.** The on-duty machine quietly saves its updates to the shared cabinet on a schedule, and the backup reads them. This is the thing that was missing — and we'll add a test that would have caught it.
 
-3. **The seamless Telegram experience (the real magic).** This is the user-facing piece, and it has three parts working together: (a) the current conversation and half-finished work get continuously copied to the backup machine, so it's already caught up; (b) the Telegram "phone line" is handed over cleanly — only one machine is ever answering at a time (so you never get a double reply), and it's handed off at an exact spot so no message slips through the cracks; (c) the new machine picks up the thread instead of starting fresh, so the very next reply still knows what you were talking about. The handoff rule is strict: the new machine has to confirm "I've got everything and I've got the line" *before* the old one lets go.
+3. **The seamless conversation experience (the real magic).** This is the user-facing piece, and it has three parts working together: (a) the current conversation and half-finished work get continuously copied to the backup machine, so it's already caught up; (b) the "phone line" to the channel is handed over cleanly — only one machine is ever answering at a time (so you never get a double reply), and it's handed off at an exact spot so no message slips through the cracks; (c) the new machine picks up the thread instead of starting fresh, so the very next reply still knows what you were talking about. The handoff rule is strict: the new machine has to confirm "I've got everything and I've got the line" *before* the old one lets go.
+
+**And it's not Telegram-only.** Each channel has its own version of "pick up exactly where I left off" — Telegram tracks a message number, Slack has its own bookmark, and so on. So instead of hard-coding Telegram, the spec defines one "clean handoff contract" that every channel has to meet, builds it for Telegram first as the reference, and proves it on Slack too. Any new channel we add later is only considered done when it passes the same handoff test — so seamlessness comes built-in, not bolted on per channel.
 
 ## You're in control of the dial
 

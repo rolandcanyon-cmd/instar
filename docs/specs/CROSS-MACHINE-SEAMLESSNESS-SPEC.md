@@ -29,7 +29,7 @@
 
 The converged multi-machine spec (v3) delivered machine identity, secure pairing, git-based state sync, primary/standby coordination, heartbeat/failover, and graceful handoff *machinery*. What it explicitly deferred — and what the EXO 3.0 "cross-machine single agent" vision needs most — is **seamlessness**: the experience that an agent is one logical identity that follows the user across machines with no loss of in-flight context.
 
-**The yardstick is the user's experience in the channel** (Telegram first), not internal state mechanics. "Seamless" is defined entirely from the user's side: a person is mid-conversation with the agent over Telegram; the agent quietly moves machines underneath them; and the person notices *nothing* — no dropped message, no duplicate reply, no "sorry, what were we talking about?", no fresh greeting, no awkward gap. The internal state sync exists only to deliver that channel experience. Every design choice below is justified by a user story, not by architectural elegance.
+**The yardstick is the user's experience in the channel** (Telegram is the default and reference; Slack and any other channel must work equally), not internal state mechanics. "Seamless" is defined entirely from the user's side: a person is mid-conversation with the agent over Telegram; the agent quietly moves machines underneath them; and the person notices *nothing* — no dropped message, no duplicate reply, no "sorry, what were we talking about?", no fresh greeting, no awkward gap. The internal state sync exists only to deliver that channel experience. Every design choice below is justified by a user story, not by architectural elegance.
 
 This spec defines the narrow, high-leverage work to close that gap. It is deliberately scoped to the **runtime** seamlessness problem. The **onboarding** problem (how an agent installs itself onto a new machine) is captured as related work for a companion spec (see §9).
 
@@ -51,15 +51,20 @@ These are the user-facing pass/fail bars — the real Phase-0-style gate, observ
 2. **No duplicate replies.** The user never receives the same answer twice (a real, recurring instar failure mode — see drain-respawn / gate-latency duplicates). Only one machine "owns" the channel at a time.
 3. **Context retained.** The first reply from the new machine demonstrates knowledge of the immediately-preceding exchange — no generic greeting, no "what were we talking about?" (honors the existing CONTINUATION discipline, now cross-machine).
 4. **No perceptible seam.** The pause the user experiences during a handoff stays under a tunable bound (default target: indistinguishable from a normal "agent is thinking" delay).
-5. **Channel identity follows the agent.** The Telegram topic/thread binding moves with the agent, so replies land in the same conversation thread regardless of which machine produced them.
+5. **Channel identity follows the agent.** The channel's thread/conversation binding (Telegram topic, Slack channel+thread, etc.) moves with the agent, so replies land in the same conversation regardless of which machine produced them.
 
-### Channel mechanics this requires (Telegram, generalizable to other adapters)
+### Channel-agnostic by design (Telegram is the default, not the spec)
 
-The agent's connection to Telegram is *long-poll ingress owned by one machine at a time*. Seamlessness therefore needs:
+Seamlessness is a property of the **channel layer**, not of Telegram specifically. Instar already routes every channel through the adapter pattern (`MessageRouter` → `TelegramAdapter`, `SlackAdapter`, `WhatsAppAdapter`, iMessage, …). This spec defines a single **Channel Seamlessness Contract** that every adapter must satisfy; Telegram is the reference/default implementation, and Slack is the explicit second target. No mechanism here may be Telegram-specific — anything Telegram-specific lives *inside* the Telegram adapter.
 
-- **Single-owner ingress with clean transfer.** Exactly one machine polls Telegram at any moment (two pollers = duplicate handling). On handoff/failover, ingress ownership transfers atomically — the outgoing machine stops polling only once the incoming machine has taken the claim.
-- **No-loss across the transfer window.** Messages that arrive during the brief transfer are buffered/replayed, not dropped. (Instar already has a "messages are not lost — they replay on recovery" pattern for version-skew restarts; reuse that guarantee here.)
-- **Conversation context on the receiving machine.** The per-topic thread history and the live tail of the current exchange must be present on the incoming machine before it answers — this is what prevents the "fresh start" failure.
+**The Channel Seamlessness Contract (every adapter implements):**
+
+1. **Single-owner ingress.** Exactly one machine consumes the channel's inbound stream at any moment (two consumers = duplicate handling). Ownership is recorded in the mesh and transfers atomically on handoff/failover — the outgoing machine releases only once the incoming machine holds the claim.
+2. **Resumable consumption position (exactly-once).** Each adapter exposes a durable "where I left off" marker that can be recorded into synced state and resumed by another machine, so the inbound stream is consumed exactly once across a transfer — none dropped, none double-handled. *The marker is per-channel:* Telegram = the long-poll `update_id` offset; Slack = the Events API delivery + per-event dedup id (or socket-mode cursor); other adapters define their own. The contract is "a resumable, exactly-once position exists," not any specific cursor.
+3. **Portable conversation identity.** The channel's thread/conversation handle (Telegram topic, Slack channel+thread_ts, etc.) is machine-independent, so replies land in the same conversation regardless of which machine produced them.
+4. **Context-before-answer.** The receiving machine must hold that conversation's history + live tail before it answers (prevents the "fresh start" failure). This part is channel-independent — it's agent state, routed by conversation identity.
+
+Instar already has a "messages are not lost — they replay on recovery" guarantee for version-skew restarts; the resumable-position requirement (2) is the cross-machine generalization of it.
 
 ---
 
@@ -139,12 +144,14 @@ This is the user-facing core (US1/US2), and it is defined by the channel, not by
 - **Durable work state** (work ledger, in-flight task list) → **git** (coarse, every N seconds, tunable). Survives crashes; this is the cross-machine work-ledger visibility the v3 spec named "not yet implemented."
 - **Live conversation tail** (the recent exchanges + current turn context for each active channel/topic) → **direct tunnel channel** between awake and standby (low-latency push), buffered so the standby always holds a near-current copy. This is what satisfies "context retained" (criterion 3) — the receiving machine can answer the next message coherently.
 
-**(b) Telegram ingress ownership transfer (the no-loss / no-duplicate guarantee).** Telegram ingress is single-owner long-poll. The protocol guarantees exactly-once handling:
+**(b) Channel ingress ownership transfer (the no-loss / no-duplicate guarantee).** This implements the Channel Seamlessness Contract (§2) and is channel-agnostic; each adapter plugs in its own resumable position. The protocol guarantees exactly-once handling:
 
 1. Incoming machine signals intent to take ingress ownership.
-2. Outgoing machine **stops polling** and records the last-processed update offset into synced state.
-3. Incoming machine **resumes polling from that exact offset** — messages in the transfer window are processed exactly once (none dropped, none double-handled). This directly serves criteria 1 & 2.
-4. Only one machine ever holds the poll claim at a time (enforced via the mesh registry / a claim record), so two machines can never both reply.
+2. Outgoing machine **stops consuming** and records the adapter's resumable position into synced state (Telegram: last-processed `update_id`; Slack: last-acked event/cursor; etc.).
+3. Incoming machine **resumes consuming from that exact position** — messages in the transfer window are processed exactly once (none dropped, none double-handled). This directly serves criteria 1 & 2.
+4. Only one machine ever holds the ingress claim at a time (enforced via the mesh registry / a claim record), so two machines can never both reply.
+
+The handoff orchestration (claim, record-position, resume) lives in the shared coordination layer; only the "read/record/resume my position" primitive is per-adapter. Telegram is the reference implementation; Slack is the second target and validates that the contract is genuinely channel-agnostic.
 
 **(c) Graceful handoff protocol (both machines live):**
 
@@ -185,7 +192,8 @@ Per the Testing Integrity Standard — all three tiers, plus the real-hardware g
 - **Tier 1 (unit).** Split-brain resolver: both sides of every boundary — two-fresh-awake (deterministic winner), one-stale-one-fresh (demote stale), genuine tie (escalate), self-demotion (loser stops scheduler). Sync debounce logic. Live-tail buffer freshness.
 - **Tier 2 (integration).** Full HTTP pipeline: a running server auto-pushes registry on role change (the exact Phase 0 failure — this test would have caught it); standby pulls and converges; handoff over real tunnel transfers the live tail.
 - **Tier 3 (e2e lifecycle).** Multi-process: two servers, real local git remote, real localhost tunnels; drive a graceful handoff with an in-flight conversation and assert the incoming machine has the live tail before the outgoing yields; drive a hard failover and assert split-brain resolves to a single awake within threshold.
-- **Channel-experience acceptance (the real bar).** Beyond the mechanical tiers, the §2 user-facing criteria are tested *from the channel*: drive a real Telegram conversation across a handoff/failover and assert — exactly-once message handling (no loss, no duplicate reply), context retained in the first post-handoff reply (no re-greeting), and perceived gap within bound. This is the test that actually proves US1/US2; the mechanical tiers exist to make it pass.
+- **Channel-experience acceptance (the real bar).** Beyond the mechanical tiers, the §2 user-facing criteria are tested *from the channel*: drive a real conversation across a handoff/failover and assert — exactly-once message handling (no loss, no duplicate reply), context retained in the first post-handoff reply (no re-greeting), and perceived gap within bound. This is the test that actually proves US1/US2; the mechanical tiers exist to make it pass.
+- **Contract conformance across channels.** The acceptance suite runs against **Telegram (reference) AND Slack** to prove the Channel Seamlessness Contract is genuinely channel-agnostic, not Telegram-shaped. A new adapter is "seamless-ready" only when it passes this same suite — making the contract the structural gate for any future channel.
 - **Real-hardware gate.** `docs/MULTI_MACHINE_VERIFICATION.md` (60 items) remains the live acceptance gate. G1/G2/G3 each map to specific checklist sections (§2 Heartbeat/Failover, §3 Git Sync, §6 Handoff, §7 Communication, §10 Full Lifecycle).
 
 ---
