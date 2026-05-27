@@ -75,6 +75,7 @@ import { createHandoffReceiverWiring } from '../core/handoffReceiverWiring.js';
 import { createHandoffSentinelBootWiring } from '../core/handoffSentinelBootWiring.js';
 import type { HandoffOutcome } from '../core/HandoffSentinel.js';
 import { MessageProcessingLedger } from '../messaging/MessageProcessingLedger.js';
+import { recoverStuckMessages } from '../messaging/stuckMessageRecovery.js';
 import { decryptFromSync, encryptForSync } from '../core/SecretStore.js';
 import { createPrivateKey, createPublicKey } from 'node:crypto';
 import { sign as signEd25519, verify as verifyEd25519 } from '../core/MachineIdentity.js';
@@ -8289,6 +8290,48 @@ export async function startServer(options: StartOptions): Promise<void> {
 
     await server.start();
     void taskFlowSweeper; void taskFlowDueWaker; void divergenceChecker;
+
+    // ── No-LOSS recovery: re-run inbound events stranded in 'processing' (spec §8 G3a) ──
+    // The complement to the inbound dedup gate: an event claimed but never
+    // reply_committed (the holder crashed or was fenced mid-turn) is re-run by the
+    // current lease holder from its stored input, via the SAME onTopicMessage path a
+    // fresh forward uses — so the lost reply is produced. Only active when the
+    // exactly-once ledger is wired (flag on). Lease-gated (a standby never injects),
+    // attempts-capped (an unanswered message is not re-run forever). Telegram-only for
+    // v1 (the --no-telegram sessionManager path is a tracked refinement).
+    if (messageLedger && currentInboundByTopic && telegram) {
+      const ledgerForRecovery = messageLedger;
+      const inboundMap = currentInboundByTopic;
+      const reinjectStuck = (topicId: string, dedupeKey: string, replayText: string): void => {
+        inboundMap.set(topicId, dedupeKey); // so the eventual reply commits THIS entry
+        void telegram.onTopicMessage?.({
+          id: `replay-${dedupeKey}`,
+          userId: 'unknown',
+          content: replayText,
+          channel: { type: 'telegram', identifier: topicId },
+          receivedAt: new Date().toISOString(),
+          metadata: { messageThreadId: Number(topicId), viaLifeline: true, replay: true },
+        } as Message);
+      };
+      const runStuckRecovery = (): void => {
+        try {
+          recoverStuckMessages({
+            ledger: ledgerForRecovery,
+            holdsLease: () => coordinator.holdsLease(),
+            epoch: coordinator.getLeaseEpoch(),
+            maxProcessingMs: seamlessness.maxProcessingMs,
+            reinject: reinjectStuck,
+            logger: (m) => console.log(pc.dim(`  ${m}`)),
+          });
+        } catch (err) {
+          console.error(`[stuck-recovery] ${err instanceof Error ? err.message : err}`);
+        }
+      };
+      runStuckRecovery(); // boot: re-run anything a prior crash left mid-turn
+      const stuckTimer = setInterval(runStuckRecovery, Math.max(30_000, seamlessness.maxProcessingMs));
+      if (stuckTimer.unref) stuckTimer.unref();
+      console.log(pc.dim('  Stuck-message recovery active (no-loss half, spec §8 G3a)'));
+    }
 
     // Connect DegradationReporter downstream systems now that everything is initialized.
     // Any degradation events queued during startup will drain to feedback + telegram.

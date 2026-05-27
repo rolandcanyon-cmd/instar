@@ -187,9 +187,14 @@
             dedupeKey = telegram:<topic>:<message_id> (v1; update_id tracked refinement). 14 tests
             (8 unit + 5 integration + 1 e2e). FAIL-OPEN throughout. Strict improvement, no
             regression (a crash after inject-before-reply loses the reply exactly as today).
-      - [ ] D-noloss (no-LOSS-on-crash half): on boot, re-inject un-committed ledger entries
-            (received/processing, from inputSnapshot) so a crash/restart replays the turn. The
-            half that makes loss impossible. Fault-injection tests (§8 G3a/§10).
+      - [x] D-noloss (no-LOSS-on-crash half) — DONE (commit d-below), flag-gated dark:
+            src/messaging/stuckMessageRecovery.ts (recoverStuckMessages — lease-gated, reclaimStuck
+            past maxProcessingMs, re-run from inputSnapshot while attempts<maxReplayAttempts=3) +
+            server.ts post-start wiring (reinject sets current-inbound then routes via
+            telegram.onTopicMessage; boot + cadenced, lease-gated, telegram-only v1). This is the
+            spec's explicit "Stuck-processing recovery" mechanism (§8 G3a) — re-run from stored
+            input, NOT offset-hold. 7 tests (6 logic both-sides + boot wiring-integrity). Single-
+            duplicate residual (crash after send before commit) is the documented Two-Generals floor.
       - [ ] D-xmachine: applyRemoteReplyMarker propagation over tunnel+git (failover window).
             Lower priority — the lease already prevents cross-machine double-forward.
       - [ ] D-refine: update_id as dedupeKey (vs message_id); per-topic concurrent-inbound queue.
