@@ -2,9 +2,25 @@
 
 *Companion to [`CROSS-MACHINE-SEAMLESSNESS-SPEC.md`](./CROSS-MACHINE-SEAMLESSNESS-SPEC.md). Read this first; the technical spec is the appendix.*
 
-## The dream
+## The dream (measured the right way: from the user's side)
 
 Picture one employee — call her Luna — who has a desk in two offices. You should be able to walk into either office and it's the same Luna: she remembers the conversation you were just having, the task she was halfway through, everything. You never notice she's actually in two places. That's the goal: **one agent that follows you across machines with no amnesia.**
+
+**The crucial point: "seamless" is judged entirely from the user's chair, in the actual channel — Telegram.** It's not about clever syncing under the hood; it's about what the person texting the agent experiences. The test is simple: someone is mid-conversation on Telegram, the agent quietly switches machines underneath them, and they notice *nothing* —
+
+- no message of theirs gets lost,
+- they never get the same answer twice,
+- the reply still knows exactly what they were just talking about (no "sorry, who is this?"),
+- no sudden "hi, how can I help you?" restart,
+- no weird long pause.
+
+Everything in this spec exists to deliver that experience. The plumbing is just the means.
+
+### The user stories driving it
+
+- **Failover mid-chat:** the machine serving me dies, I keep texting, I notice nothing.
+- **My two machines:** same agent, same conversation, on either machine — I switch and don't miss a beat.
+- **Reliability I feel but don't see:** the agent is just always there and coherent; that it spans machines is invisible. More machines = more reliable, never more noise.
 
 ## What we already had — and what we just proved
 
@@ -29,7 +45,7 @@ And the headline feature — handing the conversation from one live machine to a
 
 2. **Automatic filing.** The on-duty machine quietly saves its updates to the shared cabinet on a schedule, and the backup reads them. This is the thing that was missing — and we'll add a test that would have caught it.
 
-3. **No amnesia.** The real magic. The current conversation and the half-finished work get continuously copied to the backup machine, so when you switch, the other machine is already caught up. The handoff rule is strict: the new machine has to confirm "I've got everything" *before* the old one lets go — so nothing is dropped.
+3. **The seamless Telegram experience (the real magic).** This is the user-facing piece, and it has three parts working together: (a) the current conversation and half-finished work get continuously copied to the backup machine, so it's already caught up; (b) the Telegram "phone line" is handed over cleanly — only one machine is ever answering at a time (so you never get a double reply), and it's handed off at an exact spot so no message slips through the cracks; (c) the new machine picks up the thread instead of starting fresh, so the very next reply still knows what you were talking about. The handoff rule is strict: the new machine has to confirm "I've got everything and I've got the line" *before* the old one lets go.
 
 ## You're in control of the dial
 
