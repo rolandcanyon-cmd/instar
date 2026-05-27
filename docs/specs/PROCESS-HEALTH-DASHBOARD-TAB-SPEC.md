@@ -9,283 +9,161 @@ eli16-overview: PROCESS-HEALTH-DASHBOARD-TAB-SPEC.eli16.md
 topic: 13201
 ---
 
-# Process Health Dashboard Tab — visible, calm read surface for the Failure-Learning Loop
+# Process Health Dashboard Tab — a calm, visible read surface for the Failure-Learning Loop
 
-**Status:** DRAFT v2 (post-round-1). Author: echo · Created: 2026-05-27 · Topic: 13201
+**Status:** DRAFT v3 (post-round-2, SCOPE-REDUCED). Author: echo · Created: 2026-05-27 · Topic: 13201
 **Companion:** `PROCESS-HEALTH-DASHBOARD-TAB-SPEC.eli16.md`
 
-> **Convergence changelog (v1 → v2).** Round 1 (5 internal reviewers: lessons-aware, security, scalability, adversarial, integration) all code-grounded — found 5 blockers + ~14 majors. All material findings folded in. Highlights:
-> - **Glance test was untestable** (lessons F1) — "or LLM" let implementers skip the human gate; no defined LLM harness. → §6 makes it AND: human glance at PR review is required, *plus* a defined jsdom + Tier-1 LLM smoke with the exact rubric prompt, run against THREE fixtures (empty / one-flagged / high-volume).
-> - **Detail drawer escape hatch** (lessons F2) — "allowed to be more data-dense" let an implementer slide a debug table in. → §4.5 rewritten: ALL three UX rules apply inside the drawer too; raw JSON forbidden; same LLM smoke runs against drawer-open state.
-> - **No XSS/rendering-safety contract** (security B1 + adversarial B1) — every rendered field originates from untrusted sources (commits, agent-diagnosed POST bodies, classifier output). → New §4.6 "Rendering safety" mandates `sanitizeForDisplay()` + `textContent`/`escapeHtml`-only + a negative-test fixture (XSS payloads in `summary`/`recommendation`/`filedBy`).
-> - **Length / Unicode layout-bomb DoS** (adversarial B2 + B3) — `summary`/`recommendation`/`filedBy` are unbounded TEXT; a 100k-char or zero-width-joiner-spam record breaks the calm-card layout; bidi-control + confusables enable fake-authority spoofing in the calm visual. → `sanitizeForDisplay()` enforces NFC + control-char strip + length caps (240/320/64) + bidi-control strip + mixed-script flag.
-> - **Unbounded `listInsights()`** (scalability B1) — no LIMIT, polled every 60s forever. → §4.3 specifies `?limit=50` server-side default + ETag/304 + add an index on `failure_insights(discovered_at)`.
-> - **No visibility-gating** (scalability M1 + security M3) — existing dashboard has zero `visibilitychange` listeners; spec's "while visible" would default to "forever." → §4.3 mandates Page Visibility API + active-tab gate + lifecycle contract (M3) with AbortController.
-> - **3-endpoint race** (adversarial M1) — uncoordinated GETs render inconsistent state. → `Promise.all` + single coordinated render per tick; partial fail → skip render (keep prior) with subtle "last updated" stamp.
-> - **Maturation source not pinned** (adversarial M3) — counts were a spoofable proxy. → Server adds `rollout: { stage }` to `/failures/analysis` from config (NOT inferred from counts).
-> - **CLAUDE.md migration parity HALF-spec'd** (integration F1) — only `generateClaudeMd` (new agents). → §7 specifies a `migrateClaudeMd` content-sniff insertion (File Viewer precedent: a separate H3 section, not amending an inline bullet).
-> - **Test infra mismatch** (integration F2) — spec said "Playwright/JSDOM" but neither is in deps. → §6 picks **jsdom** (lighter, per-file `@vitest-environment jsdom`; add to devDependencies); Playwright explicitly out of scope.
-> - **Copy with config keys** (lessons F3 + security M2) — 503 copy quoted `monitoring.failureLearning.enabled`. → §4.3 pins user-facing copy in plain English; config-key hints behind a separate "for operators" affordance.
-> - **Record rows in log-line voice** (lessons F5) — bullets + monospace paths + middle-dots read as a debug log. → §4.2(c) rewrites to sentence-shape ("A concurrency issue was captured in `src/core/Foo.ts` — attributed to the ledger spine, about two days ago.").
-> - **Tunnel exposure of internal identifiers** (security M1) — `causeCommitOid`/`specPath`/`filedBy` over a PIN-shared tunnel. → §4.3.1 NEW: render only the operator-safe subset always; full identifiers gated behind the Detail drawer AND a server-detected loopback origin.
-> - **Trust dependency on classifier sanitization** (adversarial M4) — calm cards amplify trust; if classifier ever lets untrusted text into recommendations, the whole calm surface lies. → §4.9 NEW: explicit upstream-trust documentation.
-> - **Severity rendered as visual urgency** (adversarial M2) — gameable. → §4.2 specifies severity as plain inline text, not color/icon weight; headline-decision rule pinned to verified insights (NOT raw severity counts).
-> - **Minors** (color palette bar, copy specifics, m5 lock surface-only, refresh visuals, post-ship verification) — all folded into §4 + §6 + §8.
+> **Convergence changelog (v2 → v3 — scope reduction).** Round 2 (5 reviewers) showed v2 over-reached: several ambitions each opened their own attack surface or rested on an unsupported dependency. The disciplined fix is to **do less, safely, in this first slice**, and defer the ambitious bits as tracked fast-follows. **Dropped from v1 slice (→ §10 deferred):**
+> - **Tunnel-aware field-hiding (was §4.3.1)** — reused the localhost+XFF signal that the loop spec's round-3 (R3-sec-F12) already proved is a false boundary for cloudflared quick tunnels. → DROPPED. v3 simply **never renders commit OIDs / `specPath` / `prNumber` / `toolchainRef` / `buildSkill` / raw `filedBy` in this tab at all** (operator-safe subset only), so there is nothing to gate.
+> - **Auto-"Attention" headline** (was §4.2 a) — drove a loud headline from `status==='discovered'` insights, which rest on a prose-only upstream diversity-gate guarantee (adversarial B3) and could be gamed by a direct status write. → v3 headline is **informational, not a verdict**: "Watching — N issues recorded." No automated alarm state in v1.
+> - **In-product mixed-script warning glyph** (was §4.5) — the `⚠` glyph was itself spoofable (`filedBy="⚠ ledger-spine"`, adversarial B2). → DROPPED; v3 instead renders rows with mixed-script/reserved-glyph content inertly (the offending glyphs are stripped — see §4.6 rule 8).
+> - **Screenshot-based LLM smoke** (was §6.4 b) — required a rasterizer (`dom-to-image`/PNG) not in deps; jsdom can't paint pixels (lessons N1, integration N4). → v3 LLM smoke reads the **text projection** of the rendered DOM (jsdom-deployable).
+> - **Inline `<code>` of filepaths inside `summary` prose** — required HTML-tokenizing untrusted text (adversarial B5). → DROPPED; filepaths render as plain text.
+>
+> **Kept + sharpened:** the core rendering-safety contract (§4.6: `sanitizeForDisplay` + `textContent`/`escapeHtml`-only + caps + NFC/control/bidi/reserved-glyph strip + grapheme-safe truncation + `safeUrl` for URL-bearing attributes + no SVG/MathML/iframe/object/embed + static `id`/`name`); the visibility-gated, abort-safe, `Promise.all`-coordinated, diff-aware refresh + ETag/304 + clarified backoff (§4.3); a **staleness escalation** so the headline degrades to a neutral "Connection paused" instead of showing a stale state (§4.1, adversarial B4); explicit `before=<ts>` pagination prerequisite (scalability NEW-1); `/failures/insights` LIMIT+index; `rollout.stage` server-computed field for the maturation display; pinned plain-English copy with no config keys; corrected `migrateClaudeMd` precedent (File Viewer is a bold-paragraph, not H3; `PostUpdateMigrator.ts:3184-3222`); CapabilityIndex cross-ref via the `build()` return (not a nonexistent `notes` interface field). Full round-1+2 ledger: §9.
 
 ---
 
 ## 1. Problem — live but invisible
 
-The Failure-Learning Loop shipped + activated on Echo (2026-05-27, v1.3.27). It captures attributed failures, classifies them, and (once enough diverse evidence accumulates) the analyzer surfaces process-gap insights with their verify-it-worked status. All of that is reachable via `GET /failures`, `/failures/analysis`, `/failures/insights` — **but the human has nothing to look at.** Without a visible surface: data accumulates silently; promotion decisions are blind; the loop's whole pitch is invisible.
+The Failure-Learning Loop shipped + activated on Echo (v1.3.27, capture-only). Its `/failures*` data is reachable only via the API — the human has nothing to look at, so the loop's work is invisible and promotion decisions are blind. This adds a calm, visible **Process Health** tab.
 
 ## 2. The non-negotiable UX constraint (drives every decision)
 
-Justin's direction ([[feedback_dashboard_human_friendly_not_debug]], saved as durable preference applying to ALL future dashboard work): **simple, large fonts, easy to digest, NOT looking like some debug logs.**
-
-1. **Large, readable type** — sized for a glance from across the room and from a phone. No 12-px developer-console text.
-2. **Plain-English summaries front and center** — what's happening, what to look at, what to decide. Counts/tables/raw records go deeper, never at the top.
-3. **No debug-log aesthetic** — no monospace walls, no terminal output, no JSON dumps as the primary surface. Calm, readable, designed for the human glance.
-
-**Glance-test acceptance gate (mandatory, both halves required — AND not OR; spec §6 enforces):** a non-engineer reviewer opens the rendered page and within 5 s can answer "what's happening / what should I look at" in plain English. The LLM smoke is a pre-flight check, not a substitute.
+Justin's direction ([[feedback_dashboard_human_friendly_not_debug]], a durable preference for ALL future dashboard work): **simple, large fonts, easy to digest, NOT looking like debug logs.** (1) large readable type, (2) plain-English summaries front and center, (3) zero debug-log aesthetic. **Glance-test gate (both halves required, §6.4):** a non-engineer answers "what's happening / what to look at" in <5s.
 
 ## 3. What already exists (extend, not reinvent)
 
-- **Dashboard frontend** (`dashboard/index.html`, single 8004-line SPA, served via `express.static`) with an established **tab framework**: `.tab-bar .tab` (`.active` class), `.tab-content` (`.hidden` class). Existing tabs: Sessions, Secrets, Threadline, Files (+ many more). We add one more.
-- **Data sources** (live + verified on Echo): `GET /failures`, `/failures/:id`, `/failures/analysis`, `/failures/insights`. **NB (server-side prerequisites added in this spec):** `/failures/insights` gets a default `?limit=50` server clamp + an index on `failure_insights(discovered_at)`; `/failures/analysis` response gets a `rollout: { stage }` field populated from `config.monitoring.failureLearning.*` (NOT inferred from counts). All three GETs get ETag/304.
-- **PIN-gated access** (the dashboard's existing 6-digit-PIN auth, exchanged for the bearer token). No new auth surface.
-- **No browser test infra today.** No `playwright`, no `jsdom`, no `happy-dom` in deps; `vitest` is Node-environment by default. This spec adds `jsdom` as a devDependency + uses per-file `@vitest-environment jsdom`. Playwright is explicitly out of scope.
+- **Dashboard** (`dashboard/index.html`, single SPA served via `express.static`) with a tab framework (`.tab-bar .tab` / `.tab-content`). We add one tab.
+- **Data sources** (live on Echo): `GET /failures`, `/failures/analysis`, `/failures/insights`. Server-side prerequisites this spec adds (small, additive): `/failures` + `/failures/insights` gain a `?before=<ISO-ts>` upper-bound param (parsed via `Date.parse`, 400 on `NaN`; `list()`/`listInsights()` gain `beforeMs?` → `detected_at < @before` / `discovered_at < @before`); `/failures/insights` gains a `?limit=50` default clamp + `CREATE INDEX IF NOT EXISTS idx_insights_discovered ON failure_insights(discovered_at)`; `/failures/analysis` response gains `rollout: { stage, enabled, insightTelegramEscalation }` computed from `config.monitoring.failureLearning.*`; all three GETs gain ETag (`sha256(JSON.stringify(body)).slice(0,16)`, computed after the full body incl. `rollout` is assembled; cache keyed by URL+query; rely on V8 insertion-order, do NOT sort keys).
+- **PIN-gated access** (existing). No new auth surface. **No browser test infra today** → this spec adds `jsdom` (devDep) + per-file `@vitest-environment jsdom`; Playwright/screenshot rasterizers explicitly OUT OF SCOPE.
 
 ## 4. Design
 
-### 4.1 Layout — top-to-bottom, large-to-small (the calm-read principle)
+### 4.1 Layout — top-to-bottom, large-to-small
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Process Health                                              │  ← tab title, 22+px
+│  Process Health                                              │  ← 22+px
 │                                                              │
-│   ★  Healthy — no patterns flagged this week                │  ← BIG headline ≥24px
-│      4 issues recorded so far · all linked to a known cause  │  ← plain-English subline 17–18px
+│   Watching — 4 issues recorded so far                       │  ← BIG headline ≥24px, INFORMATIONAL
+│   all linked to a known cause · capture-only mode            │  ← plain-English subline 17-18px
 │                                                              │
-│  Patterns to know about                                      │  ← section header 20–22px
-│                                                              │
-│     (Nothing flagged yet. The monitor needs to see a wider   │  ← warm empty-state
-│      variety of issues before it's confident enough to       │
-│      surface a pattern — that's expected this early.)        │
+│  Patterns to know about                                      │  ← 20-22px
+│     (Nothing flagged yet. The monitor needs to see a wider   │  ← warm empty state
+│      variety of issues before it surfaces a pattern.)        │
 │                                                              │
 │  What's been captured                                        │
-│                                                              │
-│     A concurrency issue was captured in `src/core/Foo.ts`    │  ← sentence-shape, not log line
-│     — attributed to the ledger spine, about two days ago.    │
-│                                                              │
-│     A config-parse problem in `failure-analyzer.md`,         │
-│     attributed to the analyzer job, five days ago.           │
-│                                                              │
-│   [Show more]                                                │  ← paginated, +50 at a time
+│     A concurrency issue in src/core/Foo.ts, attributed to    │  ← sentence, plain text path
+│     the ledger spine, about two days ago.                    │
+│     A config-parse problem in the analyzer job, five days    │
+│     ago.                                                     │
+│     [Show more]                                              │  ← paginates +50 via ?before=<ts>
 │                                                              │
 │  Maturation                                                  │
-│                                                              │
-│     ● Dark                       done                        │
-│     ● Capture-only         ← you're here                     │  ← from /failures/analysis.rollout.stage
-│     ○ Insight push         pending watch period              │
+│     ● Dark              done                                 │
+│     ● Capture-only   ← you're here                           │  ← from /analysis.rollout.stage
+│     ○ Insight push                                           │
 │     ○ Default for all agents                                 │
 │                                                              │
-│  [Detail ▾]    ← collapsed by default; UX rules apply inside │
+│  [Detail ▾]   collapsed; same UX rules inside                │
+│                                              updated 1m ago  │  ← subtle stamp
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Visual rules — measurable bars (CSS-binding):**
-- Body type **≥17 px**; section headers **≥20 px**; headline status line **≥24 px**.
-- Line-height **1.5–1.6**.
-- Sans-serif (existing dashboard font). **No monospace outside literal code/path tokens** — and even those tokens use `<code>`, never a `<pre>` block.
-- Spacious padding; no compact tables; no `<table>` with row-banding anywhere in the tab (incl. Detail drawer).
-- **Color palette bar (lessons F8):** body text uses ONLY the dashboard's existing default text color from the current `<style>` block. The ONLY new colors introduced are two status tokens (`--ph-status-healthy` = a calm green, `--ph-status-attention` = a calm amber). No alarming red anywhere in this tab — capture-only observations are never an emergency. No alternating-row coloring. No background fills on records.
-- **No spinner / no skeleton / no flicker on refresh.** Data swaps in only if it actually changed (diff-aware render keyed on record id / insight id). A small unobtrusive "updated just now / 1m ago" stamp at the bottom corner reflects refresh; nothing else moves on a no-change tick.
+**Measurable visual bars:** body ≥17px; section headers ≥20px; headline ≥24px; line-height 1.5–1.6; sans-serif only (no monospace anywhere in this tab — paths render as plain prose text, not `<code>`); spacious padding; no `<table>`/row-banding anywhere (incl. Detail); color palette = the dashboard's existing default text color ONLY, plus at most one neutral accent token (`--ph-accent`) for the maturation "you're here" marker. **No status-alarm colors** (no red/amber headline) — v1 has no verdict state to color. **No spinner/skeleton/flicker**; diff-aware render keyed on id; subtle "updated Ns ago" stamp at the corner.
 
-### 4.2 Sections (top to bottom — most-important first)
+**Staleness escalation (adversarial B4):** the headline NEVER shows a stale data-claim loudly. If a refresh tick fails: after **2 consecutive failed ticks** the headline text becomes `Connection paused — showing the last view from Nm ago` (neutral, no count claim); a successful tick restores the normal "Watching — N recorded" headline. The corner stamp is a supplement, never the only staleness signal.
 
-**(a) Headline status (the glance answer).** One line: `★ Healthy — no patterns flagged this week` OR `▲ Attention — N pattern(s) ready for your decision`. Subline: one plain-English sentence ("N issues recorded so far · all linked to a known cause" or "N recorded · M still being traced").
+### 4.2 Sections (most-important first)
 
-**Headline-decision rule (pinned, adversarial M2 + m3):** the headline is `Attention` ONLY when `listInsights({status:'discovered'}).length > 0` — i.e., the loop has crossed its post-threshold + diversity-gated bar that vouches for the signal. **Severity counts are never used to drive the headline color or text.** No raw-`severity === 'high'` input. This makes the headline ungameable by an adversarial flood of high-severity-tagged records.
+**(a) Headline (informational, NOT a verdict).** "Watching — N issues recorded so far" + a plain subline ("all linked to a known cause · capture-only mode" / "N still being traced"). **No automated Healthy/Attention alarm state in v1** — that (and the upstream provenance contract it needs) is deferred (§10). This removes the headline-gameability + "loud stale lie" classes entirely.
 
-**(b) Patterns to know about (the insights board).** Each thresholded insight is a **plain-English card** with: the pattern summary (sanitized + capped per §4.6), the recommendation, the loop-status (discovered / acted-on via X / verified-effective / verified-ineffective / inconclusive), and the supporting-evidence as a sentence ("seen in N changes across M distinct sources"), not a table. A small "loop's recommendation" label sits above the recommendation text so the operator's calm-card pattern-match knows this is machine-generated text from a process under suspicion, not editorial copy (adversarial B3).
+**(b) Patterns to know about.** When the loop has surfaced insights, each is a plain-English card: the pattern summary (sanitized + capped, §4.6), the recommendation (prefixed with a quiet "the monitor suggests:" label so it reads as machine-generated, not editorial), and a one-sentence evidence line ("seen across N changes"). Empty state: the warm copy in §4.5. The cards are informational; they do not change the headline in v1.
 
-**(c) What's been captured (recent failures, redacted, sentence-shaped).** Up to ~10 most-recent records, each as **one full English sentence** — NOT a bullet, NOT a row in a table. Example: *"A concurrency issue was captured in `src/core/Foo.ts` — attributed to the ledger spine, about two days ago."* Filepath is the only monospaced token; everything else is prose. **`detail.full` NEVER served** (already structurally enforced server-side — loop spec §4.8). A `[Show more]` link **paginates in chunks of 50 records** via explicit `?limit=50&before=<ts>`; never an unbounded fetch (adversarial m2 / scalability M2). Severity, if shown at all, is plain inline text ("low/medium/high"), never a color or icon weight (adversarial M2).
+**(c) What's been captured (operator-safe subset only).** Up to 10 most-recent records, each as ONE plain-English sentence. **Rendered fields are limited to the operator-safe subset:** the sanitized `summary`, the `category` (as a friendly word), a DERIVED human attribution label (from an `initiativeId → label` map; falls back to a generic "a tracked feature" if unmapped — NEVER the raw `initiativeId`), and relative time. **NEVER rendered in this tab:** `causeCommitOid`, `fixCommitOid`, `specPath`, `prNumber`, `toolchainRef`, `buildSkill`, raw `filedBy`, `detail.full` (the last is already server-stripped). `[Show more]` paginates in chunks of 50 via `?limit=50&before=<oldest-ts-of-prior-page>`; never an unbounded fetch. Severity is NOT rendered (it's caller-set and gameable; omitting it removes the surface).
 
-**Aggregated `filedBy` panel (above the recent rows, adversarial B3 fix):** a tiny prose summary — "In the last 30 days, filers were: ledger spine (12), analyzer job (4), agent-diagnosed (3)." — so a flood from one author surfaces structurally instead of by reading rows.
+**(d) Maturation track.** Four stages (Dark / Capture-only / Insight push / Default-on) as a vertical visual list with a "← you're here" marker. Current stage read from `/failures/analysis.rollout.stage` (server-computed from config, NOT inferred from counts). Read-only; no promote action in this tab.
 
-**(d) Maturation track (where the rollout is).** The four stages (Dark / Capture-only / Insight push / Default-on) as a **vertical visual list** with checkmarks and an explicit "← you're here" marker. **The current stage is read from `/failures/analysis.rollout.stage`, which is computed server-side from `config.monitoring.failureLearning.*` (NOT inferred from counts).** Each stage has a one-line plain description. Promotion eligibility surfaces here when the loop's analyzer signals it; the actual flag-flip is **NOT done from this tab** (see §5 / locked).
+**(e) `[Detail ▾]` — collapsed; SAME UX rules apply inside.** ≥17px, no monospace blocks, no JSON dumps, no tables. Shows the analyzer's aggregate counts as labeled list items (category distribution, coverage fraction, `unknown`-toolchain bucket size). Renders once on open from the latest analysis payload; refreshes in place only while open.
 
-**(e) `[Detail ▾]` — collapsed by default. Same UX rules apply inside (lessons F2):** ≥17px body, no monospace blocks for non-literal content, no JSON dumps, no `<table>` with row-banding. "More data-dense" means more *labeled list items per section*, not "we relax the typography." Raw JSON is forbidden. The Detail subtree renders ONCE on open from the most-recent analysis payload; subsequent ticks update it in place only if it's open. The Tier-1 LLM smoke (§6) runs against the drawer-open state with the same rubric.
+### 4.3 Data wiring (visibility-gated, abort-safe, coordinated, diff-aware)
 
-### 4.3 Data wiring (visibility-gated, coordinated, abort-safe, diff-aware)
+**Lifecycle:** one module-level state `{ intervalId, inFlightController, lastSnapshot, consecutiveFailedTicks, consecutive304Ticks }`.
+- **Start** polling when `switchTab('process-health')` is active AND `document.visibilityState==='visible'` (both required).
+- **Stop** (`clearInterval` + null + `abort()` in-flight) on tab-switch-away OR `visibilitychange→hidden`.
+- **Resume** on `visibilitychange→visible` while active: one immediate refresh + re-arm.
+- **Per tick:** new `AbortController` (abort the prior in-flight first); `Promise.all([analysis, insights?limit=50, failures?limit=10])` with `If-None-Match` from the last ETags; **single coordinated render**. A 304 on an endpoint → render that section from `lastSnapshot[endpoint]` (so first-paint-after-reactivation isn't blank; a mixed 200/304 tick renders 304 sections from snapshot + 200 sections fresh — always one consistent paint). If ANY endpoint hard-fails → drop the whole tick, keep prior render, increment `consecutiveFailedTicks` (drives §4.1 staleness escalation).
+- **Backoff:** a single tick-level `consecutive304Ticks` increments only when ALL THREE return 304; ANY 200 (≡ material change, given deterministic SHA ETags) resets it to 0. At `≥5`, the next `setTimeout` is 300_000ms; a 200 resets to the 60_000ms cadence. The "updated Ns ago" stamp reflects time since the last 200 (`lastMaterialPaint`).
+- **Diff-aware render:** changes detected by record-id / insight-id; mutate only changed nodes (no full `innerHTML` wipe); collapse handlers persist across ticks.
 
-**Lifecycle contract (scalability M1 + M3, security M3):**
-- One module-level state object: `{ intervalId: number | null, inFlightController: AbortController | null, lastSnapshot: Snapshot | null }`.
-- **Start polling** when `switchTab('process-health')` activates the tab AND `document.visibilityState === 'visible'`. Both gates required (AND).
-- **Stop polling** (`clearInterval`, null id, `abort()` any in-flight) on `switchTab(other)` OR `visibilitychange → hidden`.
-- **Resume** on `visibilitychange → visible` while tab is active: one immediate refresh + re-arm interval.
-- **Backoff to 5 minutes** after 5 consecutive identical (ETag-304) responses, reset to 60s on the next material change.
+### 4.4 Integration
 
-**Per tick (coordinated, abort-safe):**
-- A new `AbortController` is created; the prior in-flight (if any) is `.abort()`-ed first.
-- `Promise.all([fetch(/failures/analysis), fetch(/failures/insights?limit=50), fetch(/failures?limit=10)])` — single coordinated render. If ANY fetch fails (timeout, 5xx, abort), the WHOLE tick is dropped — the prior render stays + the corner stamp updates to "last updated Ns ago — refresh paused" (adversarial M1).
-- All three GETs use `If-None-Match` against the ETag from the last successful fetch; a 304 short-circuits the render (no DOM mutation).
-- **Diff-aware render:** changes detected by record-id / insight-id; the renderer mutates only changed nodes (no full `innerHTML` wipe). New data added by prepend; removed data by detach. No event-listener leaks (collapse handlers attached to DOM stay valid because their host nodes persist across ticks).
+- Tab button in `.tab-bar` ("Process Health"); `.tab-content#process-health-tab` hidden by default; CSS appended under `/* process-health tab */` with `.ph-*` class names; one `<script>` block. Splitting `index.html` is explicitly out of scope.
 
-**Server-side prerequisites (this spec adds — they're small, additive, no breaking change):**
-- `/failures/insights` gains a default `?limit=50` server clamp (max 200) + DB migration adding `CREATE INDEX IF NOT EXISTS idx_insights_discovered ON failure_insights(discovered_at)`.
-- `/failures/analysis` response gains `rollout: { stage: 'dark' | 'capture-only' | 'insight-push' | 'default-on', enabled: boolean, insightTelegramEscalation: boolean }`, computed from `ctx.config.monitoring.failureLearning.*`.
-- All three GETs gain ETag/`If-None-Match` support (`crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex').slice(0,16)`).
+### 4.5 Copy (PINNED — plain English, no config keys)
 
-### 4.3.1 Tunnel-aware field exposure (security M1)
+- **Empty (loop on, no patterns):** "Nothing flagged yet. The monitor needs to see a wider variety of issues before it surfaces a pattern — that's expected this early."
+- **Empty (no records):** "No issues recorded yet — that just means nothing has come through since this was turned on."
+- **Disabled (503):** "Process Health isn't turned on for this agent yet. Once it is, this page will show what it's noticing." + a `[for operators ▾]` collapse with the enable hint (inline `<code>` only, never a block).
+- **Refresh paused:** the §4.1 staleness headline + subtle subline "Couldn't refresh just now — showing the last good view. Will retry."
 
-The dashboard is reachable over a Cloudflare tunnel. A PIN-holder is anyone with the 6-digit PIN — not necessarily a repo operator. Some `FailureRecord` fields are operationally useful but expose repo internals:
+### 4.6 Rendering safety contract (load-bearing — security + adversarial)
 
-- **Always visible** (operationally meaningful, low leak): `summary` (sanitized + capped), `category`, a **DERIVED human label** for attribution (e.g. "ledger spine" — derived from `initiativeId` via a friendly-name map; falls back to `initiativeId` if no map entry), relative time, status badge.
-- **Hidden over tunnel, visible only on loopback** (Detail drawer ONLY, and only when the request reached the server from `127.0.0.1` with no `X-Forwarded-For`): `causeCommitOid`, `fixCommitOid`, `specPath`, `prNumber`, `toolchainRef`, `buildSkill`, raw `filedBy`. The Detail drawer shows: *"Hidden over tunnel — open the dashboard locally to see commit OIDs and internal paths."*
-- The renderer queries a new lightweight `GET /failures/visibility-mode` once on mount that returns `{ mode: 'loopback' | 'tunnel' }` based on the server-side `req.socket.remoteAddress` + `X-Forwarded-For` check (mirrors the existing `/internal/*` guard pattern). Frontend uses the mode to gate which fields render. This is defense-in-depth (real protection is in the renderer not reading hidden fields when `mode === 'tunnel'`); server-side, the routes still return the fields for backward compat.
+All dynamic values flow through `sanitizeForDisplay(value, fieldKind)` before the DOM:
+1. null-coerce; 2. NFC-normalize; 3. strip C0/C1 controls (keep `\n`,`\t`); 4. strip bidi-control (U+202A–202E, U+2066–2069); 5. collapse `>1` `\n` → one, cap whitespace runs at 4; 6. length cap per kind (`summary` 240, `recommendation` 320, derived-label 64, Detail text 2KB), **grapheme-safe** (`Intl.Segmenter`), `…` suffix on truncation; 7. mixed-script (Latin + confusable Cyrillic/Greek) → render the row inertly (no special glyph); 8. **reserved-glyph strip:** strip any UI-reserved presentation glyph the tab itself uses (`⚠ ★ ☆ ● ○ ✓ ✗ ← → ▲ ▼ ◐ ℹ 🔒` …) from dynamic values so attacker text can't impersonate system chrome.
 
-### 4.4 Integration into `dashboard/index.html`
+**DOM insertion (mandatory):**
+- Dynamic values → `element.textContent` ONLY, or `escapeHtml()` if assembled into a structural `innerHTML` template. No naked `innerHTML` interpolation of dynamic values.
+- Allowed DOM destinations for dynamic values: `textContent`, `setAttribute('class', LITERAL)`, `setAttribute('aria-*', LITERAL)`. URL-bearing attributes (`href`, `src`, `style`, `srcset`, `data-*`, `formaction`) are FORBIDDEN for dynamic values unless passed through `safeUrl()` (must start `http:`/`https:`/`/`/`#`; reject `javascript:`/`data:`/`vbscript:`/`file:`; reject off-allowlist hosts; empty string on reject). Inline `style=` interpolation of dynamic values is forbidden outright.
+- `id`/`name` attributes are static literals (no DOM-clobbering).
+- **No `<svg>`, `<math>`, `<iframe>`, `<object>`, `<embed>` elements appear in the tab DOM at any time.**
 
-- **Tab button** in `.tab-bar`, label "Process Health". Position: after "Threadline" or "Files" (consistent with existing ordering).
-- **`.tab-content`** section, `id="process-health-tab"`, hidden by default.
-- **CSS** appended to the existing `<style>` block under `/* process-health tab */`. Semantic class names (`.ph-headline`, `.ph-section-title`, `.ph-pattern-card`, `.ph-record-row`, `.ph-maturation`, `.ph-detail-collapse`).
-- **JS** as a single `<script>` block. **Splitting `dashboard/index.html` is explicitly out of scope** (integration m4 foreclosure) — that's a separate spec touching `express.static` mounting + cache headers.
+**Server-side hardening (flagged follow-up, §10):** apply equivalent caps + sanitization at the `POST /failures` boundary in `FailureLedger`. The dashboard caps are defense-in-depth.
 
-### 4.5 Empty / disabled / error copy (PINNED — no config keys in user copy, lessons F3 + security M2)
+### 4.9 Upstream trust dependencies
 
-- **Empty state (loop on, no patterns yet):** *"Nothing flagged yet. The monitor needs to see a wider variety of issues before it's confident enough to surface a pattern — that's expected this early."* (Avoid "analyzer" — that's engineer voice.)
-- **Empty state (no records yet):** *"No issues recorded yet — that just means nothing has come through since this was turned on."*
-- **503 / feature disabled:** *"Process Health isn't turned on for this agent yet. Once it is, this page will show what it's noticing."* + a small `[for operators ▾]` collapse that, when opened, shows the operator-facing one-liner with the config key (still no `<code>` block — inline `<code>` only).
-- **Refresh paused (any fetch failed this tick):** *"Couldn't refresh just now — showing the last good view. Will retry."* (small subtle text, no alarm color.)
-- **Mixed-script flag on a row (adversarial B3):** a small `⚠` glyph + tooltip *"This row's text mixes scripts that can look alike — verify it."*
+This tab trusts that `FailureLedger.toApiView` strips `detail.full` (loop spec §4.8; §6 asserts the rendered DOM never contains a `detail.full`-class field). Because v3 drops the auto-Attention headline, the tab no longer depends on the analyzer's diversity-gate for any *verdict* — insights are shown informationally only. If a future iteration re-introduces an alarm headline, it MUST first add a structural provenance field to `InsightRecord` (deferred, §10) — prose trust is insufficient for a verdict.
 
-### 4.6 Rendering safety contract (security B1 + adversarial B1/B2/B3 — load-bearing)
-
-**All dynamic field values flow through one helper, `sanitizeForDisplay(value, fieldKind)`, before reaching the DOM.** The helper:
-1. **Type-check + null-coerce** (`null`/`undefined` → empty string).
-2. **NFC-normalize** Unicode (`String.prototype.normalize('NFC')`).
-3. **Strip C0/C1 control characters** except `\n` and `\t`.
-4. **Strip Unicode bidi-control characters** (U+202A–U+202E, U+2066–U+2069) — prevents fake-authority spoofing via RTL override.
-5. **Collapse** runs of `>1` consecutive `\n` to one; cap consecutive whitespace at 4.
-6. **Length cap by field kind:** `summary` 240 chars; `recommendation` 320; `filedBy` 64; `detail.redacted` 2 KB (Detail drawer only). Truncation is **grapheme-safe** (`Intl.Segmenter`) — never slice mid-surrogate. Truncated values end with `…` and the full text is available via a per-record `[expand]` affordance inside the Detail drawer.
-7. **Mixed-script detection:** if the sanitized string mixes Latin with confusable Cyrillic/Greek lowercase letters, the renderer adds the `mixed-script` marker (§4.5) — does NOT silently rewrite the text.
-
-**DOM insertion rule (mandatory):**
-- Use `element.textContent = sanitizedValue` for ALL dynamic field values. NO naked `innerHTML` interpolation of dynamic values. If `innerHTML` is needed for structural HTML (e.g., constructing a card template), wrap every interpolated value in the existing `escapeHtml()` helper (`dashboard/index.html` line 3989).
-- CSS class names and ARIA attribute names are LITERALS — never computed from response data.
-- No `javascript:` URLs, no `eval`, no `Function(...)` constructed from response data.
-
-**Server-side hardening (separate, but flagged as the real fix):** the spec recommends a follow-up to apply equivalent caps + sanitization at `POST /failures` boundary in `FailureLedger` (currently no server-side length cap on `summary`). The dashboard cap is defense-in-depth.
-
-### 4.7 — (reserved)
-
-### 4.8 — (reserved)
-
-### 4.9 Upstream trust dependencies (adversarial M4)
-
-This tab's calm-card presentation **trusts** that:
-- `InsightRecord.summary` and `.recommendation` are composed from a fixed template + structured fields (per loop spec §4.4 BL-3), never by concatenating raw `FailureRecord.summary` text into the recommendation. If that contract ever changes, this tab must also change (apply `sanitizeForDisplay()` to insight fields at strict caps).
-- `FailureLedger.toApiView` strips `detail.full` (loop spec §4.8, structurally enforced today — verified at `src/monitoring/FailureLedger.ts:687`). If the API ever exposes `full`, the tab's E2E test (§6) catches it via the "never shows `detail.full` substring" assertion.
-- The analyzer's source-diversity gate (≥K distinct sessions ∧ ≥J distinct cause-commits, loop spec §4.4) is the upstream guard that makes `status === 'discovered'` insights trustworthy enough to drive the headline `Attention` signal. If those gates weaken, the headline becomes gameable.
-
-A change to any of the above MUST trigger a re-review of this spec.
-
-## 5. Open questions (resolved + remaining)
-
-1. ~~**Refresh cadence**~~ → **RESOLVED: 60 s** with visibility/active-tab gating + 5-min backoff after 5 consecutive 304s.
-2. ~~**Empty-state copy**~~ → **RESOLVED in §4.5** (pinned).
-3. ~~**Promotion action**~~ → **RESOLVED: surface-only, locked**. The Process Health tab is **strictly read-only**. NO `POST`/`PATCH`/`DELETE` against `/failures*` or `monitoring.failureLearning.*` is wired here. Promotion is the rollout board's twice-weekly driver's responsibility. If a future iteration ever adds a promote button, the flag-flip MUST be gated by a confirmation requiring the bearer token alone (not the PIN), since the PIN is often shared more broadly than repo-write authority.
-
-**Remaining for convergence:** none material.
+## 5. Open questions — none material (all resolved/deferred; §10).
 
 ## 6. Testing (3-tier + glance test, NON-NEGOTIABLE)
 
-**Test infra:** jsdom (added to devDependencies) + per-file `// @vitest-environment jsdom`. **Playwright is OUT OF SCOPE** (would add ~300 MB of browsers and a CI lane; not justified for a read-only data tab).
+**Infra:** jsdom (devDep) + per-file `@vitest-environment jsdom`. No Playwright/screenshots.
 
-### 6.1 Unit (`tests/unit/process-health-renderers.test.ts`, jsdom)
+- **6.1 Unit** (`tests/unit/process-health-renderers.test.ts`): pure `data→DOM` renderers in 3 states (empty / patterns-present / high-volume). `sanitizeForDisplay` rules 1–8 each with both-side fixtures (incl. `<script>`, 100k chars, U+202E, U+200D spam, mixed Cyrillic/Latin, reserved-glyph `⚠ ledger-spine`, mid-surrogate truncation guard). `safeUrl` accept/reject table. Operator-safe-subset assertion: rendering a full record produces NO commit OID / specPath / raw filedBy substring.
+- **6.2 Integration** (jsdom): all 3 fixtures render; CSS bars (`getComputedStyle` font-size ≥17/≥24, line-height 1.5–1.6, no monospace); **XSS negative** (`summary`/`recommendation`/`filedBy` with `<img onerror>`, `<script>`, `<svg onload>`, `<math href=javascript:>`, `javascript:` URL, `<form id=document.body>` → assert `tabRoot.querySelectorAll('img,script,svg,math,iframe,object,embed').length===0`, `window.__xssCanary===undefined`, no `javascript:` in any attribute); **layout-bomb** (100k-char summary → serialized DOM byte-length < 8× empty baseline); **race** (out-of-order conflicting fetches → one consistent paint or skip, never hybrid); **visibility-gating** (hidden → interval cleared + in-flight aborted; visible → one fetch + re-arm); **staleness** (3 consecutive 5xx → headline contains "Connection paused", NOT a stale count claim); **backoff** (5 all-304 ticks → next `setTimeout` arg 300_000; then a 200 → 60_000); **diff-aware** (3 identical ticks → 0 DOM mutations after first paint); **detail.full** never in DOM.
+- **6.3 E2E** (`tests/e2e/process-health-tab-lifecycle.test.ts`): boot in-memory `createRoutes` with the feature ON, mount tab in jsdom, assert loads/renders/refreshes/never-leaks; with feature OFF, assert the pinned 503 copy (no config-key string).
+- **6.4 Glance test (mandatory, AND — both required):**
+  - **(a) Human (PR review):** a non-engineer opens the rendered tab against all 3 fixtures on a phone-size viewport, answers "what's happening / what to look at" in <5s. Recorded as a PR-description checkbox + a reviewer comment by a GitHub login ≠ the PR author. (Soft gate, reviewer-attested — honestly labeled as such, not claimed as CI-enforced.)
+  - **(b) LLM text-smoke (CI, pre-flight):** for each fixture, jsdom renders the tab; the **visible-text projection** (a `textContent` walker emitting block breaks) is passed to a Haiku call (via the existing `IntelligenceProvider.evaluate()` surface) with the EXACT rubric: *"You are a non-engineer glancing at this page. In ONE sentence, without reading carefully: what is this page telling me, and what state is it in?"* Assert: response ≤30 words; contains NO {log, json, table, raw, stack, console, endpoint, API}; mentions a plain state word; mentions implied action or explicitly none. All 3 fixtures must pass.
 
-Renderer functions are pure: `data → DOM nodes`. Test each section in three states (empty / one-flagged / high-volume) — both sides of every boundary, per Testing Integrity. Specifically:
-- Empty state (zero failures, zero insights) → headline `Healthy`, the warm empty-state copy from §4.5 verbatim.
-- One pattern flagged → headline `Attention`, exactly one card, sentence-shape "what's been captured" rows.
-- High-volume (50+ failures, 3+ insights) → still readable (no overflow); `[Show more]` pagination visible.
-- 503 disabled → the pinned 503 copy, no config-key string in the DOM.
-- **`sanitizeForDisplay()` tests:** each rule (1–7) covered with both-side fixtures incl. `<script>`, 100k chars, U+202E RTL override, U+200D zero-width spam, mixed Cyrillic/Latin, mid-surrogate truncation guard.
+## 7. Migration parity
 
-### 6.2 Integration (`tests/integration/process-health-tab.test.ts`, jsdom + supertest)
-
-Mount the dashboard's tab HTML/JS in jsdom, wire to fixture `/failures*` responses, drive the tab:
-- All three fixtures (empty / one-flagged / high-volume) render without errors and without monospace blocks outside literal paths.
-- **CSS bar checks:** body text computed `font-size ≥ 17px`; headline ≥ 24px; line-height between 1.5 and 1.6; no `font-family: monospace` outside `<code>`.
-- **XSS negative test (security B1):** fixture record with `summary='<img src=x onerror=window.__xssCanary=1>'` + `recommendation='<script>window.__xssCanary=1</script>'` + `filedBy='<svg onload=window.__xssCanary=1>'`. Assert `document.querySelector('img,script,svg')` is null in the rendered tab DOM AND `window.__xssCanary === undefined`.
-- **Layout-bomb test (adversarial B2):** fixture with `summary` = 100k ASCII chars; with 5k × U+200D; with 200 × `\n`. Assert the tab's bounding box height stays below 4× the empty-state height + the headline is in the initial viewport.
-- **Race test (adversarial M1):** three mocked endpoints resolve out-of-order with conflicting state (analysis says 0 insights, insights endpoint returns 1). Assert renderer either renders both consistently (one paint) or skips the tick entirely — never a hybrid.
-- **Visibility-gating test (scalability M1):** with the tab visible + active, interval fires; on `document.visibilityState='hidden'`, interval is cleared + `controller.aborted === true` for any in-flight; on visible-again, one immediate fetch + re-arm.
-- **Diff-aware refresh (lessons F4):** three identical refresh cycles → ZERO DOM mutations after the first paint.
-- **`detail.full` never leaks (loop spec §4.8):** assert the rendered DOM's `textContent` does not contain the substring `detail.full` from any fixture, even Detail-drawer-open.
-- **Tunnel-mode field gating (security M1):** with `GET /failures/visibility-mode` mocked to return `{mode:'tunnel'}`, commit OIDs / specPaths / `filedBy` raw strings are NOT in the rendered DOM; with `loopback`, they appear in the Detail drawer only.
-
-### 6.3 E2E (`tests/e2e/process-health-tab-lifecycle.test.ts`, jsdom-based against a real `createRoutes` server with the feature enabled)
-
-The Phase-1 "feature alive" gate: boot the server in-memory with `monitoring.failureLearning.enabled = true`, mount the dashboard tab in jsdom, navigate, assert it loads + renders + soft-refreshes + never shows `detail.full`. With the feature OFF, assert the pinned 503 copy renders (no config-key string).
-
-### 6.4 The glance-test gate (mandatory acceptance — AND, not OR — lessons F1 + F6)
-
-**Both halves required to pass.** Neither alone is sufficient.
-
-**(a) Human glance test (at PR review time).** A non-engineer reviewer — Justin or a delegate — opens the rendered tab against each of the three fixtures (empty / one-flagged / high-volume) on a phone-size viewport and answers in <5 seconds: "What's the state? What should I look at?" Plain English. The PR cannot merge until this is recorded as an ack on the PR (a checkbox in the PR description + reviewer comment confirming the three fixtures were glanced). **If the answer to "what should I look at" requires reading more than the headline + one section, the spec has failed regardless of test counts.**
-
-**(b) LLM smoke (pre-flight, runs in CI).** A jsdom render of each of the three fixtures is screenshotted (via `dom-to-image` or a server-side render to PNG) and passed to a Tier-1 LLM (Haiku) with this EXACT rubric prompt:
-
-> *You are a non-engineer glancing at this page. In ONE sentence, without reading carefully, tell me: what is this page telling me to do, and what state is it in?*
-
-Assertions:
-- The response MUST be a single sentence ≤30 words.
-- The response MUST NOT contain any of: "log", "json", "table", "raw", "stack", "error trace", "console", "endpoint", "API".
-- The response MUST mention a state word ("healthy", "fine", "attention", "flagged", "watching", "quiet", or similar non-technical state).
-- The response MUST mention what action is implied ("nothing", "review the pattern", "look at the recent issues", or similar) or explicitly say no action is needed.
-
-Each of the three fixtures must pass. Failure of either (a) or (b) blocks merge.
-
-## 7. Migration parity (Migration Parity Standard)
-
-- **`dashboard/index.html` ships with the server bundle** — verified: `package.json` `files` includes `"dashboard"`. AutoUpdater's apply lands the new file; no agent-side migration step needed for the HTML itself.
-- **Server-side prerequisites in §4.3** (`/failures/insights` LIMIT + `failure_insights` index + `/failures/analysis.rollout` field + ETag) ship in the same `src/` change; the SQLite `CREATE INDEX IF NOT EXISTS` is idempotent; no PostUpdateMigrator entry needed for the index. The new `rollout` field on the analysis response is additive (existing consumers tolerate it).
-- **CLAUDE.md awareness (Agent Awareness Standard + integration F1):**
-  - `generateClaudeMd` (`src/scaffold/templates.ts`): add a new H3-level **"Process Health (Dashboard Tab)"** section right after the existing **"File Viewer (Dashboard Tab)"** section (follows that precedent — `src/scaffold/templates.ts:527`). Body: 4–5 lines describing what the tab shows, the proactive trigger ("when user asks 'is the failure-learning loop noticing anything?' / 'how's the rollout going?' → point to the dashboard's Process Health tab — DO NOT paraphrase from `/failures*` curl"), and the dashboard-link format.
-  - `migrateClaudeMd` (`src/core/PostUpdateMigrator.ts`): add a `migrateProcessHealthTabSection()` block guarded by `!content.includes('**Process Health (Dashboard Tab)**')`, inserting after the File Viewer section using the same `content.indexOf('\n\n**', anchorIdx + N)` pattern (mirror of `:2935–2942`). This ensures EXISTING agents' CLAUDE.md gets the new section on their next update (per Migration Parity Standard — "a feature that only works for new agents is broken").
-- **No `migrateConfig` change** — this tab adds no new config field.
-- **CapabilityIndex (`src/server/CapabilityIndex.ts`):** append a `notes: 'Surfaced as the Process Health tab in the dashboard when failureLearning.enabled.'` field to the existing `failureLearning` capability entry — discoverability cross-reference (integration F3 minor).
+- `dashboard/index.html` ships with the server bundle (`package.json files` includes `dashboard`); AutoUpdater apply lands it; no migration for the HTML.
+- Server prereqs (§3) ship in the same `src/` change; `CREATE INDEX IF NOT EXISTS` is idempotent (runs in `FailureLedger` constructor on boot — AutoUpdater restarts re-instantiate it); `rollout` field + `before=` param + ETag are additive.
+- **CLAUDE.md awareness (Agent Awareness + Migration Parity):**
+  - `generateClaudeMd` (`src/scaffold/templates.ts:546`): add a new **`**Process Health (Dashboard Tab)**` bold-paragraph section** (NOT H3 — matches the File Viewer precedent style) immediately after the File Viewer block, incl. the proactive trigger ("when user asks 'is the loop noticing anything? / how's the rollout going?' → point to the Process Health tab, don't paraphrase `/failures*` curl").
+  - `migrateClaudeMd` (`src/core/PostUpdateMigrator.ts`): add `migrateProcessHealthTabSection()` modeled on the File Viewer migration at **lines 3184–3222** — anchor `content.indexOf('**File Viewer')`, next-break `content.indexOf('\n\n**', anchorIdx + 15)`, insert there; guard `!content.includes('**Process Health (Dashboard Tab)**')`.
+- **CapabilityIndex** (`src/server/CapabilityIndex.ts:503-518`): extend the `failureLearning` entry's `build()` RETURN with `dashboardTab: 'Surfaced as the Process Health tab in the dashboard when enabled.'` (a new key in the response body — NOT a `CapabilityEntry` interface field, which nothing reads). The new `/failures/visibility-mode`... — N/A, dropped with §4.3.1. No new route prefix → no capabilities-lint entry needed (the `rollout` field + `before=` are response/param changes to existing routes).
+- No `migrateConfig` change.
 
 ## 8. Success criteria
 
-A user opens the dashboard, taps **Process Health**, and within 5 s knows: is anything flagged for my attention? what's been captured? where are we in the rollout? — **without** feeling like they're reading a developer console. The visible surface makes promotion decisions informed instead of blind, and the feature is no longer "live but invisible."
+A user opens the dashboard, taps **Process Health**, and within 5s knows: what's the loop watching, what's been captured, where are we in the rollout — without a developer-console feel. **Post-ship verification (within 7 days):** Justin (or a non-engineer delegate) glances on a phone ≤5s, answers the two glance questions; recorded as a `learn` (this is the bar for future dashboard work) or a `feedback` (reopen, don't patch in flight).
 
-**Post-ship verification (lessons F9):** within 7 days of ship, Justin (or a non-engineer delegate) opens the page on a phone, glances ≤5 s, and is asked the two glance-test questions. Result is recorded as either a `learn` (success — "this is what good looks like for future dashboard work") or a `feedback` (failure — spec is reopened, not patched in flight).
+## 9. Findings ledger (rounds 1 + 2)
 
-## 9. Findings ledger (round 1)
+**Round 2 (resolved by v3 scope reduction):** tunnel-mode false boundary (sec B1) → DROPPED §4.3.1, render operator-safe subset only. Mixed-script glyph spoof (adv B2) → DROPPED glyph + reserved-glyph strip (§4.6 r8). Auto-Attention headline gameable + no provenance (adv B3) → headline is informational only (§4.2 a); provenance deferred (§10). Stale-loud-headline (adv B4) → staleness escalation (§4.1). Screenshot smoke undeployable (lessons N1 / integ N4) → text-projection smoke (§6.4 b). Human-gate policy-not-structure (lessons N2) → honestly labeled soft/reviewer-attested (§6.4 a). `<code>` summary tokenizing (adv B5) → plain-text paths. URL/attribute/SVG/MathML/clobber gaps (sec M1/M2) → §4.6 safeUrl + destination allow-list + element ban + static ids. `before=` unsupported (scale NEW-1) → §3 prereq. ETag/304 + backoff edge cases (scale NEW-2/3/4) → §4.3 clarified. friendly-name map undefined (lessons N3) → §4.2 c + map seeded in same PR. migrateClaudeMd citation wrong (integ N1) → §7 corrected (bold not H3, lines 3184-3222). `notes` field nonexistent (integ N2) → §7 via `build()` return. trust-deps prose-only (adv M1) → moot for v1 (no verdict); §4.9 + deferred provenance.
 
-| ID | Sev | Reviewer | Resolution (v2) |
-|----|-----|----------|-----------------|
-| F1 | blocker | lessons | Glance test = AND (human at PR + LLM smoke), defined rubric, 3 fixtures (§6.4). |
-| F2 | blocker | lessons | Detail drawer same UX rules; no raw JSON; LLM smoke runs drawer-open (§4.2 e). |
-| B1-sec / B1-adv | blocker | security + adversarial | `sanitizeForDisplay()` + textContent/escapeHtml mandate + XSS negative-test fixture (§4.6, §6.2). |
-| B2-adv | blocker | adversarial | Length caps (240/320/64/2KB) + Unicode NFC + control-char strip + grapheme-safe truncation (§4.6). |
-| B3-adv | blocker | adversarial | Bidi-control strip + mixed-script flag + filedBy aggregation panel + "loop's recommendation" label (§4.2, §4.5, §4.6). |
-| B1-scale | blocker | scalability | `/failures/insights` default `?limit=50` + index on `discovered_at` + ETag/304 (§4.3). |
-| F3 / M2-sec | major | lessons + security | Empty/503/error copy PINNED in §4.5; no config-key strings in user copy. |
-| F4 | major | lessons | No spinner/skeleton/flicker; diff-aware render; "updated Ns ago" stamp (§4.1). |
-| F5 | major | lessons | Records as sentences, not bullets/log-lines (§4.2 c). |
-| F6 | major | lessons | Glance test runs against 3 fixtures (§6.4). |
-| M1-scale / M3-sec | major | scalability + security | Page Visibility API + active-tab gate + lifecycle contract (§4.3). |
-| M2-scale | major | scalability | `[Show more]` paginates in 50s; never unbounded fetch (§4.2 c). |
-| M3-scale | major | scalability | Lifecycle contract: one interval, AbortController, abort prior in-flight on new tick (§4.3). |
-| M4-scale | major | scalability | ETag/304 on all three GETs (§4.3). |
-| M1-sec | major | security | Tunnel-aware field gating: hide commit OIDs/paths/raw filedBy over tunnel (§4.3.1). |
-| F1-integ | major | integration | `migrateClaudeMd` content-sniff for existing agents (§7). |
-| F2-integ | major | integration | Test infra: jsdom (not Playwright); per-file `@vitest-environment jsdom` (§6, §3). |
-| M1-adv | major | adversarial | `Promise.all` coordinated render; partial fail → skip tick (§4.3). |
-| M2-adv | major | adversarial | Severity as plain inline text only; headline driven by `discovered` insights, not raw severity (§4.2 a + b). |
-| M3-adv | major | adversarial | Maturation from `/failures/analysis.rollout.stage` (server-computed), NOT inferred from counts (§4.3, §4.2 d). |
-| M4-adv | major | adversarial | §4.9 NEW upstream trust dependencies documented. |
-| minors | minor | various | Color palette bar (only existing color + 2 status tokens, §4.1); F3-integ CapabilityIndex notes (§7); F8 color bar; F9 post-ship verification (§8); F10/m5 surface-only LOCKED (§5 Q3); m1 disabled copy (§4.5); m2 pagination (§4.2 c); m3 headline rule (§4.2 a); m4 empty-filedBy degrade (§6.1). |
+**Round 1 (resolved in v2, carried):** glance test AND + 3 fixtures + rubric (lessons F1/F6 → §6.4); Detail-drawer same rules (F2 → §4.2e); XSS contract (sec/adv B1 → §4.6); length/Unicode caps (adv B2 → §4.6); copy pinned no config keys (F3/sec M2 → §4.5); refresh visuals (F4 → §4.1); sentence records (F5 → §4.2c); visibility-gating + lifecycle (scale M1/M3 → §4.3); pagination (scale M2 → §4.2c); listInsights LIMIT+index (scale B1 → §3); coordinated render (adv M1 → §4.3); severity not visual (adv M2 → omitted entirely §4.2c); jsdom not Playwright (integ F2 → §6).
+
+## 10. Deferred (tracked fast-follows — own future specs when warranted)
+
+- **Auto-"Attention" alarm headline** + the structural **`InsightRecord.provenance`** contract (diversity-gate proof) it requires — when the loop reaches insight-push maturity.
+- **Tunnel-aware exposure of repo internals** (commit OIDs, paths) — needs a real second-factor (bearer-token route, not PIN), not a localhost+XFF guess.
+- **Server-side `POST /failures` input caps + sanitization** — the real fix; this spec's caps are defense-in-depth.
+- **`contract.version` enforcement** between this tab and the loop's API shape — when the loop API stabilizes post-1.0.
+- **Real-browser visual smoke** (puppeteer) — if the text-projection smoke proves insufficient.
+- **Dashboard SPA modularization** (split `index.html`) — separate spec.

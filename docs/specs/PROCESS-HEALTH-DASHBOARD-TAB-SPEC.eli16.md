@@ -12,7 +12,7 @@ The loop is live (it's been quietly watching our own development since this morn
 
 Picture the difference between reading a friend's text message and reading a server log. We want the friend's text message.
 
-**Top of the page** — one big, plain status line, like *"Healthy — no patterns flagged this week"*. Big enough to read across the room. That's it: that's the answer to "should I care right now?"
+**Top of the page** — one big, plain line, like *"Watching — 4 issues recorded so far."* Big enough to read across the room. It's informational, not an alarm — this first version deliberately doesn't try to shout "everything's fine!" or "emergency!", because an automated all-clear/alarm that could be wrong or gamed is worse than an honest "here's what I'm watching." (If the connection to the data drops, the line honestly says "Connection paused — showing the last view" instead of pretending.)
 
 **Below that** — *"Patterns to know about"*. When the loop spots something, it shows up here as a short readable card: what it found, what it recommends, and whether the fix worked. Right now it's the friendly empty state ("nothing yet — needs more variety in the data first").
 
