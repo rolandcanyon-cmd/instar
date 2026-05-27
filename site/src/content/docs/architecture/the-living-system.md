@@ -72,6 +72,8 @@ The immune system is the most layered part of the organism. It has innate immuni
 | **identity-review** | Job (daily) | Self-model maintenance. Checks whether behavior aligns with AGENT.md and soul.md. |
 | **overseer-learning** | Job (2 days) | Meta-learning. Is the agent actually getting smarter, or is the learning pipeline busy-work? |
 | **mentor-onboarding** | Job (15m, off) | Framework-onboarding mentor heartbeat. Pokes the in-process mentor tick that drives a mentee framework as the user, runs the leak-detector, and captures behavioral issues to the framework ledger. Ships dormant. |
+| **failure-analyzer** | Job (weekly, off) | Failure-learning. Scans the failure ledger for dev-process patterns, surfaces evidence-thresholded insights, and opens human-approved improvements — never auto-implements. Closes the loop from "a fix broke" back to "the process that produced it." Ships dormant. |
+| **initiative-digest-review** | Job (2x/week) | Rollout self-drive. Reviews the initiative board, surfaces decisions that are waiting, and for staged features gathers promotion evidence (dry-run → live → default-on) and recommends the next step. Recommends; never flips a flag. |
 
 **How it flows:** reflection-trigger captures raw learnings → insight-harvest finds patterns → EvolutionManager creates proposals → evolution-proposal-evaluate approves → evolution-proposal-implement builds → memory-hygiene prunes → memory-export consolidates → identity-review checks alignment. overseer-learning watches the whole pipeline.
 
