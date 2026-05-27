@@ -529,6 +529,21 @@ export interface OutgoingMessage {
  * Messaging adapter interface.
  * Implement this for each platform (Telegram, Slack, Discord, etc.)
  */
+/**
+ * An adapter's durable "where I left off" marker (spec §Channel Seamlessness
+ * Contract). Telegram = the long-poll update_id offset; Slack = the
+ * per-conversation lastTs cursor. Serializable into synced state.
+ */
+export interface IngressPosition {
+  platform: string;
+  /** Opaque, adapter-specific resumable cursor (e.g. update_id offset, lastTs). */
+  cursor: string | number | null;
+  /** When this position was captured (ISO). */
+  capturedAt: string;
+  /** Optional per-conversation cursors (Slack channelResumeMap). */
+  perConversation?: Record<string, string | number>;
+}
+
 export interface MessagingAdapter {
   /** Platform name (e.g., "telegram", "slack") */
   platform: string;
@@ -542,6 +557,23 @@ export interface MessagingAdapter {
   onMessage(handler: (message: Message) => Promise<void>): void;
   /** Resolve a platform-specific identifier to a user ID */
   resolveUser(channelIdentifier: string): Promise<string | null>;
+
+  // ── Channel Seamlessness Contract (spec §, optional — opt-in per adapter) ──
+  // An adapter is "seamless-ready" only once it implements these AND passes the
+  // §10 contract-conformance suite. Optional so existing adapters compile
+  // unchanged; the seamless handoff path checks for their presence.
+  /** The adapter's durable resumable position, serializable into synced state. */
+  getIngressPosition?(): IngressPosition;
+  /** Stop the inbound loop, drain/discard in-flight deterministically, return the durable position AFTER stop. */
+  stopConsuming?(): Promise<IngressPosition>;
+  /** Resume the inbound loop from exactly the given position. */
+  resumeConsuming?(position: IngressPosition): Promise<void>;
+  /**
+   * A stable provider-level identity for an inbound raw event (Telegram
+   * update_id; Slack event_id/client_msg_id), used by the message-processing
+   * ledger so a redelivered event is recognized and not re-acted-on.
+   */
+  dedupeKey?(rawEvent: unknown): string;
 }
 
 // ── Monitoring ──────────────────────────────────────────────────────
