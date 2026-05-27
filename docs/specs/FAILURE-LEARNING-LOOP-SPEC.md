@@ -4,13 +4,18 @@ slug: failure-learning-loop
 author: echo
 created: 2026-05-26
 owner: echo
-status: draft
+status: approved
 eli16-overview: FAILURE-LEARNING-LOOP-SPEC.eli16.md
 topic: 13201
 review-convergence: "2026-05-27T02:50:41.323Z"
 review-iterations: 3
 review-completed-at: "2026-05-27T02:50:41.323Z"
 review-report: "docs/specs/reports/failure-learning-loop-convergence.md"
+approved: true
+approver: justin
+approved-by: justin
+approved-at: "2026-05-27T03:21:00Z"
+approved-date: 2026-05-26
 ---
 
 # Failure-Learning Loop — attributing downstream failures to the spec, project, and dev toolchain that produced them
