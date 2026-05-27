@@ -4294,20 +4294,21 @@ export function createRoutes(ctx: RouteContext): Router {
     res.json(ctx.mentorRunner.status());
   });
 
-  router.post('/mentor/tick', async (_req, res) => {
+  router.post('/mentor/tick', (_req, res) => {
     if (!ctx.mentorRunner) {
       res.status(503).json({ error: 'mentor runner unavailable' });
       return;
     }
-    // The built-in mentor job (off by default) hits this each tick. When the
-    // feature is disabled this returns {ran:false, reason:'disabled'} — no spawn,
-    // no spend. The structural loop lives in runMentorTick (signal-only).
-    try {
-      const result = await ctx.mentorRunner.tick();
-      res.json(result);
-    } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+    // The built-in mentor job (off by default) hits this each tick. The tick runs
+    // FIRE-AND-FORGET (a slow Stage-A spawn must not hang this request — the
+    // gate-latency-vs-client-timeout failure mode); the outcome lands in
+    // GET /mentor/status .lastResult. When disabled, this returns 200 disabled.
+    const r = ctx.mentorRunner.startTick();
+    if (r.reason === 'disabled') {
+      res.json({ ran: false, reason: 'disabled' });
+      return;
     }
+    res.status(202).json({ accepted: r.accepted, reason: r.reason ?? null });
   });
 
   // ── Jobs ────────────────────────────────────────────────────────

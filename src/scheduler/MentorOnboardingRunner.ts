@@ -49,6 +49,8 @@ export interface MentorRunnerServices {
   budgetOk: () => boolean;
   /** Build the conversation surface (Stage A's only input). */
   getSurface: (framework: string) => ConversationSurface;
+  /** Persist-only delivery to the mentee (live mode only; never spawns). */
+  deliverToMentee?: (framework: string, message: string) => void;
   /** Called once when a tick actually RAN (ran=true) — lets the host advance the
    *  min-interval clock and the per-day run counter. */
   onTickRan?: () => void;
@@ -67,9 +69,58 @@ export class MentorOnboardingRunner {
     private readonly getConfig: () => MentorConfig,
   ) {}
 
-  status(): { enabled: boolean; mode: MentorConfig['mode']; menteeFramework: string } {
+  private inFlight = false;
+  private lastResult: (MentorRunResult & { at: number }) | null = null;
+
+  status(): {
+    enabled: boolean;
+    mode: MentorConfig['mode'];
+    menteeFramework: string;
+    inFlight: boolean;
+    lastResult: (MentorRunResult & { at: number }) | null;
+  } {
     const cfg = this.getConfig();
-    return { enabled: cfg.enabled, mode: cfg.mode, menteeFramework: cfg.menteeFramework };
+    return {
+      enabled: cfg.enabled,
+      mode: cfg.mode,
+      menteeFramework: cfg.menteeFramework,
+      inFlight: this.inFlight,
+      lastResult: this.lastResult,
+    };
+  }
+
+  /**
+   * Fire-and-forget tick for the heartbeat route (§19.4 live-readiness). Returns
+   * immediately (202 semantics) so a slow Stage-A spawn can't hang the HTTP
+   * request (the gate-latency-vs-client-timeout failure mode). A single in-flight
+   * guard prevents overlapping ticks; the outcome lands in `status().lastResult`.
+   * Disabled config still short-circuits synchronously to `disabled`.
+   */
+  startTick(): { accepted: boolean; reason?: string } {
+    const cfg = this.getConfig();
+    if (!cfg.enabled || cfg.mode === 'off') {
+      this.lastResult = { ran: false, reason: 'disabled', at: (this.services.now ?? Date.now)() };
+      return { accepted: false, reason: 'disabled' };
+    }
+    if (this.inFlight) return { accepted: false, reason: 'in-flight' };
+    this.inFlight = true;
+    void this.tick()
+      .then((r) => {
+        this.lastResult = { ...r, at: (this.services.now ?? Date.now)() };
+      })
+      .catch((err) => {
+        this.lastResult = {
+          ran: false,
+          reason: 'stage-a-failed',
+          at: (this.services.now ?? Date.now)(),
+        } as MentorRunResult & { at: number };
+        // eslint-disable-next-line no-console
+        console.warn('[mentor] tick failed:', err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        this.inFlight = false;
+      });
+    return { accepted: true };
   }
 
   /** Run one tick. Short-circuits to `disabled` when the feature is off (§16). */
@@ -90,6 +141,7 @@ export class MentorOnboardingRunner {
       spawnStageA: this.services.spawnStageA,
       runStageBForensics: () => this.services.runStageBForensics(framework),
       capture: this.services.capture,
+      deliverToMentee: this.services.deliverToMentee,
       now: this.services.now,
     });
     if (result.ran) this.services.onTickRan?.();

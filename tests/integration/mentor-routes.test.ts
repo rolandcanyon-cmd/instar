@@ -57,7 +57,7 @@ describe('Mentor routes (integration)', () => {
     const runner = new MentorOnboardingRunner(fakeServices(), () => ({ ...DEFAULT_MENTOR_CONFIG }));
     const res = await request(appWith(runner)).get('/mentor/status');
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ enabled: false, mode: 'off', menteeFramework: 'codex-cli' });
+    expect(res.body).toMatchObject({ enabled: false, mode: 'off', menteeFramework: 'codex-cli', inFlight: false });
   });
 
   it('POST /mentor/tick returns {ran:false, reason:"disabled"} by default (dormant)', async () => {
@@ -67,12 +67,16 @@ describe('Mentor routes (integration)', () => {
     expect(res.body).toEqual({ ran: false, reason: 'disabled' });
   });
 
-  it('POST /mentor/tick runs a tick when enabled + safe + in budget', async () => {
+  it('POST /mentor/tick is fire-and-forget (202) when enabled; result lands in status', async () => {
     const cfg: MentorConfig = { ...DEFAULT_MENTOR_CONFIG, enabled: true, mode: 'dry-run' };
     const runner = new MentorOnboardingRunner(fakeServices(), () => cfg);
-    const res = await request(appWith(runner)).post('/mentor/tick');
-    expect(res.status).toBe(200);
-    expect(res.body.ran).toBe(true);
-    expect(res.body.mode).toBe('dry-run');
+    const app = appWith(runner);
+    const res = await request(app).post('/mentor/tick');
+    expect(res.status).toBe(202);
+    expect(res.body.accepted).toBe(true);
+    await new Promise((r) => setTimeout(r, 10)); // let the async tick settle
+    const status = await request(app).get('/mentor/status');
+    expect(status.body.lastResult?.ran).toBe(true);
+    expect(status.body.lastResult?.mode).toBe('dry-run');
   });
 });
