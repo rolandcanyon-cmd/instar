@@ -203,3 +203,22 @@ The biological metaphor isn't decorative — it's a diagnostic framework.
 - [Default Jobs](/reference/default-jobs) — Detailed descriptions of all 26 scheduled jobs
 - [Self-Healing](/features/self-healing) — The user-facing perspective on recovery
 - [Evolution System](/features/evolution) — How the Memory & Learning system appears to users
+
+---
+
+## Inter-agent comms (the new building block)
+
+A small set of internal modules powers the agent-to-agent Telegram comms primitive — the
+groundwork for one Instar agent messaging another over Telegram with built-in anti-loop
+machinery. **Ships dark today**; the mentor system will be its first consumer:
+
+- **`AgentTelegramComms`** — the pure logic: visible `[a2a:from=… to=… role=… id=… corr=…
+  ts=… v=1]` marker, strict parser, the recipient routing decision (with the user-spoof
+  defense — a human typing the marker is dropped, not routed), and cycle-detection on
+  `(fromBot, toBot, topic, role, corr)`.
+- **`AgentTelegramLedger`** — append-only JSONL of every send and every receive decision.
+  Best-effort + non-throwing (an audit-write failure cannot crash a tick).
+- **`ProcessedIdStore`** — bounded persistent set of recently-seen marker ids so a
+  Telegram retry or adapter restart can't double-inject the same prompt.
+
+See `docs/specs/MENTOR-LIVE-READINESS-SPEC.md` for the full design.
