@@ -22,9 +22,11 @@ describe('buildForensicPrompt', () => {
     expect(p).toMatch(/JSON array/);
     expect(p).toContain('some error log');
   });
-  it('bounds the signals length', () => {
+  it('bounds the signals length (slices to 12000 + a fixed preamble)', () => {
     const p = buildForensicPrompt('x', 'a'.repeat(20000));
-    expect(p.length).toBeLessThan(13000);
+    // Signals are capped at 12000; the preamble is a fixed ~1.5k of instructions.
+    expect(p.length).toBeLessThan(14000);
+    expect(p).not.toContain('a'.repeat(12001)); // the 20k signal was truncated
   });
 });
 
@@ -65,6 +67,27 @@ describe('parseForensicFindings — defensive', () => {
     expect(parseForensicFindings('the agent seems fine', 'x')).toEqual([]);
     expect(parseForensicFindings('{"not":"an array"}', 'x')).toEqual([]);
     expect(parseForensicFindings('[ broken json', 'x')).toEqual([]);
+  });
+
+  it('prefers the model-supplied stable dedupKey over the title', () => {
+    const raw = JSON.stringify([{ bucket: 'instar-integration-gap', title: 'InputGuard LLM review times out at 8000ms under load', severity: 'medium', dedupKey: 'inputguard-review-timeout' }]);
+    const f = parseForensicFindings(raw, 'codex-cli');
+    expect(f[0].dedupKey).toBe('codex-cli::inputguard-review-timeout');
+  });
+
+  it('derives a STABLE fallback key — volatile tokens (numbers/versions/units) stripped so phrasing variants merge', () => {
+    // Two phrasings of the SAME issue across ticks, both without a model dedupKey,
+    // differing only in volatile tokens (timeout value, wording). They must collapse.
+    const a = parseForensicFindings(JSON.stringify([{ bucket: 'instar-integration-gap', title: 'InputGuard review timeout at 8s' }]), 'codex-cli');
+    const b = parseForensicFindings(JSON.stringify([{ bucket: 'instar-integration-gap', title: 'InputGuard review timeout at 8000ms' }]), 'codex-cli');
+    expect(a[0].dedupKey).toBe(b[0].dedupKey); // volatile "8s"/"8000ms" stripped → same key
+    expect(a[0].dedupKey).not.toMatch(/\d/); // no digits leaked into the key
+  });
+
+  it('strips version/percent/hex tokens from the derived fallback key', () => {
+    const f = parseForensicFindings(JSON.stringify([{ bucket: 'framework-limitation', title: 'Process stale at v1.3.3 vs disk v1.3.14, session 019e681c, rate 42%' }]), 'codex-cli');
+    expect(f[0].dedupKey).not.toMatch(/1-3-3|1-3-14|019e681c|42/);
+    expect(f[0].dedupKey).toContain('process'); // stable symptom words kept
   });
 
   it('caps the number of findings per run', () => {
