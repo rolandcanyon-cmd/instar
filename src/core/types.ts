@@ -1476,6 +1476,58 @@ export interface MachineRegistryEntry {
   revokedBy?: string;
   /** Human-readable revocation reason */
   revokeReason?: string;
+  // ── Cross-Machine Seamlessness (spec v1) ──────────────────────────
+  /**
+   * Per-author monotonic sequence. Each authority-bearing registry write
+   * by this machine increments it. A pulled commit whose syncSequence is
+   * not strictly greater than the last applied for its author is discarded
+   * (replay/freshness guard, spec §8 G2).
+   */
+  syncSequence?: number;
+  /**
+   * leaseEpoch this entry was authored under. A pulled commit whose
+   * leaseEpoch is lower than the current committed epoch is discarded —
+   * catches a wiped/re-keyed machine whose per-author sequence reset to 0.
+   */
+  authoredUnderEpoch?: number;
+  /**
+   * Mesh protocol version this machine speaks. A machine below the
+   * fenced-lease protocol version is ineligible for the awake lease
+   * during a seamless handoff (partial-migration safety, spec §11).
+   */
+  protocolVersion?: number;
+  /**
+   * Set true on the FIRST commit from a re-keyed / freshly-joined machine.
+   * Such a first commit is accepted only if role is 'standby' + rejoined
+   * (spec §8 G2 unknown-key-first-commit constraint).
+   */
+  rejoined?: boolean;
+}
+
+/**
+ * Fenced lease — the single coordination primitive for "exactly one holder,
+ * safe under clock skew and partition" (spec §6). awake = holds the lease.
+ */
+export interface LeaseRecord {
+  /** machineId of the current holder */
+  holder: string;
+  /** Fencing token: monotonically increasing integer, the authority clock */
+  epoch: number;
+  /** ISO timestamp of acquisition (display/audit only — never election authority) */
+  acquiredAt: string;
+  /**
+   * Holder-local expiry (acquiredAt + leaseTtlMs). Used for the liveness
+   * heuristic and display; authority is the epoch, not this clock.
+   */
+  expiresAt: string;
+  /** Ed25519 signature over the canonical {holder,epoch,acquiredAt,expiresAt,nonce} */
+  signature: string;
+  /**
+   * Per-holder monotonic nonce. A tunnel lease message replaying a
+   * previously-seen nonce for the same holder is detected and ignored
+   * (spec §6 replay protection).
+   */
+  nonce: number;
 }
 
 export interface MachineRegistry {
@@ -1483,6 +1535,11 @@ export interface MachineRegistry {
   version: number;
   /** Map of machineId -> registry entry */
   machines: Record<string, MachineRegistryEntry>;
+  /**
+   * The current fenced lease (spec §6). Authority-bearing — only the lease
+   * holder may advance it via CAS. Absent on a fresh single-machine mesh.
+   */
+  lease?: LeaseRecord;
 }
 
 export interface MultiMachineConfig {
@@ -1500,6 +1557,46 @@ export interface MultiMachineConfig {
    * - 'independent': Both machines active with separate Telegram groups
    */
   coordinationMode?: CoordinationMode;
+
+  // ── Cross-Machine Seamlessness (spec v1 §9 Tunability) ────────────
+  // All optional with sane defaults; renamed to avoid collision with the
+  // 30-min MachineHeartbeat and 60s Threadline ConnectionManager intervals.
+  /** How often the lease holder refreshes its liveness/lease over the tunnel. Default 30s. */
+  ingressHeartbeatMs?: number;
+  /** Debounce window for committing DURABLE registry changes to git. Default 10s. */
+  registrySyncDebounceMs?: number;
+  /**
+   * Standby git-pull cadence. Default auto = failoverThresholdMs/4, validated
+   * against the < failoverThresholdMs/3 AND < leaseTtlMs invariants on startup.
+   */
+  standbyPullIntervalMs?: number;
+  /** Lease expiry; bounds worst-case transfer overlap. Default 2 × ingressHeartbeatMs. */
+  leaseTtlMs?: number;
+  /** Live-tail transport: 'tunnel' (low-latency) | 'git' (durable-only, cheaper N>3). Default 'tunnel'. */
+  liveTailTransport?: 'tunnel' | 'git';
+  /** RPO: max staleness of the standby's persisted live tail. Default 5s. */
+  liveTailMaxStalenessMs?: number;
+  /** How often the holder pushes a tail flush. Invariant: ≤ liveTailMaxStalenessMs. */
+  liveTailPushRateMs?: number;
+  /** How long the standby holds an out-of-order flush before declaring the gap unfillable. Default = leaseTtlMs. */
+  liveTailOutOfOrderTimeoutMs?: number;
+  /** Memory/bandwidth cap per topic; drop-oldest on overflow. Default 256KB. */
+  liveTailMaxBytesPerTopic?: number;
+  /** Max wait for a verified "caught up" ack before aborting graceful handoff. Default 5s. */
+  handoffAckTimeoutMs?: number;
+  /** Anti-oscillation floor (protects CONTINUATION LLM cost). Default 60s. */
+  minHandoffIntervalMs?: number;
+  /** After this, stop re-escalating an unresolved partition until the user acts. Default 5min. */
+  splitBrainEscalationCooldownMs?: number;
+  /** 'near-instant' (continuous tail buffer) | 'relaxed' (catch-up pull at handoff). Default 'near-instant'. */
+  handoffBar?: 'near-instant' | 'relaxed';
+  /** A message-ledger entry left 'processing' past this is re-runnable by the new holder. Default 5min. */
+  maxProcessingMs?: number;
+  /**
+   * Mesh protocol version override. Normally left unset (the build constant
+   * SEAMLESSNESS_PROTOCOL_VERSION applies); present so migrations/tests can pin it.
+   */
+  protocolVersion?: number;
 }
 
 // ── Agent Autonomy ──────────────────────────────────────────────────

@@ -60,6 +60,9 @@ import { SessionRecovery } from '../monitoring/SessionRecovery.js';
 import { MultiMachineCoordinator } from '../core/MultiMachineCoordinator.js';
 import { MachineIdentityManager } from '../core/MachineIdentity.js';
 import { GitSyncManager } from '../core/GitSync.js';
+import { RegistrySyncDebouncer } from '../core/RegistrySyncDebouncer.js';
+import { wireRegistrySync } from '../core/wireRegistrySync.js';
+import { assertSeamlessnessInvariants } from '../core/seamlessnessConfig.js';
 import { ProjectMapper } from '../core/ProjectMapper.js';
 import { CapabilityMapper } from '../core/CapabilityMapper.js';
 import { ScopeVerifier } from '../core/ScopeVerifier.js';
@@ -2378,6 +2381,12 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }
 
+    // Cross-Machine Seamlessness (spec §9) — resolve + validate the tunable
+    // knobs at startup. A violating config (e.g. a widened ingressHeartbeatMs
+    // that breaks the RPO bound) is REJECTED here with a clear message rather
+    // than degrading silently. Default/absent config resolves to valid values.
+    const seamlessness = assertSeamlessnessInvariants(config.multiMachine);
+
     // Read local signing key for machine route authentication
     let localSigningKeyPem = '';
     if (coordinator.enabled && coordinator.identity) {
@@ -2393,9 +2402,15 @@ export async function startServer(options: StartOptions): Promise<void> {
     // Only attempt git sync if the project directory is actually a git repo.
     // Standalone agents don't have git repos unless the user opted into cloud backup.
     let gitSync: GitSyncManager | undefined;
+    let registrySyncDebouncer: RegistrySyncDebouncer | undefined;
     const isGitRepo = fs.existsSync(path.join(config.projectDir, '.git'));
     const gitBackupEnabled = config.gitBackup?.enabled !== false;
-    if (coordinator.enabled && coordinator.isAwake && isGitRepo && gitBackupEnabled) {
+    // Construct gitSync for BOTH roles when this is a git-backed mesh machine:
+    // a standby needs it to pull, and a standby that later self-elects to awake
+    // (the Phase-0 scenario) must ALREADY have it so its role-change push fires.
+    // Only an awake machine pulls+pushes at boot; the durable registry push is
+    // driven by the RegistrySyncDebouncer below, gated on authority.
+    if (coordinator.enabled && isGitRepo && gitBackupEnabled) {
       try {
         gitSync = new GitSyncManager({
           projectDir: config.projectDir,
@@ -2411,11 +2426,29 @@ export async function startServer(options: StartOptions): Promise<void> {
           console.log(pc.green('  Git commit signing configured'));
         }
 
-        // Pull latest on startup
-        const syncResult = await gitSync.sync();
-        if (syncResult.pulled) {
-          console.log(pc.green(`  Git sync: pulled ${syncResult.commitsPulled} commit(s)`));
+        // Pull (and auto-push) latest on startup — awake machine only.
+        if (coordinator.isAwake) {
+          const syncResult = await gitSync.sync();
+          if (syncResult.pulled) {
+            console.log(pc.green(`  Git sync: pulled ${syncResult.commitsPulled} commit(s)`));
+          }
         }
+
+        // ── G2 wiring (spec §8 G2) — the Phase-0 fix, named explicitly ──
+        // MultiMachineCoordinator emits roleChange / leaseEpochChange; without
+        // a subscriber the durable push never fired. wireRegistrySync connects
+        // those events to a debounced, single-writer registry push. A
+        // wiring-integrity test asserts this subscription exists.
+        const gitSyncRef = gitSync;
+        registrySyncDebouncer = new RegistrySyncDebouncer({
+          commitAndPush: (msg, paths) => gitSyncRef.commitAndPush(msg, paths),
+          registryAbsPath: coordinator.managers.identityManager.registryPath,
+          isAuthoritative: () => coordinator.isAwake,
+          debounceMs: seamlessness.registrySyncDebounceMs,
+          logger: (m) => console.log(pc.dim(m)),
+        });
+        wireRegistrySync(coordinator, registrySyncDebouncer);
+        console.log(pc.dim('  Registry sync wired (roleChange/leaseEpoch → durable push)'));
       } catch (err) {
         // @silent-fallback-ok — git sync disabled gracefully
         console.log(pc.yellow(`  Git sync setup: ${err instanceof Error ? err.message : String(err)}`));
@@ -8270,6 +8303,7 @@ export async function startServer(options: StartOptions): Promise<void> {
         }
       }
 
+      registrySyncDebouncer?.stop();
       gitSync?.stop();
       coordinator.stop();
       coherenceMonitor.stop();
