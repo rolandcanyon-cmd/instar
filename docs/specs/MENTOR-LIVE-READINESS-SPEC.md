@@ -72,8 +72,14 @@ AND has no `activelyWorking` field, so a fresh endpoint is needed.
 `/idle` returns:
 ```json
 { "schemaVersion": 1, "idle": true, "bootId": "uuid-set-at-process-start",
-  "uptimeSec": 12345, "activeSessions": 0, "ts": "ISO-8601" }
+  "uptimeSec": 12345, "activeSessions": 0, "ts": "ISO-8601",
+  "reason": "active-session | startup-warmup | unknown (optional, diagnostic only)" }
 ```
+**`activeSessions` semantics (Codey's clarification):** sessions with *live work* — active
+autonomous jobs, active Telegram-spawned sessions, running task sessions. Reaped/idle/
+complete panes do NOT count. **If the local signal is ambiguous, the mentee returns
+`idle:false`** rather than guessing or omitting fields. `reason` is optional and Echo
+must NOT depend on it for v1 behavior (it's diagnostic for degradation reports only).
 
 Echo-side:
 - Probe `{mentor.menteeServerUrl}/idle` with 750ms timeout.
@@ -93,14 +99,24 @@ Echo-side:
 Every agent-to-agent message carries a structured, visible prefix in the message body:
 
 ```
-[a2a:from=<senderAgent> to=<recipientAgent> role=<role> id=<stable-uuid> v=1]
+[a2a:from=<senderAgent> to=<recipientAgent> role=<role> id=<stable-uuid> corr=<uuid> v=1]
 
 <message body>
 ```
 
-- **Visible in chat** — humans can audit at a glance (a real chat-log forensic property,
-  not a hidden metadata field).
-- **Parseable** — regex `^\[a2a:from=(\S+) to=(\S+) role=(\S+) id=(\S+) v=(\d+)\]\n\n`.
+- **Visible in chat** — humans can audit at a glance, AND **the Telegram chat history alone
+  is enough to reconstruct the round-trip when ledgers are unavailable** (Codey's
+  point — `corr` in the visible marker, not just audit metadata, so the trace is the chat).
+- **Field-value charset (Codey's tightening):** `[A-Za-z0-9._:-]+` for `from`/`to`/`role`/
+  `id`/`corr`; positive integer for `v`. UUIDs recommended for `id`/`corr`; parser accepts
+  any token matching the charset (so ULIDs etc. work for future senders).
+- **`corr` is optional in syntax, REQUIRED in semantics**: prompts omit `corr` (or set
+  `corr=id`); replies MUST set `corr=<prompt's id>` to thread the round-trip.
+- **Parser is strict** — regex anchored to start, consumes only the first line + the
+  required blank separator. Anything marker-*like* but malformed (charset violation,
+  missing required field, broken syntax) is an **A2A security event**: drop + audit row,
+  NEVER fall through to normal user handling (Codey's point — avoids spoof / broken sender
+  accidentally turning into a regular prompt).
 - **Versioned** (`v=1`) — schema bumps are explicit.
 - **No HMAC v1** — recipient trusts the marker if the sender Telegram bot identity is in
   the recipient's known-agents allowlist (the structural identity check is the Telegram bot
@@ -116,56 +132,89 @@ sendAgentMessage({
   toAgent: 'instar-codey',
   toBotToken: cfg.codey.mentorBotToken,   // the recipient's mentor-bot token
   toTopicId: cfg.codey.mentorTopicId,     // the dedicated topic in recipient's setup
-  role: 'mentor',
+  role: 'mentor',                          // MUST be in the caller's allowed-roles list
   message: '<the prompt>',
   correlationId?: 'optional-existing-id-for-reply-threading',
-}): Promise<{ ok: boolean; sentMessageId?: string; reason?: string }>
+}): Promise<{ ok: boolean; sentMessageId?: string; a2aId?: string; reason?: string }>
 ```
 
+- **Generic, not mentor-specific** (Codey's point): the primitive is reusable; caller
+  passes the `role` from a constructor-time allowed-roles list. For Codey's first
+  consumer, the only permitted outbound role is `mentor-reply` (produced only by the
+  mentor handler).
 - Instantiates (or reuses) a `TelegramAdapter` for the recipient's bot.
-- Prepends the marker; calls `sendToTopic(toTopicId, marker+body)`.
-- Returns `{ok, sentMessageId}` so consumers can correlate.
-- Logs every send to an audit ledger (`state/a2a-sent.jsonl`) — append-only.
+- Mints a stable `a2aId` (UUID) if `id` not supplied; prepends the marker; calls
+  `sendToTopic(toTopicId, marker+body)`.
+- **Returns `a2aId`** alongside `sentMessageId` so the caller can log the exact marker id
+  next to its local assistant response id (Codey's tightening).
+- **Audit row schema** (`state/a2a-sent.jsonl`, append-only): `localTs`, `direction:
+  'sent'`, `fromAgent`, `toAgent`, `role`, `id`, `corr` (if present), `telegramBotId`,
+  `topicId`, `sentMessageId`, `result: 'ok' | 'failed'`, `reason` (on failure). **No
+  tokens or secrets in ledgers.**
 
 ### Recipient side
 
-A new incoming-message handler registered with `TelegramAdapter.onMessage`:
+A new incoming-message handler registered with `TelegramAdapter.onMessage`. **The handler
+runs BEFORE normal user routing** so agent-origin messages cannot accidentally trigger
+generic courtesy/ack behavior on the user-message path (Codey's sharpening).
 
 ```ts
-agentMessageHandler(rawMsg): { handled: boolean; routedTo?: string }
+agentMessageHandler(rawMsg): { handled: boolean; routedTo?: string; dropReason?: string }
 ```
 
-- Parses the marker. If absent → not an agent message; fall through to normal user handler.
-- If present and `from` is in the known-agents allowlist (`config.agentTelegram.knownAgents`)
-  AND the sender bot ID matches → route to the appropriate handler (`role` → handler map).
-- **If marker present but `from` not allowlisted OR bot ID mismatch**: log as
-  `agent-marker-unknown` and drop (NEVER deliver to the normal user-message path — spoofing
-  defense; an unknown party adding a marker doesn't get user-level processing).
-- **Anti-loop discipline (the heart of the primitive)**:
-  - Agent-origin messages NEVER auto-trigger courtesy replies. The role-handler is the
-    only producer of any outgoing message in response.
-  - If the role-handler does produce a reply, it routes through `sendAgentMessage` with
-    `role=<original>-reply`, carrying the original `id` as `correlationId`. Replies are
-    marked, traceable, and visible.
-  - **A reply received (e.g. `mentor-reply`) NEVER triggers another `mentor` send.**
-    Outgoing mentor messages come only from the scheduled mentor cycle. Same for any
-    role-pair. Compile-time guard: the role-handler module's import surface lint forbids
-    `sendAgentMessage(role='X')` if it also reads `role='X-reply'` (no closed-loop within
-    one module).
-- Every received agent message logged to `state/a2a-received.jsonl` (append-only audit).
+**Routing matrix (Codey-designed, explicit + audited at every branch):**
+
+| Incoming shape | Decision | Audit row |
+|---|---|---|
+| No marker present | Fall through to normal user handling | (not an A2A event) |
+| Marker-like-but-malformed (charset / missing field / syntax) | **DROP** (security event, NEVER fall through) | `agent-marker-malformed` |
+| Valid marker, `to !== <localAgent>` | DROP | `agent-marker-wrong-recipient` |
+| Valid marker, unsupported `v` | DROP | `agent-marker-unsupported-version` |
+| Valid marker, `from` not in allowlist OR sender bot-ID mismatch | DROP (spoof defense) | `agent-marker-unknown` |
+| Valid marker, `id` already in processed-id ledger | DROP (idempotency — Telegram retry / adapter restart) | `agent-marker-duplicate` |
+| Valid allowlisted, `role` recognized | Strip marker → route to role-handler → record `id` in processed ledger | `agent-marker-routed` |
+| Valid allowlisted, role unexpected for this recipient (e.g. `mentor-reply` on Codey) | DROP (don't fall through to user) | `agent-marker-unexpected-role` |
+| Valid allowlisted, unknown role | DROP | `agent-marker-unknown-role` |
+
+**Processed-id ledger (Codey's idempotency point):** a small persistent set of recently-
+processed `id`s (bounded — last N=10_000 or M=30 days, whichever first) so retries/restarts
+can't re-inject the same prompt. File-backed at `state/a2a-processed-ids.json` via
+`SafeFsExecutor.atomicWriteJsonSync`, CAS single-writer.
+
+**Anti-loop discipline (sharpened per Codey):**
+- Agent-origin Telegram messages suppress ALL generic courtesy/ack behavior **before**
+  normal user routing sees them (the handler runs first).
+- The role-handler is the only producer of any outgoing message in response.
+- A role-handler may only produce roles from an **explicit allowlist** for that handler
+  (e.g. Codey's mentor-handler: consumes `mentor`, may produce only `mentor-reply` —
+  cannot send the same role it consumes).
+- **`mentor-reply` ingestion on Echo is finding-emission-only** — Stage-B parses → emits
+  `ForensicFinding[]` → `capture()`. MUST NOT call `spawnStageA`, `deliverToMentee`,
+  scheduler enqueue, or Threadline send. Import-surface lint enforces.
+- **Every drop path writes an audit row** (silent drops make Stage-B forensics painful).
+- Every received agent message (routed OR dropped) logged to `state/a2a-received.jsonl`
+  (append-only).
 
 ### Anti-loop infra: structural, not just rules
 
-1. **One outbound producer per `role`.** Each `role` has exactly one module that may send
-   it (`mentor` is sent only by the mentor tick; `mentor-reply` only by Codey's mentor
-   handler). Import-surface lint enforces.
-2. **Cycle-detection in flight.** If `sendAgentMessage` sees a recipient bot-id+topic that
-   matches an inflight conversation where the local agent received from that bot in the
-   last N seconds (default 5), it requires an explicit `cycle-ok: true` parameter or
-   refuses with a degradation event.
-3. **Round-trip audit ledger.** Both ledgers (sent + received) include role, ids, and
-   correlation chains. Stage-B / future debugging can prove there is no role→reply→role
-   path within a single tick boundary.
+1. **One outbound producer per `role`** + **role-handler allowlist** (Codey's sharpening).
+   Each role-handler is constructed with an explicit allowed-outbound-roles list and
+   `sendAgentMessage` refuses any role not in that list at runtime. Import-surface lint
+   AT BUILD TIME asserts the module's static `sendAgentMessage` callsites only reference
+   roles in the constructor's allowlist. **A role-handler cannot send the same role it
+   consumes** (a mentor-handler cannot send `mentor`; only `mentor-reply`).
+2. **Cycle-detection keyed precisely** (Codey's refinement): the detection key is
+   `(fromBotId, toBotId, topicId, role, corr)` — NOT just `(bot, topic)` — so legitimate
+   unrelated messages don't trip each other. Default window 5s, configurable. Trips →
+   require explicit `cycleOk: true` parameter or refuse with a `degradation` event.
+3. **Round-trip audit ledger.** Sent + received ledgers include role, ids, `corr`
+   correlation chains, bot/topic, and result. Stage-B / future debugging can prove there
+   is no role→reply→role path within a single tick boundary. **Every drop path also
+   writes** (no silent drops).
+4. **`mentor-reply` ingestion on Echo is finding-emission-only** (Codey's explicit
+   invariant): MUST NOT call `spawnStageA`, `deliverToMentee`, scheduler enqueue, or
+   Threadline send. Import-surface lint forbids those imports in the reply-ingestion
+   module. The only outbound effect is `capture({findings})`.
 
 ### Config
 
@@ -221,6 +270,10 @@ identity is honest (it's Echo's mentor bot, not a Justin impersonation), but the
   `tripped→ok`; file-backed persistence at `state/mentor-budget-notifications.json` via
   `SafeFsExecutor.atomicWriteJsonSync`; CAS single-writer; corrupt-state-file recovery
   with degradation event; optional `budgetReminderHours` long-trip reminder (default off).
+- **Mentor budget is Echo-side primarily** (Codey's surface check: his instance reports
+  `quotaTracking:false`). The budget gates **Echo's mentor-tick sending** — Echo's tokens
+  are the spend that needs capping. Codey's replies go through his normal handling on his
+  side; this fix does not require any quota wiring on Codey's side.
 
 ## Scope
 
@@ -284,22 +337,48 @@ identity is honest (it's Echo's mentor bot, not a Justin impersonation), but the
    - Next tick defers (no auto-recurrence). Capture token-ledger spend + ledger audit
      trail + any degradation events.
 
-## Co-design with Codey (NEW round, recipient-side substrate is now Telegram)
+## Co-design with Codey
 
-Round 1 (prior file-based design) is superseded by this redesign. New asks for Codey:
+**Round 1 (file-based) — superseded** by Justin's substrate correction.
 
-1. Add `agentTelegram.knownAgents` allowlist + `/idle` endpoint on his server.
-2. Implement the recipient-side `agentMessageHandler` for incoming Telegram messages with
-   the `[a2a:...]` marker — route `role=mentor` to a new mentor-message handler that
-   injects into his mentor-session as a user prompt; route `mentor-reply` to nothing on
-   his side (he's not the recipient of replies; Echo is).
-3. Implement `sendAgentMessage` on his side so his mentor-handler can write the `mentor-
-   reply` back to Echo's mentor bot.
-4. Confirm or adjust the marker schema (`[a2a:from=… to=… role=… id=… v=1]`).
-5. Confirm the anti-loop infra invariants (one outbound producer per role; cycle-
-   detection; audit ledgers).
+**Round 2 (Telegram-based) — CLOSED** (Threadline thread 14629926, 2026-05-27). Codey
+endorsed the substrate correction verbatim ("Telegram is the right substrate for this
+test; the previous file outbox made the transport easier but weakened the actual behavior
+being tested") AND **verified his own live capability surface** before answering (v1.3.15,
+Telegram bidirectional, Threadline enabled, mentor endpoints present, `quotaTracking:false`
+on his instance — applying [[feedback_report_verified_not_intended_behavior]]).
 
-Sent to Codey on a fresh Threadline thread + view link after Justin's nod on this draft.
+Codey's 5 substantive refinements (all folded above):
+1. **/idle** — add optional `reason` (diagnostic-only, Echo doesn't depend); sharpen
+   `activeSessions` semantics (live work only, not historical panes); ambiguous-signal →
+   `idle:false` rather than omit.
+2. **Recipient handler** — strict malformed-marker drop (security event, NEVER fall
+   through to user); explicit per-decision audit row; processed-id idempotency ledger
+   against Telegram retries / adapter restarts.
+3. **Sender** — make generic (not mentor-specific); caller passes allowed-roles list at
+   construction; return `a2aId` alongside `sentMessageId`; full audit-row schema
+   (no secrets in ledgers).
+4. **Marker schema** — constrain field-value charset to `[A-Za-z0-9._:-]+` + integer for
+   `v` (deterministic parsing, avoids invisible/escaping cases); add **visible `corr=`**
+   field so Telegram chat history alone reconstructs the round-trip when ledgers
+   unavailable.
+5. **Anti-loop invariants** — agent-origin messages suppress courtesy/ack BEFORE normal
+   user routing sees them; role-handler explicit allowed-outbound-roles list (cannot send
+   the role it consumes); `mentor-reply` ingestion on Echo MUST be finding-emission-only
+   (no Stage A, no `deliverToMentee`, no scheduler enqueue, no Threadline send); cycle-
+   detection key is `(fromBotId, toBotId, topicId, role, corr)`, not just bot+topic;
+   every drop path writes an audit row.
+
+**Implementation note Codey raised:** the Codey-side PR should land in the **instar source
+package** (the upstream that produces the shadow-install), NOT as a hand-edit under
+`.instar/shadow-install`. The primitive ships as part of instar; per-agent config
+(agentTelegram allowlist + mentor.botToken) is the only per-agent piece.
+
+**Quota-budget on Codey's side (Codey's surface check):** his instance reports
+`quotaTracking:false`, so Fix 3 (quota-aware budget) is primarily an **Echo-side**
+mechanism — Codey doesn't gate his own work against quota for this loop. The mentor
+budget gates Echo's *sending* (Echo's tokens are the spend); Codey's responses go through
+his own normal handling. Documented in §Fix 3 below.
 
 ## Honesty / lessons applied
 
