@@ -12,6 +12,7 @@ import express, { type Express, type Request, type Response } from 'express';
 import type { Server } from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { SessionManager } from '../core/SessionManager.js';
@@ -44,6 +45,9 @@ import { createWorktreeRoutes, createOidcWorktreeRoutes } from './worktreeRoutes
 import { registerRemediationProposalsRoutes } from './routes/remediation-proposals.js';
 import { TrustElevationSource } from '../remediation/TrustElevationSource.js';
 import { createTopicIntentRoutes } from './topicIntentRoutes.js';
+import { createFailureRoutes } from './failureRoutes.js';
+import { FailureLedger } from '../monitoring/FailureLedger.js';
+import { FailureAttributionEngine } from '../monitoring/FailureAttributionEngine.js';
 import { createSpecReviewRoutes } from './specReviewRoutes.js';
 import { createUsherRoutes } from './usherRoutes.js';
 import type { TopicIntentStore } from '../core/TopicIntent.js';
@@ -607,6 +611,53 @@ export class AgentServer {
       topicIntentStore: options.topicIntentStore ?? null,
     });
     this.app.use(topicIntentRoutes);
+
+    // Failure-Learning Loop (docs/specs/FAILURE-LEARNING-LOOP-SPEC.md) — instar
+    // self-hosting dev-process forensics. Mounted UNCONDITIONALLY; when the
+    // feature is OFF (default) every /failures route 503-stubs, so the surface
+    // always exists for capability probing. When on, the FailureLedger + the
+    // attribution engine come alive. Toolchain attribution is instar-repo-local
+    // (the trace machinery only exists in the dev checkout — §3 scope).
+    try {
+      const flEnabled = options.config.monitoring?.failureLearning?.enabled === true;
+      let failureLedger: FailureLedger | null = null;
+      let failureAttribution: FailureAttributionEngine | null = null;
+      if (flEnabled && options.config.stateDir) {
+        failureLedger = new FailureLedger({
+          dbPath: path.join(options.config.stateDir, 'failure-ledger.db'),
+        });
+        const tracker = options.initiativeTracker ?? null;
+        failureAttribution = new FailureAttributionEngine({
+          getInitiative: (id) => {
+            const i = tracker?.get(id);
+            if (!i) return null;
+            return {
+              id: i.id,
+              parentProjectId: i.parentProjectId ?? undefined,
+              specPath: i.specPath ?? undefined,
+              mergeCommitOid: i.mergeCommitOid ?? undefined,
+              // coveredFiles (for the bugfix-commit cross-check) is sourced from
+              // the trace join when that ingestion source is wired (later slice).
+            };
+          },
+          commitTouchedFiles: (oid) => {
+            try {
+              const out = execFileSync('git', ['show', '--name-only', '--pretty=format:', oid], {
+                cwd: options.config.projectDir, encoding: 'utf8', timeout: 5000,
+              });
+              return out.split('\n').map((s) => s.trim()).filter(Boolean);
+            } catch { return []; }
+          },
+        });
+      }
+      this.app.use(createFailureRoutes({
+        ledger: failureLedger,
+        attributionEngine: failureAttribution,
+        enabled: flEnabled,
+      }));
+    } catch (err) {
+      console.warn('[agent-server] failed to register failure-learning routes:', err);
+    }
 
     // Standards-conformance gate (rung-3 normative slice): the spec-review gate
     // reads docs/STANDARDS-REGISTRY.md and signals possible standard violations.

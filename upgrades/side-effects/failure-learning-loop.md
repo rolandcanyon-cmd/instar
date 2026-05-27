@@ -61,3 +61,15 @@ Builds the Failure-Learning Loop (instar-self-hosting dev-process forensics). Fi
 **Signal-vs-authority:** read surface + a validated one-tap write; no gating/authority over other systems.
 **Rollback cost:** trivial — unmount the router; the ledger table is inert.
 **Deferred (next commit, same branch):** AgentServer boot-wiring (construct FailureLedger + AttributionEngine behind `failureLearning.enabled`, inject InitiativeTracker `getInitiative` + git `commitTouchedFiles`, `app.use`) so the feature is alive on the production init path (the Phase-1 E2E).
+
+### Commit 5 — AgentServer boot-wiring + config (feature alive on the prod path)
+
+- `src/core/types.ts` — **add** — `MonitoringConfig.failureLearning?` (enabled + the §4.4 diversity gates + §4.3 confidence floor + `insightTelegramEscalation`). Reached via `config.monitoring.failureLearning` (same home as `sessionReaper`).
+- `src/config/ConfigDefaults.ts` — **add** — `failureLearning` default, **ships OFF** (`enabled:false`, minSupport 4, minDistinctSessions/CauseCommits 3, attributionConfidenceFloor 0.6, insightTelegramEscalation false). ConfigDefaults + Config tests still green (27) — migrateConfig adds it for existing agents via existence-check (later commit covers PostUpdateMigrator if needed; ConfigDefaults covers fresh init).
+- `src/server/AgentServer.ts` — **modify** — mount `createFailureRoutes(...)` UNCONDITIONALLY right after `topicIntentRoutes` (surface always exists → 503-stub when off). When `monitoring.failureLearning.enabled`, construct the `FailureLedger` (db at `<stateDir>/failure-ledger.db`) + `FailureAttributionEngine` wired to `options.initiativeTracker.get()` (→ InitiativeView) and a git `show --name-only` `commitTouchedFiles` (5s timeout, returns [] on error). Wrapped in try/catch so a wiring failure logs + degrades, never crashes boot.
+
+**Over/under-block:** mounted unconditionally but inert when off (503-stub); construction is flag-gated + try/caught. `commitTouchedFiles` is only exercised by the bugfix-commit source (not the live POST path yet), and fails safe to [].
+**Level-of-abstraction fit:** boot-wiring mirrors the `topicIntentRoutes`/`specReviewRoutes` mount blocks exactly; deps from `options` (config, initiativeTracker) already present.
+**Signal-vs-authority:** wiring only.
+**Rollback cost:** trivial — flag stays false (default); unmount is a one-line revert. Typecheck clean; 26 failure tests + 27 config tests green.
+**Deferred (next, same branch):** the Phase-1 "feature alive" E2E that boots AgentServer with the flag ON and asserts /failures returns 200 (not 503) on the production init path; Process Health dashboard tab; the analyzer + closed loop; discoverability (capabilities + Registry-First + generateClaudeMd) + board self-registration.
