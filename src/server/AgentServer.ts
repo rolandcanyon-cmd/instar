@@ -430,26 +430,33 @@ export class AgentServer {
           maxFilesPerScan: 500,
           yieldEveryNFiles: 25,
         });
-        // Framework-Onboarding Mentor System issue ledger — read-only
-        // observability, signal-only (never gates). Instantiated here at
-        // startup so its two tables auto-create on first boot of this version
-        // (spec §14.3 — no schema migration needed). Lazy/best-effort: a
-        // failure leaves the /framework-issues routes returning 503, never
-        // blocking server startup.
-        try {
-          this.frameworkIssueLedger = new FrameworkIssueLedger({
-            dbPath: path.join(serverDataDir, 'framework-issue-ledger.db'),
-          });
-          this.mentorRunner = this.buildMentorRunner(this.frameworkIssueLedger, options, serverDataDir);
-        } catch (err) {
-          console.warn('[instar] framework-issue-ledger init failed (non-fatal):', err);
-          this.frameworkIssueLedger = null;
-          this.mentorRunner = null;
-        }
       }
     } catch (err) {
       console.warn('[instar] token-ledger init failed (non-fatal):', err);
       this.tokenLedger = null;
+    }
+
+    // Framework-Onboarding Mentor System issue ledger — read-only observability,
+    // signal-only (never gates). Its two tables auto-create on first boot (spec
+    // §14.3 — no schema migration needed). DELIBERATELY in its OWN try/catch,
+    // independent of TokenLedger: a TokenLedger init failure (e.g. a stale
+    // token-ledger.db schema on an existing agent) must NOT cascade and take the
+    // mentor ledger + runner down with it. (Found in production: an agent whose
+    // TokenLedger threw `no such column: attribution_key` had the mentor routes
+    // 503 purely because the two were sequenced in one try block.)
+    if (options.config.stateDir) {
+      try {
+        const serverDataDir = path.join(options.config.stateDir, 'server-data');
+        fs.mkdirSync(serverDataDir, { recursive: true });
+        this.frameworkIssueLedger = new FrameworkIssueLedger({
+          dbPath: path.join(serverDataDir, 'framework-issue-ledger.db'),
+        });
+        this.mentorRunner = this.buildMentorRunner(this.frameworkIssueLedger, options, serverDataDir);
+      } catch (err) {
+        console.warn('[instar] framework-issue-ledger init failed (non-fatal):', err);
+        this.frameworkIssueLedger = null;
+        this.mentorRunner = null;
+      }
     }
 
     // Routes
