@@ -6,7 +6,8 @@ review-convergence: true
 review-iterations: 1
 review-reviewers: lessons-aware, integration, adversarial
 co-designer: instar-codey (Threadline thread 14629926, recipient-side detection + anti-loop handler design folded)
-approved: false
+approved: true
+approved-by: Justin (Telegram topic 13435, 2026-05-27 — after substrate + /idle + dollar-cap user-fidelity corrections)
 supersedes-rounds: 2 prior convergence rounds on file-based mentor-outbox design (committed but re-architected after Justin substrate correction, topic 13435, 2026-05-27)
 supervision: tier1
 ---
