@@ -209,9 +209,19 @@
             duplicates/redeliveries, confirm no false-drops, THEN default-on / merge.
 - [ ] **E** — integration + e2e + fault-injection tests for the wired path.
 - [ ] **F** — build green + full battery + push + open NEW PR + CI green + merge to main.
-- [ ] **G** — real two-machine over-Telegram test-as-self (laptop awake + mini standby):
-      drive a live Telegram convo through a planned handoff AND a hard failover; verify from
-      the user's chair: no lost msg, no dup reply, no re-greet, thread continuity.
+- [~] **G** — real two-machine over-Telegram test-as-self (laptop awake + mini standby).
+      PROGRESS (2026-05-27, Justin said "go"): deploy mechanics VALIDATED on real hardware —
+      my dist builds + its JS loads on the mini (node v24.14.1) + better-sqlite3 OK; rsync to the
+      mini shadow-install (~/instar-mmtest/.instar/shadow-install/node_modules/instar/dist) +
+      restore both clean; Bob (:4040) + mmtest (:4050) stayed healthy throughout, Bob untouched.
+      **HARD BLOCKER (proven, code-confirmed): the handoff conductor + live-tail only wire when a
+      Telegram adapter is present (server.ts:8211/8272 gate on `telegram`), and BOTH mmtest agents
+      have `messaging: []` (no Telegram). So the over-Telegram conductor test REQUIRES an mmtest
+      Telegram bot token — only Justin can mint it (BotFather). Requested via topic 13481.**
+      The exactly-once GATE alone is testable without telegram (forward route + sessionManager),
+      but the headline live-handoff needs the token. To run when token arrives: mmtest config +=
+      a telegram bot + exactlyOnceIngress:true on BOTH; redeploy my dist to both; restart; mesh;
+      drive a convo through planned handoff + hard failover; assert from the chair; RESTORE.
 - [ ] **H** — final report to Justin (topic 13481) + memory update + upgrade note.
 
 ## Hard rules in play
