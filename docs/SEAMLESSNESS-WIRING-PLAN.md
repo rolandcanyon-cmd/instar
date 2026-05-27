@@ -132,12 +132,63 @@
               already check holdsLease (so they pause mid-handoff).
             * Add HandoffWireTransport.sendBegin(manifest) (POST /api/handoff/begin) — symmetric
               with sendAck/sendYield. Unit-test it.
-      - [ ] C3: two-server e2e planned handoff (B catches up, acks, A verifies, yields, B
-            acquires) + wiring-integrity (sentinel constructed in startup).
+      - [x] C3: two-server e2e planned handoff — landed WITH C2b (commit c2848d4c9):
+            tests/e2e/planned-handoff-e2e.test.ts (4) proves caught-up→handed-off+acquire+demote,
+            divergent→aborted-stay-awake+no-yield (no-two-holders over the wire), route alive/503.
       NOTE: LiveTailBuffer may need a public `getAppliedSeq(topic)` accessor (the tailSeq
       refinement above).
-- [ ] **D** — verify G3a message-ledger gates the REAL Telegram ingress (exactly-once) +
-      CONTINUATION resume on the receiving machine (no re-greet).
+- [ ] **D** — wire the G3a MessageProcessingLedger into the LIVE message loop (exactly-once).
+      ⚠ SAFETY-CRITICAL: this touches the single most important path (every user message). The
+      spec's no-loss is a HARD guarantee (§8 G3a, lines 199-205): the ingress cursor advances
+      ONLY on durable completion, and `reply_committed` is tied to the ACTUAL outbound reply —
+      NOT the inject. A partial version that treats "injected" as "handled" would DROP a reply on
+      a crash-after-inject-before-reply. So D must be COMPLETE, and test-as-self'd on a live agent
+      BEFORE merge (this is inherently a "Justin's machines" step). Build in this order, each its
+      own commit + trace + side-effects + tested:
+
+      GROUNDED HOOK POINTS (verified 2026-05-27):
+        * dedupeKey = Telegram `update_id` (spec line 92). Lifeline forward body (TelegramLifeline
+          .forwardToServer, ~:1305) currently sends `messageId` (message_id) + NOT update_id —
+          ADD `updateId` to the forward body (additive, backward-compat; server falls back to
+          `telegram:${topicId}:${messageId}` if absent).
+        * Lifeline poll loop advances the offset IMMEDIATELY (TelegramLifeline.poll, :902-905:
+          `lastUpdateId = max(...); saveOffset()` right after processUpdate). The "cursor advances
+          only on cursor_advanced" rule means this advance must be gated on the server confirming
+          durable completion (forward response carries `{handled:true|deferred}`); the offset only
+          advances on confirmed-handled. THIS is the riskiest change — get it wrong → ingress
+          stalls or re-delivers forever. Needs a fault-injection test (crash before confirm →
+          replay → ledger no-ops).
+        * Server inject chokepoint = routes.ts `POST /internal/telegram-forward` (:8612), inject at
+          :8832, spawn-branch at :8895. Gate: record(dedupeKey) → isActedOn? return {handled:true,
+          duplicate:true} (DROP, no re-inject) : beginProcessing(leaseEpoch) → inject/spawn.
+        * reply_committed: hook the OUTBOUND reply path (telegram-reply.sh → the send route) so
+          commitReply(dedupeKey, computeReplyIdempotencyKey(dedupeKey, idx), epoch) fires when the
+          agent's reply is actually sent — NOT at inject. The dedupeKey must flow from inbound →
+          the reply (thread it through the injected context / a per-topic "current inbound" map),
+          since telegram-reply.sh today doesn't know the update_id. cursor_advanced after the
+          reply commits durably.
+        * leaseEpoch source: coordinator's fenced lease epoch (GET /health multiMachine.syncStatus
+          .leaseEpoch, or coordinator.getLeaseEpoch()). Pass into beginProcessing/commitReply.
+        * cross-machine marker: applyRemoteReplyMarker propagated over BOTH tunnel + git (the lease
+          medium). Lower priority — the lease already ensures only ONE machine forwards, so cross-
+          machine double-handle is already prevented; this is belt-and-suspenders for the failover
+          window. Can be a tracked follow-on AFTER the same-machine guarantee + offset coordination.
+
+      DECOMPOSITION (safe order):
+      - [ ] D1 (signal-only, safe, no behavior change): construct MessageProcessingLedger in server
+            boot (MessageProcessingLedger.open(agentId, stateDir)); record() each inbound event in
+            the forward handler; expose GET /message-ledger/recent (read-only). NO drop, NO offset
+            change. Wiring-integrity + integration test. This is the codebase's "signal before
+            authority" first layer — observability only, clearly labeled as NOT yet enforcing.
+      - [ ] D2 (authority — needs test-as-self before merge): the dedup DROP at inject +
+            beginProcessing(epoch) + the lifeline offset-on-confirm coordination + reply_committed
+            on the real outbound + cursor_advanced. Fault-injection tests at every boundary
+            (§8 G3a / §10: crash after ack before cursor, after cursor before reply, mid-send).
+      - [ ] D3 (CONTINUATION resume): the receiving machine resumes the conversation via
+            CONTINUATION (no re-greet) — verify it reads the live-tail'd history + handoff manifest
+            so the first post-handoff reply remembers context. Mostly already present (CONTINUATION
+            path exists); D3 is verification + the wiring-integrity that the standby's loaded
+            history feeds the resume briefing.
 - [ ] **E** — integration + e2e + fault-injection tests for the wired path.
 - [ ] **F** — build green + full battery + push + open NEW PR + CI green + merge to main.
 - [ ] **G** — real two-machine over-Telegram test-as-self (laptop awake + mini standby):
