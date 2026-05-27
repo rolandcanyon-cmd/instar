@@ -3,7 +3,8 @@ title: "Cross-Machine Seamlessness"
 slug: "cross-machine-seamlessness"
 author: "echo"
 eli16-overview: "CROSS-MACHINE-SEAMLESSNESS-SPEC.eli16.md"
-principal-deferral-approval: pending  # the port-collision / runnable-config onboarding gaps (recurrence-risk) are deferred to the companion Self-Propagation spec; requires Justin sign-off before that spec is approved
+approved: true  # Justin approved 2026-05-27 over Telegram (topic 13481), after reviewing the 5-round convergence result
+principal-signoff: approved  # onboarding/self-install gaps are owned by ACT-156 (companion Self-Propagation spec); this spec's scope is approved as-is
 review-convergence: "2026-05-27T05:52:19.795Z"
 review-iterations: 5
 review-completed-at: "2026-05-27T05:52:19.795Z"
@@ -16,7 +17,7 @@ review-report: "docs/specs/reports/cross-machine-seamlessness-convergence.md"
 
 **Status**: Draft v1 (converged through multi-angle review; grounded in real-hardware verification 2026-05-26)
 **Author**: Echo (with Justin's direction)
-**Builds on**: [`MULTI-MACHINE-SPEC.md`](./MULTI-MACHINE-SPEC.md) (v3, converged) — this spec does NOT replace it; it closes the seamlessness gap that v3 explicitly deferred.
+**Builds on**: [`MULTI-MACHINE-SPEC.md`](./MULTI-MACHINE-SPEC.md) (v3, converged) — this spec does NOT replace it; it closes the seamlessness gap that v3 explicitly left open.
 **Companion (read first)**: [`CROSS-MACHINE-SEAMLESSNESS-SPEC.eli16.md`](./CROSS-MACHINE-SEAMLESSNESS-SPEC.eli16.md)
 **Motivating initiative**: Instar × EXO 3.0 — cross-machine single-agent ("one Luna across machines"), Pillar 2.
 
@@ -41,7 +42,7 @@ review-report: "docs/specs/reports/cross-machine-seamlessness-convergence.md"
 
 ## Overview
 
-The converged multi-machine spec (v3) delivered machine identity, secure pairing, git-based state sync, primary/standby coordination, heartbeat/failover, and graceful handoff *machinery*. What it explicitly deferred — and what the EXO 3.0 "cross-machine single agent" vision needs most — is **seamlessness**: the experience that an agent is one logical identity that follows the user across machines with no loss of in-flight context.
+The converged multi-machine spec (v3) delivered machine identity, secure pairing, git-based state sync, primary/standby coordination, heartbeat/failover, and graceful handoff *machinery*. What it explicitly left for a follow-on — and what the EXO 3.0 "cross-machine single agent" vision needs most — is **seamlessness**: the experience that an agent is one logical identity that follows the user across machines with no loss of in-flight context.
 
 **The yardstick is the user's experience in the channel** (Telegram is the default and reference; Slack and any other channel must work equally), not internal state mechanics. "Seamless" is defined entirely from the user's side: a person is mid-conversation with the agent over Telegram; the agent quietly moves machines underneath them; and the person notices *nothing* worse than a brief "getting up to speed" beat. The internal state sync exists only to deliver that channel experience. Every design choice below is justified by a user story, not by architectural elegance.
 
@@ -287,5 +288,5 @@ Existing multi-machine agents must receive this on update, not just new ones:
 
 - **Companion spec — Agent Self-Propagation Standard.** Justin's standard (one human authorization to grant an agent access to a new machine, then the agent installs itself and everything downstream). The Phase 0 onboarding findings feed it directly: the two-bootstrap access problem (SSH + git credential), `join` not creating a runnable `config.json`, and the default-port (4040) collision risk with an existing agent. **A joining machine must pick a free port and write a runnable config** — tracked there, not here.
 - **Server bring-up on a guarded/new machine.** `instar server start` is (correctly) blocked from inside an agent session. The self-propagation flow must define how an agent brings up its *own* server on a new machine without that guard — likely launchd/supervisor registration performed in the onboarding step. Open question for the companion spec.
-- **Closed by v1 (were open in v0):** clock-skew in elections (now epoch-fenced, not wall-clock); live-tail privacy (now normative §8 G3c). Retained as **explicit, principal-approvable deferrals only if** the launch increment scopes Slack to best-effort `lastTs` before the full Events-API dedup path — flagged for sign-off, not silently dropped.
+- **Closed by v1 (were open in v0):** clock-skew in elections (now epoch-fenced, not wall-clock); live-tail privacy (now normative §8 G3c). Retained as **explicit, principal-approvable deferrals only if** the launch increment scopes Slack to best-effort `lastTs` before the full Events-API dedup path — flagged for sign-off, not silently dropped. <!-- tracked: ACT-156 -->
 - **Open: lease medium under total partition.** When neither tunnel nor git is reachable between machines but both can reach the user channel, no shared medium can advance the epoch — the design correctly degrades to "each fences on its own last-known lease and self-suspends ingress if it can't refresh," but the *product* choice of which side keeps serving in a true split is the user-escalation path; whether a third arbiter (e.g. the channel itself as a tiebreak token) is worth adding is an open question.
