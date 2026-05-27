@@ -69,7 +69,30 @@
       - [x] C2a: HandoffWireTransport.sendBegin + createHandoffSentinelWiring factory + unit
             tests (5: happy hands-off; mismatch/no-ack/failed-validate/unreachable-peer all
             abort with zero yield/demote). (commit 50e4ca77c)
-      - [ ] C2b: bolt the sentinel into server.ts boot — CONFIRMED FINDINGS for the next session:
+      - [x] C2b + C3 (landed together — POST /handoff/initiate touches src/server so the
+            e2e-pairing gate forces the two-server e2e in the same commit):
+            * src/core/handoffSentinelBootWiring.ts — extracted boot factory (active-topic
+              picker + dep binding) so the glue is unit-tested, not inline. server.ts boot
+              calls it inside the live-tail block (handoffWireTransport-gated); exposes
+              initiate + sentinel.inProgress to outer scope.
+            * src/server/handoffInitiateRoutes.ts — POST /handoff/initiate (bearer) returns
+              {outcome,inProgress}; failed→500, handed-off/aborted→200; unwired→503. GET
+              /handoff/status. AgentServer: onHandoffInitiate? + handoffInProgress? options,
+              mounted after global auth.
+            * server.ts: AgentServer gets onHandoffInitiate/handoffInProgress.
+            * tests/unit/handoff-sentinel-boot-wiring.test.ts (6) — wiring-integrity:
+              non-null sentinel, full happy initiate() delegates pushTick→sendBegin→awaitAck
+              →sendYield→demote in order, abort-on-mismatch never yields/demotes,
+              pickActiveTopic both sides.
+            * tests/e2e/planned-handoff-e2e.test.ts (4) — TWO real servers, real peer
+              resolvers: caught-up→handed-off+B acquires+A demotes; divergent history→
+              aborted-stay-awake+no yield+A keeps lease (no-two-holders over the wire);
+              route alive (200 outcome) + 503 unwired.
+            * Race guard: HandoffSentinel.inProgress is exposed (AgentServer option +
+              GET /handoff/status). There is NO existing holdsLease gate in scheduler/reaper
+              to wire it into, so wiring it into a nonexistent gate would be scope creep;
+              exposed for future consumers instead. <!-- tracked: topic-13481 -->
+      - [ ] C2b-orig (superseded): bolt the sentinel into server.ts boot — CONFIRMED FINDINGS:
             * Insertion point: the LiveTailSource block at `src/commands/server.ts:8177`
               (`if (liveTailSendTransport && telegram && coordinator.enabled)`) — `liveTailSource`
               is in scope there; additionally guard on `handoffWireTransport`.

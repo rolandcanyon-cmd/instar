@@ -46,6 +46,7 @@ import { TrustElevationSource } from '../remediation/TrustElevationSource.js';
 import { createTopicIntentRoutes } from './topicIntentRoutes.js';
 import { createSpecReviewRoutes } from './specReviewRoutes.js';
 import { createUsherRoutes } from './usherRoutes.js';
+import { createHandoffInitiateRoutes } from './handoffInitiateRoutes.js';
 import type { TopicIntentStore } from '../core/TopicIntent.js';
 import type { WorktreeManager } from '../core/WorktreeManager.js';
 import { corsMiddleware, authMiddleware, requestTimeout, buildRequestTimeoutOverrides, errorHandler, dashboardSecurityHeaders } from './middleware.js';
@@ -174,6 +175,18 @@ export class AgentServer {
      * Absent → the begin route 503s.
      */
     onHandoffBegin?: (manifest: unknown, fromMachineId: string) => void;
+    /**
+     * Outgoing-side planned-handoff trigger (spec §8 G3e). server.ts binds this
+     * to handoffSentinelWiring.initiate — the operator/test "hand off now" entry
+     * point behind POST /handoff/initiate. Absent → the route 503s (not wired).
+     */
+    onHandoffInitiate?: () => Promise<'handed-off' | 'aborted-stay-awake' | 'failed'>;
+    /**
+     * Race-guard read for the planned handoff (HandoffSentinel.inProgress). The
+     * reaper/scheduler can consult it so they do not act mid-handoff; also
+     * surfaced at GET /handoff/status.
+     */
+    handoffInProgress?: () => boolean;
     /**
      * Live-tail receiver — decrypts + applies a peer's encrypted live-tail flush
      * received at /api/live-tail (spec §8 G3b/c). Throws on decrypt/verify failure.
@@ -660,6 +673,15 @@ export class AgentServer {
     // Mounted unconditionally; 503-stubs when the store is absent. Signal-only.
     // Spec: docs/specs/cwa-usher.md.
     this.app.use(createUsherRoutes({ signalStore: options.usherSignalStore ?? null }));
+
+    // Planned-handoff operator/test trigger (spec §8 G3e). Bearer-authed (mounted
+    // after the global auth middleware). server.ts supplies onHandoffInitiate +
+    // handoffInProgress from the outgoing-side handoffSentinelWiring; absent →
+    // the /handoff surface 503s honestly.
+    this.app.use(createHandoffInitiateRoutes({
+      onInitiate: options.onHandoffInitiate ?? null,
+      inProgress: options.handoffInProgress ?? null,
+    }));
 
     // Error handler (must be last)
     this.app.use(errorHandler);
