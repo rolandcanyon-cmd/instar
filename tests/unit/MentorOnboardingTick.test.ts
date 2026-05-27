@@ -108,6 +108,27 @@ describe('runMentorTick — gate order + structural guarantees', () => {
     expect(captures[0].findings[0].dedupKey).toBe('codex::argv-trunc');
   });
 
+  it('delivers to the mentee ONLY in live mode (never in dry-run) — §6', async () => {
+    const deliver = vi.fn();
+    const dry = makeDeps({ canaryCheck: () => true, mode: 'dry-run', deliverToMentee: deliver });
+    const dryRes = await runMentorTick(dry.deps);
+    expect(dryRes.ran).toBe(true);
+    expect(dryRes.delivered).toBe(false);
+    expect(deliver).not.toHaveBeenCalled(); // dry-run observes, never contacts
+
+    const live = makeDeps({ canaryCheck: () => true, mode: 'live', deliverToMentee: deliver, spawnStageA: async () => 'next task: ship the X primitive' });
+    const liveRes = await runMentorTick(live.deps);
+    expect(liveRes.ran).toBe(true);
+    expect(liveRes.delivered).toBe(true);
+    expect(deliver).toHaveBeenCalledWith('codex-cli', 'next task: ship the X primitive');
+  });
+
+  it('does not deliver when there is no deliverToMentee wired (safe default)', async () => {
+    const { deps } = makeDeps({ canaryCheck: () => true, mode: 'live', deliverToMentee: undefined });
+    const r = await runMentorTick(deps);
+    expect(r.delivered).toBe(false); // no path → no contact, no throw
+  });
+
   it('on a Stage-A spawn failure, self-reports and does not run Stage B', async () => {
     const { deps, captures } = makeDeps({
       canaryCheck: () => true,

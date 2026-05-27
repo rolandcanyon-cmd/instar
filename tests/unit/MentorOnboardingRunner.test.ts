@@ -68,9 +68,31 @@ describe('MentorOnboardingRunner', () => {
     expect(r.reason).toBe('unsafe-window');
   });
 
-  it('status() reflects config', () => {
+  it('status() reflects config + async state', () => {
     const cfg: MentorConfig = { ...DEFAULT_MENTOR_CONFIG, enabled: true, mode: 'live', menteeFramework: 'cursor' };
     const runner = new MentorOnboardingRunner(fakeServices(), () => cfg);
-    expect(runner.status()).toEqual({ enabled: true, mode: 'live', menteeFramework: 'cursor' });
+    expect(runner.status()).toMatchObject({ enabled: true, mode: 'live', menteeFramework: 'cursor', inFlight: false, lastResult: null });
+  });
+
+  it('startTick is fire-and-forget: 202-accepted when enabled, result lands in status().lastResult', async () => {
+    const svc = fakeServices();
+    const cfg: MentorConfig = { ...DEFAULT_MENTOR_CONFIG, enabled: true, mode: 'dry-run' };
+    const runner = new MentorOnboardingRunner(svc, () => cfg);
+    const r = runner.startTick();
+    expect(r.accepted).toBe(true);
+    // Let the async tick settle.
+    await new Promise((res) => setTimeout(res, 10));
+    expect(svc.spawnStageA).toHaveBeenCalled();
+    expect(runner.status().lastResult?.ran).toBe(true);
+    expect(runner.status().inFlight).toBe(false);
+  });
+
+  it('startTick short-circuits to disabled synchronously when off (no work)', () => {
+    const svc = fakeServices();
+    const runner = new MentorOnboardingRunner(svc, () => ({ ...DEFAULT_MENTOR_CONFIG }));
+    const r = runner.startTick();
+    expect(r).toEqual({ accepted: false, reason: 'disabled' });
+    expect(svc.spawnStageA).not.toHaveBeenCalled();
+    expect(runner.status().lastResult?.reason).toBe('disabled');
   });
 });

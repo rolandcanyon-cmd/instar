@@ -438,7 +438,7 @@ export class AgentServer {
           this.frameworkIssueLedger = new FrameworkIssueLedger({
             dbPath: path.join(serverDataDir, 'framework-issue-ledger.db'),
           });
-          this.mentorRunner = this.buildMentorRunner(this.frameworkIssueLedger, options);
+          this.mentorRunner = this.buildMentorRunner(this.frameworkIssueLedger, options, serverDataDir);
         } catch (err) {
           console.warn('[instar] framework-issue-ledger init failed (non-fatal):', err);
           this.frameworkIssueLedger = null;
@@ -651,6 +651,7 @@ export class AgentServer {
   private buildMentorRunner(
     ledger: FrameworkIssueLedger,
     options: { config: unknown; intelligence?: import('../core/types.js').IntelligenceProvider | null },
+    serverDataDir: string,
   ): MentorOnboardingRunner {
     const getConfig = (): MentorConfig => ({
       ...DEFAULT_MENTOR_CONFIG,
@@ -672,10 +673,18 @@ export class AgentServer {
             maxDurationMinutes: 5,
           });
           const tmux = session.tmuxSession;
+          let finished = false;
           for (let i = 0; i < 90; i++) {
             const stillRunning = self.sessionManager.listRunningSessions().some((s) => s.id === session.id);
-            if (!stillRunning) break;
+            if (!stillRunning) { finished = true; break; }
             await new Promise((r) => setTimeout(r, 2000));
+          }
+          if (!finished) {
+            // Poll exhausted (~180s) and the session is still running: KILL it (no
+            // orphaned tmux pane) and throw, so the tick captures a clean
+            // stage-a-failed finding rather than reading a partial transcript.
+            try { self.sessionManager.killSession(session.id); } catch { /* best-effort */ }
+            throw new Error('stage-a-timeout: Stage-A session did not complete within the poll window');
           }
           return self.sessionManager.captureOutput(tmux, 200) ?? '';
         },
@@ -705,6 +714,21 @@ export class AgentServer {
           return self.mentorRunsToday < cfg.maxRoundsPerDay;
         },
         getSurface: (framework: string) => ({ framework, threadlineHistory: '' }),
+        // Persist-only delivery (§6): append the Stage-A message to a durable
+        // per-mentee outbox the mentee's already-running session picks up. This
+        // does NOT call threadline_send / spawn a counterpart session — the
+        // structural fix for the cross-agent spawn loop. Best-effort + never throws
+        // (delivery failure must not crash a tick). Called ONLY in live mode.
+        deliverToMentee: (framework: string, message: string) => {
+          try {
+            const outboxDir = path.join(serverDataDir, 'mentor-outbox');
+            fs.mkdirSync(outboxDir, { recursive: true });
+            const line = JSON.stringify({ ts: Date.now(), framework, message }) + '\n';
+            fs.appendFileSync(path.join(outboxDir, `${framework.replace(/[^\w.-]/g, '_')}.jsonl`), line);
+          } catch (err) {
+            console.warn('[mentor] deliverToMentee outbox write failed (non-fatal):', err);
+          }
+        },
         onTickRan: () => {
           self.mentorLastTickAt = Date.now();
           self.mentorRunsToday += 1;

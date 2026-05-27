@@ -50,6 +50,14 @@ export interface MentorTickDeps {
   runStageBForensics: () => Promise<ForensicFinding[]>;
   /** Write findings + log the run to the ledger funnel (§19.2). */
   capture: (input: CaptureRunInput) => CaptureRunResult;
+  /**
+   * Deliver the Stage-A message to the mentee — called ONLY in `live` mode (§6).
+   * The host's implementation MUST be persist-only (queue to a durable outbox the
+   * mentee's already-running session picks up), never spawn-on-receive — that's
+   * the structural fix for the cross-agent spawn loop. Omitted/undefined ⇒ no
+   * delivery (the dormant + dry-run default).
+   */
+  deliverToMentee?: (framework: string, message: string) => void;
   /** Tick id for provenance/episode keying. */
   tickId?: string;
   now?: () => number;
@@ -68,6 +76,8 @@ export interface MentorTickResult {
   ran: boolean;
   reason: MentorTickReason;
   mode?: MentorMode;
+  /** True when the Stage-A message was delivered to the mentee (live mode only). */
+  delivered?: boolean;
   leakDetected?: boolean;
   observationsWritten?: number;
   findingsCount?: number;
@@ -145,10 +155,19 @@ export async function runMentorTick(deps: MentorTickDeps): Promise<MentorTickRes
   //    even if findings is empty (inert-writer guard).
   const captured = deps.capture({ framework: deps.framework, tickId, findings });
 
+  // 8. Deliver — ONLY in live mode, and ONLY via the host's persist-only path
+  //    (§6). In dry-run we observe + capture but never contact the mentee.
+  let delivered = false;
+  if (deps.mode === 'live' && deps.deliverToMentee && transcript.trim()) {
+    deps.deliverToMentee(deps.framework, transcript);
+    delivered = true;
+  }
+
   return {
     ran: true,
     reason: 'ran',
     mode: deps.mode,
+    delivered,
     leakDetected: leak.leaked,
     observationsWritten: captured.observationsWritten,
     findingsCount: findings.length,
