@@ -196,6 +196,14 @@ export class AgentServer {
     /** Per-topic current-inbound dedupeKey map; paired with messageLedger. */
     currentInboundByTopic?: Map<string, string>;
     /**
+     * Cross-machine reply-marker propagation (spec §8 G3a). The outbound reply
+     * path broadcasts a marker to standby peers when a reply commits; present only
+     * when the exactly-once ledger is wired. Absent → no cross-machine propagation.
+     */
+    replyMarkerTransport?: import('../core/ReplyMarkerTransport.js').ReplyMarkerTransport;
+    /** Apply a peer's reply marker (→ machineRoutes /api/message-marker → ledger.applyRemoteReplyMarker). */
+    onReplyMarker?: (marker: unknown, fromMachineId: string) => void;
+    /**
      * Live-tail receiver — decrypts + applies a peer's encrypted live-tail flush
      * received at /api/live-tail (spec §8 G3b/c). Throws on decrypt/verify failure.
      */
@@ -402,6 +410,7 @@ export class AgentServer {
           ? () => options.handoffWireTransport!.recordYield()
           : undefined,
         onHandoffBegin: options.onHandoffBegin,
+        onReplyMarker: options.onReplyMarker,
       });
       this.app.use(machineRoutes);
     }
@@ -610,6 +619,7 @@ export class AgentServer {
       coordinator: options.coordinator ?? null,
       messageLedger: options.messageLedger ?? null,
       currentInboundByTopic: options.currentInboundByTopic ?? null,
+      replyMarkerTransport: options.replyMarkerTransport ?? null,
       startTime: this.startTime,
     };
     this.routeContext = routeCtx;

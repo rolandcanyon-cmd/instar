@@ -195,8 +195,12 @@
             spec's explicit "Stuck-processing recovery" mechanism (§8 G3a) — re-run from stored
             input, NOT offset-hold. 7 tests (6 logic both-sides + boot wiring-integrity). Single-
             duplicate residual (crash after send before commit) is the documented Two-Generals floor.
-      - [ ] D-xmachine: applyRemoteReplyMarker propagation over tunnel+git (failover window).
-            Lower priority — the lease already prevents cross-machine double-forward.
+      - [x] D-xmachine — DONE (commit x-below), flag-gated dark: ReplyMarkerTransport (signed
+            POST /api/message-marker to standby peers, no encryption — auth only) + the outbound
+            commit broadcasts the marker + onReplyMarker→applyRemoteReplyMarker on the standby.
+            Closes the post-handoff redelivery window. 5 tests (3 unit + 2 cross-machine e2e:
+            signed marker applies → redelivery deduped; unsigned 401). exactly-once now COMPLETE
+            in all dimensions (no-dup same+cross machine, no-loss on crash), all DARK.
       - [ ] D-refine: update_id as dedupeKey (vs message_id); per-topic concurrent-inbound queue.
       - [ ] D3 (CONTINUATION resume): the receiving machine resumes via CONTINUATION (no re-greet)
             — verify the standby's live-tail'd history feeds the resume briefing. Mostly present;

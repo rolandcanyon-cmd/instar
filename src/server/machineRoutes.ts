@@ -84,6 +84,12 @@ export interface MachineRouteContext {
    * can echo it in its caught-up ack. Delivers to the incoming's HandoffReceiver.
    */
   onHandoffBegin?: (manifest: unknown, fromMachineId: string) => void;
+  /**
+   * Callback when a peer propagates a `reply_committed` marker (spec §8 G3a,
+   * cross-machine exactly-once). Applies it to this machine's MessageProcessingLedger
+   * via applyRemoteReplyMarker so a post-handoff redelivery of that event is deduped.
+   */
+  onReplyMarker?: (marker: unknown, fromMachineId: string) => void;
 }
 
 // ── Route Factory ──────────────────────────────────────────────────
@@ -262,6 +268,37 @@ export function createMachineRoutes(ctx: MachineRouteContext): Router {
       return;
     }
     ctx.onHandoffBegin(manifest, auth.machineId);
+    res.json({ ok: true });
+  });
+
+  // ── POST /api/message-marker — Cross-machine reply_committed marker (§8 G3a) ──
+  // The lease holder propagates "this inbound event was answered" to the standby
+  // so that AFTER a handoff/failover the newly-awake machine's ledger already
+  // knows, and a provider redelivery of the same event is deduped (the cross-
+  // machine half of exactly-once). Carries no conversation content. No receiver
+  // wired (exactly-once off) → 503.
+
+  router.post('/api/message-marker', authMiddleware, (req, res) => {
+    const { machineAuth } = req as any;
+    const auth = machineAuth as MachineAuthContext;
+    const marker = (req.body && (req.body as any).marker) as
+      | { dedupeKey?: string; platform?: string; replyIdempotencyKey?: string; epoch?: number; topic?: unknown }
+      | undefined;
+    if (
+      !marker ||
+      typeof marker.dedupeKey !== 'string' ||
+      typeof marker.platform !== 'string' ||
+      typeof marker.replyIdempotencyKey !== 'string' ||
+      typeof marker.epoch !== 'number'
+    ) {
+      res.status(400).json({ error: 'Invalid reply marker payload' });
+      return;
+    }
+    if (!ctx.onReplyMarker) {
+      res.status(503).json({ error: 'Reply-marker receiver not available' });
+      return;
+    }
+    ctx.onReplyMarker(marker, auth.machineId);
     res.json({ ok: true });
   });
 

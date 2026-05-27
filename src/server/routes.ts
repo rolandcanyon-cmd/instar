@@ -693,6 +693,13 @@ export interface RouteContext {
    * paired with messageLedger (both null when the gate is dark).
    */
   currentInboundByTopic: Map<string, string> | null;
+  /**
+   * Cross-machine reply-marker propagation (spec §8 G3a). When a reply commits,
+   * the outbound path broadcasts the marker to standby peers so a post-handoff
+   * redelivery is deduped on the new holder. null → no propagation (paired with
+   * messageLedger; both null when exactly-once is dark).
+   */
+  replyMarkerTransport: import('../core/ReplyMarkerTransport.js').ReplyMarkerTransport | null;
   startTime: Date;
 }
 
@@ -5244,8 +5251,23 @@ export function createRoutes(ctx: RouteContext): Router {
         try {
           const dedupeKey = ctx.currentInboundByTopic.get(String(topicId));
           if (dedupeKey) {
-            commitInboundReply(ctx.messageLedger, dedupeKey, ctx.coordinator?.getLeaseEpoch() ?? 0);
+            const epoch = ctx.coordinator?.getLeaseEpoch() ?? 0;
+            commitInboundReply(ctx.messageLedger, dedupeKey, epoch);
             ctx.currentInboundByTopic.delete(String(topicId));
+            // Cross-machine half (spec §8 G3a): tell standby peers this event was
+            // answered, so a post-handoff redelivery is deduped on the new holder.
+            // Best-effort, fire-and-forget — the dedup gate + provider redelivery
+            // are the backstop if a marker is lost.
+            const entry = ctx.messageLedger.get(dedupeKey);
+            if (ctx.replyMarkerTransport && entry?.replyIdempotencyKey) {
+              void ctx.replyMarkerTransport.broadcast({
+                dedupeKey,
+                platform: 'telegram',
+                replyIdempotencyKey: entry.replyIdempotencyKey,
+                epoch,
+                topic: String(topicId),
+              });
+            }
           }
         } catch (err) {
           console.error(`[telegram/reply] exactly-once commit error (non-fatal): ${err instanceof Error ? err.message : err}`);
