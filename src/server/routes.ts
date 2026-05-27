@@ -663,6 +663,9 @@ export interface RouteContext {
    *  signal-only — never gates). Null when stateDir is unavailable. Powers
    *  GET /framework-issues and /framework-issues/playbook. */
   frameworkIssueLedger?: import('../monitoring/FrameworkIssueLedger.js').FrameworkIssueLedger | null;
+  /** Mentor-onboarding runner (§19.4). Null when not wired. Ships dormant
+   *  (mentor.enabled=false); powers GET /mentor/status + POST /mentor/tick. */
+  mentorRunner?: import('../scheduler/MentorOnboardingRunner.js').MentorOnboardingRunner | null;
   /** SessionReaper — pressure-aware idle-session reaper. Null when not wired
    *  (older boot paths). Powers GET /sessions/reaper observability. */
   sessionReaper?: import('../monitoring/SessionReaper.js').SessionReaper | null;
@@ -4249,6 +4252,31 @@ export function createRoutes(ctx: RouteContext): Router {
     // The capture funnel: runs vs observations written. A nonzero run count with
     // a stuck-at-zero observation count over time flags an inert/broken writer.
     res.json(ctx.frameworkIssueLedger.captureStats());
+  });
+
+  // ── Mentor-onboarding job (§19.4) — dormant by default ──
+  router.get('/mentor/status', (_req, res) => {
+    if (!ctx.mentorRunner) {
+      res.status(503).json({ error: 'mentor runner unavailable' });
+      return;
+    }
+    res.json(ctx.mentorRunner.status());
+  });
+
+  router.post('/mentor/tick', async (_req, res) => {
+    if (!ctx.mentorRunner) {
+      res.status(503).json({ error: 'mentor runner unavailable' });
+      return;
+    }
+    // The built-in mentor job (off by default) hits this each tick. When the
+    // feature is disabled this returns {ran:false, reason:'disabled'} — no spawn,
+    // no spend. The structural loop lives in runMentorTick (signal-only).
+    try {
+      const result = await ctx.mentorRunner.tick();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
   });
 
   // ── Jobs ────────────────────────────────────────────────────────

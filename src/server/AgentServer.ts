@@ -57,6 +57,9 @@ import os from 'node:os';
 import { TokenLedger } from '../monitoring/TokenLedger.js';
 import { TokenLedgerPoller } from '../monitoring/TokenLedgerPoller.js';
 import { FrameworkIssueLedger } from '../monitoring/FrameworkIssueLedger.js';
+import { MentorOnboardingRunner, DEFAULT_MENTOR_CONFIG, type MentorConfig } from '../scheduler/MentorOnboardingRunner.js';
+import { STAGE_A_ALLOWED_TOOLS } from '../monitoring/MentorStageA.js';
+import type { ForensicFinding } from '../monitoring/FrameworkIssueLedger.js';
 import { BurnDetector } from '../monitoring/BurnDetector.js';
 import { BurnThrottleRunbook } from '../monitoring/BurnThrottleRunbook.js';
 import { BurnVerifier } from '../monitoring/BurnVerifier.js';
@@ -82,6 +85,12 @@ export class AgentServer {
   private tokenLedger: TokenLedger | null = null;
   private tokenLedgerPoller: TokenLedgerPoller | null = null;
   private frameworkIssueLedger: FrameworkIssueLedger | null = null;
+  private mentorRunner: MentorOnboardingRunner | null = null;
+  /** Wall-clock of the last mentor tick that ran, for the min-interval floor. */
+  private mentorLastTickAt = 0;
+  /** UTC day + run count for the per-day mentor cap (resets across days). */
+  private mentorDayKey = '';
+  private mentorRunsToday = 0;
   // Burn-detection-and-self-heal system (six-phase umbrella spec at
   // docs/specs/token-burn-detection-and-self-heal.md). Lazy-initialised
   // after the TokenLedger comes up — burn detection without a ledger is
@@ -429,9 +438,11 @@ export class AgentServer {
           this.frameworkIssueLedger = new FrameworkIssueLedger({
             dbPath: path.join(serverDataDir, 'framework-issue-ledger.db'),
           });
+          this.mentorRunner = this.buildMentorRunner(this.frameworkIssueLedger, options);
         } catch (err) {
           console.warn('[instar] framework-issue-ledger init failed (non-fatal):', err);
           this.frameworkIssueLedger = null;
+          this.mentorRunner = null;
         }
       }
     } catch (err) {
@@ -529,6 +540,7 @@ export class AgentServer {
       machineHeartbeat: options.machineHeartbeat ?? null,
       tokenLedger: this.tokenLedger,
       frameworkIssueLedger: this.frameworkIssueLedger,
+      mentorRunner: this.mentorRunner,
       sessionReaper: options.sessionReaper ?? null,
       telegramBridgeConfig: options.telegramBridgeConfig ?? null,
       telegramBridge: options.telegramBridge ?? null,
@@ -627,6 +639,80 @@ export class AgentServer {
     if (fs.existsSync(fromDist)) return fromDist;
     if (fs.existsSync(fromSrc)) return fromSrc;
     return fromDist;
+  }
+
+  /**
+   * Wire the mentor-onboarding runner (§19.4) from real services. Ships DORMANT:
+   * the config defaults to mentor.enabled=false / mode='off', so tick() returns
+   * {ran:false, reason:'disabled'} in production until a human flips it via the
+   * graduated-rollout track. The live spawn/forensics paths are real code, gated
+   * behind that flag and validated via test-as-self before promotion.
+   */
+  private buildMentorRunner(
+    ledger: FrameworkIssueLedger,
+    options: { config: unknown; intelligence?: import('../core/types.js').IntelligenceProvider | null },
+  ): MentorOnboardingRunner {
+    const getConfig = (): MentorConfig => ({
+      ...DEFAULT_MENTOR_CONFIG,
+      ...((options.config as unknown as { mentor?: Partial<MentorConfig> }).mentor ?? {}),
+    });
+    const intelligence = options.intelligence ?? null;
+    const self = this;
+    return new MentorOnboardingRunner(
+      {
+        capture: (input) => ledger.captureRun(input),
+        // Stage A spawns with the EMPTY tool grant (structural two-hats boundary,
+        // §4); we bounded-wait for it to finish, then capture its transcript.
+        spawnStageA: async (prompt: string): Promise<string> => {
+          const session = await self.sessionManager.spawnSession({
+            name: `mentor-stage-a-${Date.now()}`,
+            prompt,
+            model: 'haiku',
+            allowedTools: [...STAGE_A_ALLOWED_TOOLS], // empty → no tools
+            maxDurationMinutes: 5,
+          });
+          const tmux = session.tmuxSession;
+          for (let i = 0; i < 90; i++) {
+            const stillRunning = self.sessionManager.listRunningSessions().some((s) => s.id === session.id);
+            if (!stillRunning) break;
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+          return self.sessionManager.captureOutput(tmux, 200) ?? '';
+        },
+        // Stage-B deep log-forensics (assembling the mentee's rollouts/diffs and
+        // classifying) is a tracked follow-on; today the loop's real signal is the
+        // Stage-A leak detector (§4.3). Returns [] when no forensic inputs exist so
+        // the funnel still logs the run. <!-- tracked: topic-13435 -->
+        runStageBForensics: async (): Promise<ForensicFinding[]> => {
+          void intelligence;
+          return [];
+        },
+        // Safe-window: any other running (non-protected) session means the system
+        // is busy — conservative "don't interrupt." Refined per-mentee at live
+        // validation. <!-- tracked: topic-13435 -->
+        isMenteeBusy: () => self.sessionManager.listRunningSessions().length > 0,
+        minIntervalElapsed: () => {
+          const cfg = getConfig();
+          return Date.now() - self.mentorLastTickAt >= cfg.minIntervalMs;
+        },
+        budgetOk: () => {
+          const cfg = getConfig();
+          const day = new Date().toISOString().slice(0, 10);
+          if (self.mentorDayKey !== day) {
+            self.mentorDayKey = day;
+            self.mentorRunsToday = 0;
+          }
+          return self.mentorRunsToday < cfg.maxRoundsPerDay;
+        },
+        getSurface: (framework: string) => ({ framework, threadlineHistory: '' }),
+        onTickRan: () => {
+          self.mentorLastTickAt = Date.now();
+          self.mentorRunsToday += 1;
+        },
+        now: () => Date.now(),
+      },
+      getConfig,
+    );
   }
 
   /**
