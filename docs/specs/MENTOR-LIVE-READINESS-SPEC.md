@@ -1,7 +1,12 @@
 ---
 title: Mentor live-readiness — real idle signal, mentee-side pickup, quota-aware budget
 owning-layer: scheduler + server (mentor)
-status: draft
+status: converged
+review-convergence: true
+review-iterations: 2
+review-reviewers: lessons-aware, integration, adversarial
+co-designer: instar-codey (Threadline thread 5cc61bd7, §Fix 2 mentee-side pickup)
+approved: false
 supervision: tier1
 ---
 
@@ -208,9 +213,15 @@ dir). (iii) Publish a typed-contract export Stage-B uses to parse reply.jsonl. (
 contract test that round-trips a written prompt + a hand-written reply through the parser.
 
 **Codey-side responsibilities (Codey ships, separately).** The `mentor-inbox-poll` job,
-cursor + lock + dead-letter, the local injection abstraction, the delivery + reply writers.
-Both halves must land before the supervised live test. Coordinated through this spec's
-shared contract.
+cursor + lock + dead-letter, the local injection abstraction, the delivery + reply writers,
+the `/idle` endpoint, and vendoring `MENTOR_CONTRACT_VERSION`. Both halves must land before
+the supervised live test. Coordinated through this spec's shared contract.
+
+**Echo-side ship-independence (R2 integration F-new-1).** Echo's side ships independently of
+Codey's PR. Absent `/idle` produces continuous `mentee-busy` defers + a degradation event —
+**not a refuse-to-start**. The mentor stays harmlessly idle in production (just like the
+dry-run we ran today) until Codey's side lands. This is the [[graduated-feature-rollout]]
+pattern: ship dark, observe-only, then promote when the dependent piece is ready.
 
 #### Hardening (convergence round 1)
 
@@ -219,8 +230,12 @@ shared contract.
 canonicalization. Echo writes into *another agent's* state dir, so the attack/misconfig
 surface is real. New Echo-side requirements:
 
-1. **Symlink reject**: `lstat` the target path before each append; if it's a symlink, refuse
-   the write and emit `DegradationReporter` event `mentor.delivery.symlink-rejected`.
+1. **Symlink reject + parent-realpath check (defense-in-depth, R2 adversarial-B)**: `lstat`
+   the leaf path before each append; if it's a symlink, refuse the write and emit
+   `DegradationReporter` event `mentor.delivery.symlink-rejected`. ALSO `realpathSync` the
+   resolved write path and assert it still resides under the validated `menteeStateDir` root
+   — leaf-lstat alone misses a directory-symlink planted *above* the leaf on macOS, and
+   guards against lstat→append TOCTOU.
 2. **menteeStateDir allowlist**: validate `mentor.menteeStateDir` at startup — refuse if it
    resolves to Echo's own `stateDir`, contains `..`, or doesn't look like an instar agent
    home (no `.instar/config.json` at the root). Refuse-to-start with a loud error rather
@@ -296,7 +311,15 @@ ships today; bumps need a rule, not a Threadline round-trip every time.
   - Within state, suppress (no chatter on every tick).
   - **Persistence: file-backed** at `state/mentor-budget-notifications.json` via
     `SafeFsExecutor.atomicWriteJsonSync` so a mid-day server restart does NOT re-alert
-    (integration F4). In-memory alone re-spams.
+    (integration F4). In-memory alone re-spams. **Explicit shape** (R2 integration F-new-2):
+    ```json
+    { "<reason>": { "state": "ok|tripped", "lastTransitionTs": "ISO", "lastAlertTs": "ISO" } }
+    ```
+    **Single-writer / CAS (R2 adversarial-A):** all state-machine reads + transitions go
+    through a `CommitmentTracker.mutate()`-style CAS so two concurrent ticks observing
+    `tripped→ok` cannot double-fire the recovery alert. **Corrupt-state file on read**:
+    treat as `{}` (full re-alert next trip) AND emit `mentor.budget-state.corrupt`
+    degradation event — don't crash, don't silently lose all dedup.
   - **Optional "still tripped after N hours" reminder** (default off, configurable via
     `mentor.budgetReminderHours`) for long-running trips (e.g. quota stays elevated for 6h).
 
@@ -403,6 +426,13 @@ The tick changes:
 - **No agent-installed file changes** beyond config defaults — loader-only shadow-install
   update for Echo's side; Codey's side is a separate PR in his repo (which adds his
   `mentor-inbox-poll` job + the `/idle` endpoint).
+- **New route parity (R2 integration F-new-3).** The new `GET /mentor/contract` route
+  requires: (a) classification under the `mentor` prefix in `CapabilityIndex.ts` so the
+  capabilities-discoverability CI gate passes; (b) a one-line entry in the CLAUDE.md
+  template (`src/scaffold/templates.ts → generateClaudeMd()`) per the Agent Awareness
+  Standard so other agents know it exists; (c) a docs-coverage entry in `default-jobs.md`
+  is NOT needed (this isn't a job) — the route is documented in `reference/api.md` per the
+  existing pattern. Migration: route ships in the package; no per-agent migration needed.
 
 ## Co-design with Codey
 
