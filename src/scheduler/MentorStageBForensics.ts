@@ -22,9 +22,28 @@ import {
 const MAX_FINDINGS_PER_RUN = 10; // bound a single tick's output
 const MAX_TITLE = 200;
 
-/** A normalized slug for a conservative dedupKey when the model omits one. */
+/** A normalized slug for a dedupKey from a model-supplied stable id (keeps it as-is, kebabed). */
 function slug(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'untitled';
+}
+
+/**
+ * Derive a conservative dedupKey from a title when the model omits one. Strips
+ * VOLATILE tokens that would split one issue across runs — standalone numbers,
+ * timeout/percent/version literals, and hex-ish ids — keeping only the stable
+ * symptom words. (§13.3: titles are operator-dependent; this is the last-resort
+ * fallback — the prompt asks the model for a stable id directly.)
+ */
+function deriveStableSlug(title: string): string {
+  const stable = title
+    .toLowerCase()
+    .replace(/\bv?\d+(?:\.\d+)+\b/g, ' ') // version strings (v1.3.14, 1.2.3)
+    .replace(/\b\d+\s*(?:ms|s|m|h|%|k|kb|mb|tokens?|turns?)\b/g, ' ') // 8s, 42%, 15k, 1 turn
+    .replace(/\b[0-9a-f]{6,}\b/g, ' ') // hex ids / shas
+    .replace(/\b\d+\b/g, ' ') // any remaining standalone numbers
+    .replace(/\s+/g, ' ')
+    .trim();
+  return slug(stable || title);
 }
 
 /**
@@ -45,6 +64,15 @@ export function buildForensicPrompt(framework: string, signals: string): string 
     ``,
     `Output ONLY a JSON array (no markdown, no prose). Each element:`,
     `  {"bucket": "...", "title": "<short>", "severity": "low|medium|high", "dedupKey": "<stable-id>"}`,
+    ``,
+    `CRITICAL — the dedupKey must be STABLE across runs. It is a short lowercase-kebab identifier`,
+    `for the ROOT SYMPTOM, NOT a rephrasing of your title. Use the SAME id you would use if you saw`,
+    `this exact issue again next time. Base it on the symptom class + the component, e.g.`,
+    `"feedback-webhook-429", "inputguard-review-timeout", "codex-single-turn-exit". Do NOT put`,
+    `version numbers, timestamps, session ids, counts, or wording variations in the dedupKey —`,
+    `those drift and would split one issue into many. Two reports of the same root problem MUST`,
+    `produce the same dedupKey.`,
+    ``,
     `If the signals evidence no concrete issue, output []. Never invent issues.`,
     ``,
     `--- Signals ---`,
@@ -87,7 +115,7 @@ export function parseForensicFindings(raw: string, framework: string): ForensicF
     const dedupKey =
       typeof o.dedupKey === 'string' && o.dedupKey.trim()
         ? `${framework}::${slug(o.dedupKey)}`
-        : `${framework}::${slug(title)}`;
+        : `${framework}::${deriveStableSlug(title)}`;
     out.push({ bucket: bucket as IssueBucket, title, severity, dedupKey, signature: title });
   }
   return out;
