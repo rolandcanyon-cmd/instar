@@ -134,6 +134,8 @@ describe('Multi-Machine HTTP E2E', () => {
   // server.ts wires in production. Lets the e2e prove the ack/yield routes are
   // ALIVE through the real booted server, not silently 503.
   let handoffWireA: HandoffWireTransport;
+  // Incoming-side begin capture for server A (proves /api/handoff/begin is alive).
+  let beginCapture: { manifest: unknown; from: string } | null = null;
 
   beforeAll(async () => {
     // Create machine environments
@@ -192,6 +194,7 @@ describe('Multi-Machine HTTP E2E', () => {
       coordinator: coordA,
       localSigningKeyPem: envA.signingKeys.privateKey,
       handoffWireTransport: handoffWireA,
+      onHandoffBegin: (manifest, from) => { beginCapture = { manifest, from }; },
     });
 
     serverB = new AgentServer({
@@ -410,6 +413,28 @@ describe('Multi-Machine HTTP E2E', () => {
   // ack delivered over HTTP resolves the outgoing transport's pending awaitAck,
   // and a signed yield fires the registered yield handler. The contrast with the
   // 503-when-unwired integration test is what "feature is alive" means here.
+
+  it('planned-handoff begin: B\'s signed manifest reaches A\'s onHandoffBegin', async () => {
+    const baseUrl = `http://127.0.0.1:${PORT_A}`;
+    const body = {
+      manifest: {
+        tailSeq: 7,
+        ingressPosition: { platform: 'telegram', cursor: 555, capturedAt: new Date().toISOString() },
+        threadHistoryHash: 'feedface',
+        topic: 99,
+      },
+    };
+    const headers = signRequest(envB.machineId, envB.signingKeys.privateKey, body, 35);
+    const resp = await fetch(`${baseUrl}/api/handoff/begin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+    expect(resp.status).toBe(200);
+    expect(beginCapture).not.toBeNull();
+    expect(beginCapture!.from).toBe(envB.machineId);
+    expect((beginCapture!.manifest as { tailSeq: number }).tailSeq).toBe(7);
+  });
 
   it('planned-handoff ack: B\'s signed echo resolves A\'s pending awaitAck', async () => {
     const baseUrl = `http://127.0.0.1:${PORT_A}`;

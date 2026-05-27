@@ -168,6 +168,13 @@ export class AgentServer {
      */
     handoffWireTransport?: { recordAck: (ack: any) => void; recordYield: () => void };
     /**
+     * Incoming-side begin handler — invoked when a peer POSTs /api/handoff/begin
+     * with its flush manifest (spec §8 G3d). server.ts binds this to store the
+     * manifest and drive the HandoffReceiver's onBeginHandoff (build + send ack).
+     * Absent → the begin route 503s.
+     */
+    onHandoffBegin?: (manifest: unknown, fromMachineId: string) => void;
+    /**
      * Live-tail receiver — decrypts + applies a peer's encrypted live-tail flush
      * received at /api/live-tail (spec §8 G3b/c). Throws on decrypt/verify failure.
      */
@@ -373,6 +380,7 @@ export class AgentServer {
         onHandoffYield: options.handoffWireTransport
           ? () => options.handoffWireTransport!.recordYield()
           : undefined,
+        onHandoffBegin: options.onHandoffBegin,
       });
       this.app.use(machineRoutes);
     }

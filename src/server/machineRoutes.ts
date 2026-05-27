@@ -77,6 +77,13 @@ export interface MachineRouteContext {
    * by which the incoming attempts to take the lease in a planned handoff.
    */
   onHandoffYield?: (fromMachineId: string) => void;
+  /**
+   * Callback when the OUTGOING machine POSTs the begin signal that opens a planned
+   * handoff (spec §8 G3d). Carries the outgoing's flush manifest (tailSeq +
+   * ingressPosition + threadHistoryHash + the active topic) so the incoming machine
+   * can echo it in its caught-up ack. Delivers to the incoming's HandoffReceiver.
+   */
+  onHandoffBegin?: (manifest: unknown, fromMachineId: string) => void;
 }
 
 // ── Route Factory ──────────────────────────────────────────────────
@@ -227,6 +234,35 @@ export function createMachineRoutes(ctx: MachineRouteContext): Router {
       machineIdentity: localIdentity,
       message: 'Pairing request received. Verify the SAS on both machines.',
     });
+  });
+
+  // ── POST /api/handoff/begin — Outgoing machine opens a planned handoff (§8 G3d) ──
+  // Carries the outgoing's flush manifest (tailSeq + ingressPosition +
+  // threadHistoryHash + the active topic). The incoming machine stores it and
+  // builds its caught-up ack by echoing tailSeq/ingressPosition and recomputing
+  // the thread-history hash from its own synced state. No manifest → no handoff.
+
+  router.post('/api/handoff/begin', authMiddleware, (req, res) => {
+    const { machineAuth } = req as any;
+    const auth = machineAuth as MachineAuthContext;
+    const manifest = (req.body && (req.body as any).manifest) as
+      | { tailSeq?: number; ingressPosition?: unknown; threadHistoryHash?: string; topic?: unknown }
+      | undefined;
+    if (
+      !manifest ||
+      typeof manifest.tailSeq !== 'number' ||
+      !manifest.ingressPosition ||
+      typeof manifest.threadHistoryHash !== 'string'
+    ) {
+      res.status(400).json({ error: 'Invalid handoff begin manifest' });
+      return;
+    }
+    if (!ctx.onHandoffBegin) {
+      res.status(503).json({ error: 'Handoff begin receiver not available' });
+      return;
+    }
+    ctx.onHandoffBegin(manifest, auth.machineId);
+    res.json({ ok: true });
   });
 
   // ── POST /api/handoff/ack — Incoming machine's verified "caught up" ack (§8 G3d) ──

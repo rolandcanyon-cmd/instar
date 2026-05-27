@@ -95,6 +95,7 @@ function createTestEnv(tmpDir: string) {
   let promoteCalled = false;
   let handoffAck: { ack: unknown; from: string } | null = null;
   let handoffYieldFrom: string | null = null;
+  let handoffBegin: { manifest: unknown; from: string } | null = null;
 
   const routes = createMachineRoutes({
     identityManager,
@@ -108,6 +109,7 @@ function createTestEnv(tmpDir: string) {
     onHandoffRequest: async () => ({ ready: true, state: { jobs: [], sessions: [] } }),
     onHandoffAck: (ack, from) => { handoffAck = { ack, from }; },
     onHandoffYield: (from) => { handoffYieldFrom = from; },
+    onHandoffBegin: (manifest, from) => { handoffBegin = { manifest, from }; },
   });
 
   const app = express();
@@ -126,6 +128,7 @@ function createTestEnv(tmpDir: string) {
     getPromoteCalled: () => promoteCalled,
     getHandoffAck: () => handoffAck,
     getHandoffYieldFrom: () => handoffYieldFrom,
+    getHandoffBegin: () => handoffBegin,
   };
 }
 
@@ -412,6 +415,52 @@ describe('Machine Routes Integration', () => {
     const validAck = {
       ack: { tailSeq: 5, ingressPosition: { offset: 100 }, threadHistoryHash: 'abc123def' },
     };
+    const validBegin = {
+      manifest: {
+        tailSeq: 5,
+        ingressPosition: { platform: 'telegram', cursor: 100, capturedAt: new Date().toISOString() },
+        threadHistoryHash: 'abc123def',
+        topic: 42,
+      },
+    };
+
+    it('delivers a valid begin manifest to onHandoffBegin with the machine id', async () => {
+      const headers = signRequest(env.bId, env.bSigning.privateKey, validBegin, 0);
+      const res = await request(env.app)
+        .post('/api/handoff/begin')
+        .set(headers)
+        .set('Connection', 'close')
+        .send(validBegin);
+
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+      const captured = env.getHandoffBegin();
+      expect(captured).toBeTruthy();
+      expect(captured!.from).toBe(env.bId);
+      expect((captured!.manifest as { tailSeq: number }).tailSeq).toBe(5);
+    });
+
+    it('rejects a begin with a missing/invalid manifest (400)', async () => {
+      const bad = { manifest: { tailSeq: 5 } }; // missing ingressPosition + threadHistoryHash
+      const headers = signRequest(env.bId, env.bSigning.privateKey, bad, 0);
+      const res = await request(env.app)
+        .post('/api/handoff/begin')
+        .set(headers)
+        .set('Connection', 'close')
+        .send(bad);
+
+      expect(res.status).toBe(400);
+      expect(env.getHandoffBegin()).toBeNull();
+    });
+
+    it('rejects an unauthenticated begin (401)', async () => {
+      const res = await request(env.app)
+        .post('/api/handoff/begin')
+        .set('Connection', 'close')
+        .send(validBegin);
+
+      expect(res.status).toBe(401);
+    });
 
     it('delivers a valid ack to onHandoffAck with the authenticated machine id', async () => {
       const headers = signRequest(env.bId, env.bSigning.privateKey, validAck, 0);
@@ -515,6 +564,22 @@ describe('Machine Routes Integration', () => {
         .set('Connection', 'close')
         .send(yieldBody);
       expect(yieldRes.status).toBe(503);
+
+      const beginBody = {
+        manifest: {
+          tailSeq: 1,
+          ingressPosition: { platform: 'telegram', cursor: 1, capturedAt: new Date().toISOString() },
+          threadHistoryHash: 'x',
+          topic: 1,
+        },
+      };
+      const beginHeaders = signRequest(env.bId, env.bSigning.privateKey, beginBody, 2);
+      const beginRes = await request(bareApp)
+        .post('/api/handoff/begin')
+        .set(beginHeaders)
+        .set('Connection', 'close')
+        .send(beginBody);
+      expect(beginRes.status).toBe(503);
     });
   });
 
