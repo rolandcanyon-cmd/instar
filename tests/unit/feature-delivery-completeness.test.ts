@@ -215,6 +215,10 @@ describe('Feature Delivery Completeness', () => {
       'Cross-Machine Seamlessness (one agent, many machines)', // operational self-heal/handoff awareness (like Version-Skew); not a user-invokable capability
       'What are we working on?',                           // migrator patch for the initiatives Registry-First row, not a capability section
       'Framework-Onboarding Mentor System',               // developer-layer issue-ledger observability; not a Codex/Gemini end-user capability (no shadow-marker parity)
+      'What address reaches me (Threadline routing fingerprint)', // Threadline routing-fingerprint operational knowledge, migrator-only (no template/shadow parity)
+      'ContextWedgeSentinel',                              // thinking-block-400 wedge recovery; operational self-heal awareness, migrator-only (no template parity) — see context-wedge-sentinel.md
+      '/release-readiness',                                // alternate endpoint check for the templated Release Readiness section
+      'Agent Updates topic (self-broadcasts about ships, restarts, updates)', // self-broadcast routing operational knowledge, migrator-only
     ];
 
     it('all new migrator CLAUDE.md sections are tracked', () => {
