@@ -32,6 +32,10 @@ In three small, safe steps — each its own switch, each shipped off, each matur
 2. **The "shipped thing broke" detector next** — it needs careful handling so it doesn't flood the record book with non-problems, so it gets its own round.
 3. **The fallback-events feed last** — opt-in, lowest priority, smallest.
 
+## How it's being built
+
+Slice 1 (build-failures + reverts) ships in two parts to keep each one small and well-tested: the build-failure watcher and its shared groundwork land first, then the revert watcher follows. Each part is off by default and proven with its own tests before it merges.
+
 ## Why it matters
 
 This is the step that turns the failure-watcher from a pretty empty dashboard into something that genuinely learns. Once it's quietly collecting real failures on its own, the pattern-spotting and the "did our fix actually work" parts have something to chew on — and the whole loop you approved starts paying off. Right now it's a beautifully-built engine with no fuel; this is the fuel line.
