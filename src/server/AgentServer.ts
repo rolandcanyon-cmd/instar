@@ -46,6 +46,7 @@ import { TrustElevationSource } from '../remediation/TrustElevationSource.js';
 import { createTopicIntentRoutes } from './topicIntentRoutes.js';
 import { FailureLedger } from '../monitoring/FailureLedger.js';
 import { FailureAttributionEngine } from '../monitoring/FailureAttributionEngine.js';
+import { CiFailurePoller } from '../monitoring/CiFailurePoller.js';
 import { SafeGitExecutor } from '../core/SafeGitExecutor.js';
 import { createSpecReviewRoutes } from './specReviewRoutes.js';
 import { createUsherRoutes } from './usherRoutes.js';
@@ -120,6 +121,7 @@ export class AgentServer {
   private mentorReplyJsonlPath: string | null = null;
   private failureLedger: FailureLedger | null = null;
   private failureAttributionEngine: FailureAttributionEngine | null = null;
+  private ciFailurePoller: CiFailurePoller | null = null;
   // Burn-detection-and-self-heal system (six-phase umbrella spec at
   // docs/specs/token-burn-detection-and-self-heal.md). Lazy-initialised
   // after the TokenLedger comes up — burn detection without a ledger is
@@ -283,6 +285,9 @@ export class AgentServer {
     worktreeManager?: WorktreeManager;
     /** Layer 1 of the Topic Intent Layer — per-topic confidence tracker. Null/undefined when disabled. */
     topicIntentStore?: TopicIntentStore;
+    /** Layer 3 of the Topic Intent Layer — pre-send classifier. Same instance is used
+     *  by the HTTP route AND the in-process outbound-gate caller in routes.ts. */
+    topicIntentArcCheck?: import('../core/TopicIntentArcCheck.js').ArcCheck | null;
     /** Shared intelligence provider (subscription/REPL-pool) for the standards-conformance gate. */
     intelligence?: import('../core/types.js').IntelligenceProvider | null;
     /** Usher signal store (rung 4) — the read-only pull surface for re-surface signals. */
@@ -592,11 +597,39 @@ export class AgentServer {
             } catch { return []; }
           },
         });
+
+        // Ingestion source: `ci` (spec §3.1). Constructed gated on
+        // sources.ci; started in the post-listen callback, stopped on shutdown.
+        const sources = options.config.monitoring?.failureLearning?.sources;
+        if (sources?.ci === true && this.failureLedger) {
+          this.ciFailurePoller = new CiFailurePoller({
+            ledger: this.failureLedger,
+            resolveByMergeCommit: (oid) => {
+              const i = tracker?.findByMergeCommit(oid);
+              // `origin` (loop self-exclusion, §4.3) lands with slice 2's origin
+              // threading onto Initiative; until then there are no loop-origin
+              // initiatives, so the exclusion is correctly inert.
+              return i ? { id: i.id, projectId: i.parentProjectId ?? undefined, specPath: i.specPath ?? undefined } : undefined;
+            },
+            resolveRepo: () => {
+              try {
+                const url = SafeGitExecutor.readSync(['remote', 'get-url', 'origin'], {
+                  cwd: projectDir, operation: 'failure-learning:ci-resolve-repo',
+                }).trim();
+                const m = url.match(/github\.com[:/](.+?)(?:\.git)?$/);
+                return m ? m[1] : null; // validated by REPO_RE inside the poller
+              } catch { return null; }
+            },
+            intervalMs: sources.ciPollMinutes && sources.ciPollMinutes > 0 ? sources.ciPollMinutes * 60_000 : undefined,
+            maxRunsPerTick: sources.ciMaxRunsPerTick,
+          });
+        }
       }
     } catch (err) {
       console.warn('[instar] failure-learning init failed (non-fatal):', err);
       this.failureLedger = null;
       this.failureAttributionEngine = null;
+      this.ciFailurePoller = null;
     }
 
     // Routes
@@ -669,6 +702,7 @@ export class AgentServer {
       listenerManager: options.listenerManager ?? null,
       responseReviewGate: options.responseReviewGate ?? null,
       messagingToneGate: options.messagingToneGate ?? null,
+      topicIntentArcCheck: options.topicIntentArcCheck ?? null,
       outboundDedupGate: options.outboundDedupGate ?? null,
       telemetryHeartbeat: options.telemetryHeartbeat ?? null,
       pasteManager: options.pasteManager ?? null,
@@ -753,6 +787,7 @@ export class AgentServer {
     // returns a 503 stub so the surface always exists for capability probing.
     const topicIntentRoutes = createTopicIntentRoutes({
       topicIntentStore: options.topicIntentStore ?? null,
+      arcCheck: options.topicIntentArcCheck ?? null,
     });
     this.app.use(topicIntentRoutes);
 
@@ -1702,6 +1737,16 @@ export class AgentServer {
           }
         }
 
+        // Ingestion source `ci` (spec §3.1) — start the poller (constructed
+        // gated on sources.ci) after listen, like the token-ledger poller.
+        if (this.ciFailurePoller) {
+          try {
+            this.ciFailurePoller.start();
+          } catch (err) {
+            console.warn('[instar] ci-failure poller start failed:', err);
+          }
+        }
+
         resolve();
       });
       this.server.on('error', (err: NodeJS.ErrnoException) => {
@@ -1823,6 +1868,15 @@ export class AgentServer {
     this.burnThrottleRunbook = null;
     this.burnVerifier = null;
 
+    // Stop the CI-failure poller (ingestion source §3.1).
+    if (this.ciFailurePoller) {
+      try {
+        this.ciFailurePoller.stop();
+      } catch {
+        // best-effort
+      }
+      this.ciFailurePoller = null;
+    }
     // Stop the token-ledger poller and close its DB.
     if (this.tokenLedgerPoller) {
       try {

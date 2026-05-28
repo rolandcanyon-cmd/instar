@@ -900,6 +900,24 @@ export class InitiativeTracker {
     return filtered.sort((a, b) => b.lastTouchedAt.localeCompare(a.lastTouchedAt));
   }
 
+  /**
+   * Reverse-lookup by exact merge-commit OID (Ingestion-sources spec §3.1).
+   * Scans via `list()` (which refreshes the TaskFlow cache) — NOT the raw
+   * `this.initiatives` Map — so it stays correct under TaskFlow. Exact-OID
+   * match only; never a branch/substring match. No index needed at current
+   * initiative scale.
+   */
+  findByMergeCommit(mergeCommitOid: string): Initiative | undefined {
+    if (!mergeCommitOid) return undefined;
+    return this.list().find((i) => i.mergeCommitOid === mergeCommitOid);
+  }
+
+  /** Reverse-lookup by exact PR number (Ingestion-sources spec §3.1). Same TaskFlow-safe scan. */
+  findByPrNumber(prNumber: number): Initiative | undefined {
+    if (!Number.isFinite(prNumber)) return undefined;
+    return this.list().find((i) => i.prNumber === prNumber);
+  }
+
   get(id: string): Initiative | undefined {
     if (this.isTaskFlowEnabled()) {
       const fid = this.findFlowIdForInitiative(id);

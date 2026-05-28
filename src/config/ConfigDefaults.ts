@@ -73,6 +73,16 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
       minDistinctCauseCommits: 3,
       attributionConfidenceFloor: 0.6,
       insightTelegramEscalation: false,
+      // Ingestion sources (spec §4.4) — all off by default; applyDefaults
+      // deep-merges this into existing agents without surprise activation.
+      sources: {
+        ci: false,
+        revert: false,
+        regression: false,
+        regressionIncludesBackslide: false,
+        degradation: [],
+        ciMaxRunsPerTick: 50,
+      },
     },
     // ReleaseReadinessSentinel (docs/specs/RELEASE-READINESS-VISIBILITY-SPEC.md
     // §4.2). Ships OFF — Echo dogfoods first. Repo-gated: inert unless the
@@ -122,6 +132,14 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
   // See docs/specs/topic-intent-capture-loop.md.
   topicIntent: {
     capture: {
+      enabled: true,
+    },
+    // ArcCheck (Layer 3) — pre-send classifier wired into the outbound tone
+    // gate as one more signal source. Default ON (ratified). Kill switch:
+    // arccheck.enabled=false leaves the HTTP route mounted but the classifier
+    // dark (returns degrade-open verdict), and skips the in-process call in
+    // checkOutboundMessage. Spec: docs/specs/topic-intent-arccheck-wiring.md.
+    arccheck: {
       enabled: true,
     },
   },
