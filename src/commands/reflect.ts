@@ -17,6 +17,7 @@ import { JobReflector } from '../core/JobReflector.js';
 import { PatternAnalyzer } from '../core/PatternAnalyzer.js';
 import { ReflectionConsolidator } from '../core/ReflectionConsolidator.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
+import { wrapIntelligenceWithCircuitBreaker } from '../core/CircuitBreakingIntelligenceProvider.js';
 import type { IntelligenceProvider } from '../core/types.js';
 import type { DetectedPattern, PatternReport } from '../core/PatternAnalyzer.js';
 
@@ -358,7 +359,7 @@ function resolveIntelligence(claudePath?: string): IntelligenceProvider | null {
     binaryPath: framework === 'claude-code' ? claudePath : undefined,
   });
   if (built) return built;
-  if (claudePath) return new ClaudeCliIntelligenceProvider(claudePath);
+  if (claudePath) return wrapIntelligenceWithCircuitBreaker(new ClaudeCliIntelligenceProvider(claudePath));
   return null;
 }
 

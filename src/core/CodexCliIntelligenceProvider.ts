@@ -154,10 +154,12 @@ export class CodexCliIntelligenceProvider implements IntelligenceProvider {
         },
         (error, stdout, stderr) => {
           if (error) {
+            // Generous stderr slice so the circuit breaker's rate-limit
+            // classifier can see usage/limit language past the first 200 chars.
             reject(
               new Error(
                 `Codex CLI error: ${error.message}` +
-                  (stderr ? ` — ${stderr.slice(0, 200)}` : ''),
+                  (stderr ? ` — ${stderr.slice(0, 600)}` : ''),
               ),
             );
             return;

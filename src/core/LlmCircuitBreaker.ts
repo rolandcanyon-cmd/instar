@@ -1,0 +1,284 @@
+/**
+ * LlmCircuitBreaker — account-global reactive circuit breaker for LLM calls.
+ *
+ * Motivating incident (2026-05-28): a wild agent burned $452/$455 in usage
+ * credits because PromptGate's per-tick Haiku detection loop kept calling
+ * `claude -p` while the account was over its weekly spend limit. The loop's
+ * error handler swallowed the rate-limit error with no backoff, so every
+ * monitor tick spawned another doomed (or, with auto-reload, freshly-billed)
+ * subprocess. There is NO legitimate reason to keep calling the LLM once the
+ * provider has told us we are over our limit — every further call is either
+ * wasted (rejected) or actively harmful (auto-reload refuels the burn).
+ *
+ * This breaker reacts to the provider's OWN rate-limit signal in milliseconds,
+ * which is distinct from (and complementary to) the volume-based
+ * token-burn-detection system (BurnDetector + LlmRateGate), which reacts to
+ * statistical token-share over a ~30-minute window. Where the burn system
+ * answers "this path is spending too much," the breaker answers "the provider
+ * just said we're rate-limited — stop."
+ *
+ * Scope: ACCOUNT-GLOBAL. A usage/rate limit applies to the whole subscription,
+ * not one session or one component, so a single shared breaker pauses every
+ * LLM-backed feature (PromptGate, PresenceProxy, PromiseBeacon, sentinels,
+ * reviewers) at once. It is wired structurally at the IntelligenceProvider
+ * construction chokepoint via CircuitBreakingIntelligenceProvider, so no
+ * consumer has to remember to consult it (Structure > Willpower).
+ *
+ * State: in-memory, process-local. A restart resets it — which is correct: the
+ * first call after restart probes the provider, and if still limited the
+ * breaker re-trips immediately.
+ */
+
+/** Thrown by a provider (or re-thrown by the decorator) when the underlying LLM call was rejected for a usage/rate limit. */
+export class RateLimitError extends Error {
+  readonly isRateLimit = true as const;
+  constructor(message: string, readonly providerError?: unknown) {
+    super(message);
+    this.name = 'RateLimitError';
+  }
+}
+
+/** Thrown by the decorator when the breaker is open — the call was refused WITHOUT spawning the underlying provider. */
+export class LlmCircuitOpenError extends Error {
+  readonly circuitOpen = true as const;
+  constructor(readonly retryAfterMs: number) {
+    super(
+      `LLM circuit breaker open — provider rate-limited; pausing LLM-backed work, retry in ~${Math.ceil(retryAfterMs / 1000)}s`,
+    );
+    this.name = 'LlmCircuitOpenError';
+  }
+}
+
+/**
+ * Classify whether an error message indicates a provider usage/rate/spend
+ * limit (as opposed to a timeout, a parse error, a network blip, etc.).
+ *
+ * Pure + exported so it is unit-testable against representative CLI error
+ * strings from both `claude -p` and `codex exec`. Deliberately conservative:
+ * a false positive trips the breaker and degrades all LLM-backed features to
+ * heuristic-only for one open window, so we match only language that is
+ * unambiguously about hitting a usage/spend/quota ceiling — never generic
+ * "error"/"failed"/timeout text.
+ */
+export function isRateLimitError(message: string | null | undefined): boolean {
+  if (!message) return false;
+  const m = message.toLowerCase();
+
+  // Explicit HTTP status codes for limit / billing rejections.
+  if (/\b429\b/.test(m)) return true; // Too Many Requests
+  if (/\b402\b/.test(m)) return true; // Payment Required
+
+  const phrases = [
+    'rate limit',
+    'rate-limit',
+    'rate_limit',
+    'ratelimit',
+    'too many requests',
+    'usage limit',
+    'usage_limit',
+    'usage-limit',
+    'limit reached',
+    'limit will reset',
+    'limit resets',
+    'reached your limit',
+    'payment required',
+    'out of credit',
+    'credit balance is too low',
+    'insufficient credit',
+    'insufficient quota',
+    'quota exceeded',
+    'exceeded your',
+    'spend limit',
+    'spending limit',
+    'billing',
+  ];
+  if (phrases.some((p) => m.includes(p))) return true;
+
+  // "exceeded ... (limit|quota|usage)" with words in between.
+  if (/exceed(?:ed|s)?\b[^.\n]{0,40}(?:limit|quota|usage|credit)/.test(m)) return true;
+
+  // Bare "quota" is a strong-enough signal on its own (Anthropic/OpenAI both use it).
+  if (/\bquota\b/.test(m)) return true;
+
+  return false;
+}
+
+type CircuitState = 'closed' | 'open' | 'half-open';
+
+export interface LlmCircuitBreakerOptions {
+  /** How long to stay fully open before allowing a single probe. Default 15 min. */
+  openMs?: number;
+  /** When false, the breaker is a passthrough — acquire() always allows, records are no-ops. Default true. */
+  enabled?: boolean;
+  /** Injectable clock for tests. */
+  now?: () => number;
+  /** Injectable logger (defaults to console.warn → server log). */
+  log?: (line: string) => void;
+}
+
+export interface AcquireDecision {
+  /** Whether the caller may invoke the underlying provider. */
+  allow: boolean;
+  /** True when this acquisition is the single half-open probe. */
+  probe: boolean;
+  /** When blocked, how long until the next probe window (ms). */
+  retryAfterMs: number;
+}
+
+export interface LlmCircuitBreakerStatus {
+  state: CircuitState;
+  enabled: boolean;
+  openUntil: number | null;
+  retryAfterMs: number;
+  tripCount: number;
+  lastReason: string | null;
+  lastTrippedAt: number | null;
+}
+
+const DEFAULT_OPEN_MS = 15 * 60_000; // 15 minutes
+
+export class LlmCircuitBreaker {
+  private state: CircuitState = 'closed';
+  private openUntil = 0;
+  private firstOpenedAt = 0;
+  private probeInFlight = false;
+  private tripCount = 0;
+  private lastReason: string | null = null;
+  private lastTrippedAt: number | null = null;
+
+  private openMs: number;
+  private enabled: boolean;
+  private readonly now: () => number;
+  private readonly log: (line: string) => void;
+
+  constructor(opts: LlmCircuitBreakerOptions = {}) {
+    this.openMs = opts.openMs && opts.openMs > 0 ? opts.openMs : DEFAULT_OPEN_MS;
+    this.enabled = opts.enabled ?? true;
+    this.now = opts.now ?? (() => Date.now());
+    this.log = opts.log ?? ((line) => console.warn(line));
+  }
+
+  /** Runtime reconfiguration (called once at server startup from config). */
+  configure(opts: { openMs?: number; enabled?: boolean }): void {
+    if (typeof opts.openMs === 'number' && opts.openMs > 0) this.openMs = opts.openMs;
+    if (typeof opts.enabled === 'boolean') this.enabled = opts.enabled;
+  }
+
+  /**
+   * Gate a call. Call BEFORE invoking the underlying provider. When it returns
+   * { allow: false }, the caller MUST NOT call the provider — throw
+   * LlmCircuitOpenError instead (the whole point is to avoid the spend).
+   *
+   * Exactly one probe is admitted when transitioning out of the open window;
+   * concurrent callers are blocked until that probe resolves.
+   */
+  acquire(): AcquireDecision {
+    if (!this.enabled) return { allow: true, probe: false, retryAfterMs: 0 };
+    const now = this.now();
+
+    if (this.state === 'closed') {
+      return { allow: true, probe: false, retryAfterMs: 0 };
+    }
+
+    if (this.state === 'open') {
+      if (now >= this.openUntil) {
+        // Window elapsed → admit exactly one probe.
+        this.state = 'half-open';
+        this.probeInFlight = true;
+        this.log(
+          `[llm-circuit] half-open: admitting one probe call after ~${Math.round((now - this.firstOpenedAt) / 1000)}s open`,
+        );
+        return { allow: true, probe: true, retryAfterMs: 0 };
+      }
+      return { allow: false, probe: false, retryAfterMs: this.openUntil - now };
+    }
+
+    // half-open
+    if (this.probeInFlight) {
+      // A probe is already out — block everyone else until it resolves.
+      return { allow: false, probe: false, retryAfterMs: Math.max(0, this.openUntil - now) };
+    }
+    // No probe in flight (defensive) — admit one.
+    this.probeInFlight = true;
+    return { allow: true, probe: true, retryAfterMs: 0 };
+  }
+
+  /**
+   * Record that the underlying call returned (or threw a non-rate-limit
+   * error). Either way the rate-limit condition is not currently present, so
+   * the breaker closes. A non-rate-limit error is handled by the caller's own
+   * fallback — it is not the breaker's concern, and staying open on unrelated
+   * errors would needlessly keep all LLM features down.
+   */
+  onResolved(): void {
+    if (!this.enabled) return;
+    if (this.state !== 'closed') {
+      this.log(`[llm-circuit] closing: provider responded (was ${this.state})`);
+    }
+    this.state = 'closed';
+    this.probeInFlight = false;
+    this.openUntil = 0;
+  }
+
+  /**
+   * Record that the underlying call was rejected for a usage/rate limit. Opens
+   * (or re-extends) the breaker for a full window.
+   */
+  onRateLimited(reason: string): void {
+    if (!this.enabled) return;
+    const now = this.now();
+    if (this.state === 'closed') {
+      this.firstOpenedAt = now;
+    }
+    this.tripCount += 1;
+    this.lastReason = reason.slice(0, 200);
+    this.lastTrippedAt = now;
+    this.state = 'open';
+    this.openUntil = now + this.openMs;
+    this.probeInFlight = false;
+    this.log(
+      `[llm-circuit] OPEN: provider rate-limited — pausing ALL LLM-backed work for ~${Math.round(
+        this.openMs / 1000,
+      )}s (trip #${this.tripCount}); reason: ${this.lastReason}`,
+    );
+  }
+
+  status(): LlmCircuitBreakerStatus {
+    const now = this.now();
+    return {
+      state: this.state,
+      enabled: this.enabled,
+      openUntil: this.state === 'closed' ? null : this.openUntil,
+      retryAfterMs: this.state === 'open' ? Math.max(0, this.openUntil - now) : 0,
+      tripCount: this.tripCount,
+      lastReason: this.lastReason,
+      lastTrippedAt: this.lastTrippedAt,
+    };
+  }
+
+  /** Reset to a clean closed state. For tests + an explicit operator override. */
+  reset(): void {
+    this.state = 'closed';
+    this.openUntil = 0;
+    this.firstOpenedAt = 0;
+    this.probeInFlight = false;
+  }
+}
+
+let _singleton: LlmCircuitBreaker | null = null;
+
+/** Process-wide account-global breaker. All wrapped providers share this instance. */
+export function getLlmCircuitBreaker(): LlmCircuitBreaker {
+  if (!_singleton) _singleton = new LlmCircuitBreaker();
+  return _singleton;
+}
+
+/** Configure the singleton at startup. Safe to call before first use. */
+export function configureLlmCircuitBreaker(opts: { openMs?: number; enabled?: boolean }): void {
+  getLlmCircuitBreaker().configure(opts);
+}
+
+/** Test-only: drop the singleton so a fresh one is built next access. */
+export function __resetLlmCircuitBreakerSingleton(): void {
+  _singleton = null;
+}

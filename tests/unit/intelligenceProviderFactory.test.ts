@@ -12,27 +12,41 @@ import {
 } from '../../src/core/intelligenceProviderFactory.js';
 import { CodexCliIntelligenceProvider } from '../../src/core/CodexCliIntelligenceProvider.js';
 import { ClaudeCliIntelligenceProvider } from '../../src/core/ClaudeCliIntelligenceProvider.js';
+import { CircuitBreakingIntelligenceProvider } from '../../src/core/CircuitBreakingIntelligenceProvider.js';
+import type { IntelligenceProvider } from '../../src/core/types.js';
+
+// The factory wraps every provider in the account-global rate-limit circuit
+// breaker (CircuitBreakingIntelligenceProvider). Assert both that the result
+// is wrapped AND that the correct framework provider is underneath.
+function expectWraps(
+  p: IntelligenceProvider | null,
+  Inner: new (...args: never[]) => IntelligenceProvider,
+): void {
+  expect(p).toBeInstanceOf(CircuitBreakingIntelligenceProvider);
+  const inner = (p as unknown as { inner: IntelligenceProvider }).inner;
+  expect(inner).toBeInstanceOf(Inner);
+}
 
 describe('buildIntelligenceProvider', () => {
-  it('returns a ClaudeCliIntelligenceProvider when framework=claude-code and binary path supplied', () => {
+  it('returns a circuit-breaker-wrapped ClaudeCliIntelligenceProvider when framework=claude-code and binary path supplied', () => {
     const p = buildIntelligenceProvider({
       framework: 'claude-code',
       binaryPath: '/usr/bin/claude',
     });
-    expect(p).toBeInstanceOf(ClaudeCliIntelligenceProvider);
+    expectWraps(p, ClaudeCliIntelligenceProvider);
   });
 
-  it('returns a CodexCliIntelligenceProvider when framework=codex-cli and binary path supplied', () => {
+  it('returns a circuit-breaker-wrapped CodexCliIntelligenceProvider when framework=codex-cli and binary path supplied', () => {
     const p = buildIntelligenceProvider({
       framework: 'codex-cli',
       binaryPath: '/usr/bin/codex',
     });
-    expect(p).toBeInstanceOf(CodexCliIntelligenceProvider);
+    expectWraps(p, CodexCliIntelligenceProvider);
   });
 
   it('defaults to claude-code when framework is omitted', () => {
     const p = buildIntelligenceProvider({ binaryPath: '/usr/bin/claude' });
-    expect(p).toBeInstanceOf(ClaudeCliIntelligenceProvider);
+    expectWraps(p, ClaudeCliIntelligenceProvider);
   });
 
   it('returns null when no binary path is supplied AND detection fails for an exotic name', () => {
@@ -45,9 +59,9 @@ describe('buildIntelligenceProvider', () => {
     });
     // An empty string is falsy → factory falls through to detect → may
     // return non-null on dev machines. So instead assert the function
-    // does not throw and returns either null or a Codex provider.
+    // does not throw and returns either null or a wrapped Codex provider.
     if (p !== null) {
-      expect(p).toBeInstanceOf(CodexCliIntelligenceProvider);
+      expectWraps(p, CodexCliIntelligenceProvider);
     }
   });
 
@@ -57,7 +71,7 @@ describe('buildIntelligenceProvider', () => {
       binaryPath: '/usr/bin/codex',
       workingDirectory: '/tmp/test-wd',
     });
-    expect(p).toBeInstanceOf(CodexCliIntelligenceProvider);
+    expectWraps(p, CodexCliIntelligenceProvider);
     // The provider doesn't expose workingDirectory publicly; this test
     // just asserts the call shape works.
   });

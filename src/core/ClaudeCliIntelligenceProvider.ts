@@ -64,8 +64,11 @@ export class ClaudeCliIntelligenceProvider implements IntelligenceProvider {
         env: childEnv,
       }, (error, stdout, stderr) => {
         if (error) {
-          // Timeout or other error — return empty so caller can fall back
-          reject(new Error(`Claude CLI error: ${error.message}${stderr ? ` — ${stderr.slice(0, 200)}` : ''}`));
+          // Timeout or other error — reject so caller can fall back. Include a
+          // generous stderr slice so the circuit breaker's rate-limit
+          // classifier (isRateLimitError) can see usage/limit language that
+          // often appears past the first 200 chars.
+          reject(new Error(`Claude CLI error: ${error.message}${stderr ? ` — ${stderr.slice(0, 600)}` : ''}`));
           return;
         }
 

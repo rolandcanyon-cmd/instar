@@ -27,6 +27,8 @@ import { AgentServer } from '../server/AgentServer.js';
 import { TelegramAdapter, TOPIC_STYLE, selectTopicEmoji } from '../messaging/TelegramAdapter.js';
 import { RelationshipManager } from '../core/RelationshipManager.js';
 import { ClaudeCliIntelligenceProvider } from '../core/ClaudeCliIntelligenceProvider.js';
+import { wrapIntelligenceWithCircuitBreaker } from '../core/CircuitBreakingIntelligenceProvider.js';
+import { configureLlmCircuitBreaker } from '../core/LlmCircuitBreaker.js';
 import { isClaudeForbidden } from '../core/claudeForbiddenGuard.js';
 import { FeedbackManager } from '../core/FeedbackManager.js';
 import { FeedbackAnomalyDetector } from '../monitoring/FeedbackAnomalyDetector.js';
@@ -2744,6 +2746,14 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.warn(`[server] codex-only guard init failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // Account-global LLM rate-limit circuit breaker. Apply operator overrides
+    // from config before any provider is built; the breaker defaults ON with a
+    // 15-minute window, so absent config still protects the agent.
+    configureLlmCircuitBreaker({
+      enabled: config.intelligence?.circuitBreaker?.enabled,
+      openMs: config.intelligence?.circuitBreaker?.openMs,
+    });
+
     // Provider-portability v1.0.0: pick the IntelligenceProvider that
     // matches the configured framework. Defaults to claude-code for
     // backwards-compat; INSTAR_FRAMEWORK=codex-cli routes through Codex.
@@ -2812,8 +2822,10 @@ export async function startServer(options: StartOptions): Promise<void> {
         sharedIntelligence = built;
         intelligenceSource = framework === 'codex-cli' ? 'Codex CLI' : 'Claude CLI subscription';
       } else {
-        // Fall back to the legacy Claude path for backwards-compat.
-        sharedIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        // Fall back to the legacy Claude path for backwards-compat. Wrap with
+        // the circuit breaker (the factory path above is already wrapped).
+        sharedIntelligence =
+          wrapIntelligenceWithCircuitBreaker(new ClaudeCliIntelligenceProvider(config.sessions.claudePath)) ?? undefined;
         intelligenceSource = 'Claude CLI subscription (fallback)';
       }
     } catch { /* CLI not available */ }
@@ -2899,7 +2911,8 @@ export async function startServer(options: StartOptions): Promise<void> {
         // be built but a claude binary path is still configured. Skipped on
         // codex-only agents (isClaudeForbidden) — there, relationships run
         // without LLM intelligence rather than silently using Claude.
-        config.relationships.intelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        config.relationships.intelligence =
+          wrapIntelligenceWithCircuitBreaker(new ClaudeCliIntelligenceProvider(config.sessions.claudePath)) ?? undefined;
         intelligenceMode = 'LLM-supervised (Claude CLI subscription, fallback)';
       }
 
@@ -4531,7 +4544,9 @@ export async function startServer(options: StartOptions): Promise<void> {
         summaryIntelligence = sharedIntelligence;
       } else if (!isClaudeForbidden()) {
         const { ClaudeCliIntelligenceProvider } = await import('../core/ClaudeCliIntelligenceProvider.js');
-        summaryIntelligence = new ClaudeCliIntelligenceProvider(config.sessions.claudePath);
+        summaryIntelligence = wrapIntelligenceWithCircuitBreaker(
+          new ClaudeCliIntelligenceProvider(config.sessions.claudePath),
+        );
       }
       // On a codex-only agent without a built Codex provider, summaryIntelligence
       // stays null — topic summaries are skipped rather than run on Claude.

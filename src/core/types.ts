@@ -1888,6 +1888,28 @@ export interface InstarConfig {
     enabled?: boolean;
   };
   /**
+   * LLM intelligence-layer config. Currently scopes the account-global
+   * rate-limit circuit breaker (CircuitBreakingIntelligenceProvider +
+   * LlmCircuitBreaker). The breaker defaults ON with a 15-minute open window
+   * and needs NO config to work — these fields only let an operator tune or
+   * disable it. Because the defaults apply when the section is absent, the
+   * protection reaches every existing agent on a version bump with zero config
+   * migration. See src/core/LlmCircuitBreaker.ts.
+   */
+  intelligence?: {
+    circuitBreaker?: {
+      /** Master switch for the rate-limit circuit breaker (default: true). */
+      enabled?: boolean;
+      /**
+       * How long to fully pause LLM-backed work after the provider reports a
+       * usage/rate limit, before admitting a single probe call (default:
+       * 900000 ms = 15 min). A still-limited probe re-opens for another window;
+       * a successful probe closes the breaker.
+       */
+      openMs?: number;
+    };
+  };
+  /**
    * Agent-level set of frameworks this install actively uses. Drives
    * which framework-specific migration steps run on update: a
    * codex-cli-only install should not receive `.claude/`-specific
