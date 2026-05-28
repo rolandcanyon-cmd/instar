@@ -32,8 +32,19 @@ Files:
 - **Performance:** The occurrence prune is one indexed DELETE per `open()` (idx_occ_dedupe), bounded; net effect is to STOP unbounded growth. The upsert is one statement vs the prior two (SELECT+INSERT) on the new-record path.
 - **Reversibility:** Fully reversible by revert; the retention prune is the only destructive op and it only removes surplus forensic rows beyond the cap.
 
+### Commit 2 — the `ci` source + reverse-lookup
+
+Files:
+- `src/core/InitiativeTracker.ts`: `findByMergeCommit(oid)` / `findByPrNumber(n)` — exact-OID reverse-lookup via `list()` (TaskFlow-safe; no index needed at scale). Net-new (no reverse lookup existed).
+- `src/monitoring/CiFailurePoller.ts` (NEW): the §3.1 `ci` source. `gh run list` arg-array only + `repo` regex-validated; flaky guard (latest run per head SHA; recovered SHAs dropped); per-tick write cap; lease-gated; loop self-exclusion (skip `failure-learning-loop`-origin initiatives); constant `filedBy:'source:ci'`; mapped→automatic(0.9) / unmapped→inferred(0.2)→noFeatureLink; deterministic job-name→category allow-list; `scrubSecrets()` on `detail.full`. Fail-open per-run + per-tick.
+- `src/monitoring/FailureLedger.ts`: `countOccurrences()` observability/test hook for the retention cap.
+- Tests: `tests/unit/CiFailurePoller.test.ts` (12 — category map, flaky guard, scrub, mapped/unmapped/loop-skip/untrusted-repo/fail-open/cap/lease), `tests/unit/FailureLedger-ingestion-substrate.test.ts` (5 — new categories survive, occurrence retention bounded, upsert increments, analyzer status-filter both sides).
+
+Decision points: CI attribution is exact-OID (headSha→findByMergeCommit) only — pre-merge PR runs that don't map land in `noFeatureLink` (honest; PR-number mapping is a refinement). `gh` runner injected for tests. Flaky guard is batch-local (latest-run-per-SHA), not a per-run `gh run view` (cheaper; sufficient for slice 1).
+
 ## Evidence
 
 - `tsc --noEmit`: clean (confirms the `RECOMMENDATION_BY_CATEGORY` totality is satisfied).
+- Slice-1 source + substrate tests: 17 green (12 CiFailurePoller + 5 substrate); existing failure-learning tests unaffected.
 - Existing failure-learning tests green after the substrate change: `FailureLedger` (11), `FailureAttributionEngine` (10), `FailureLoop` — 28 passing, no regressions.
 - Dedicated slice-1 substrate tests (occurrence retention bounded; ON CONFLICT count=2-not-dropped; analyzer status-filter both sides) land with the test commit.

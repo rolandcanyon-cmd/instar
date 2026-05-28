@@ -566,6 +566,17 @@ export class FailureLedger {
   }
 
   /**
+   * Raw forensic-log row count (Ingestion-sources spec §5). Observability +
+   * test hook for the retention cap — total rows, or rows for one dedupeKey.
+   */
+  countOccurrences(dedupeKey?: string): number {
+    const row = dedupeKey
+      ? this.db.prepare(`SELECT COUNT(*) c FROM failure_occurrences WHERE dedupe_key = ?`).get(dedupeKey)
+      : this.db.prepare(`SELECT COUNT(*) c FROM failure_occurrences`).get();
+    return ((row as { c: number } | undefined)?.c) ?? 0;
+  }
+
+  /**
    * Analyzer query path (spec §4.4): indexed group-bys directly in SQL, never a
    * full cache-rebuild + JS filter. Toolchain-blame counts are restricted to
    * `verified`-provenance, `automatic`-attribution records (claimed / one-tap /
