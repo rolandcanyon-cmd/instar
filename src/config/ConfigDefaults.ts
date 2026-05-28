@@ -73,6 +73,16 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
       minDistinctCauseCommits: 3,
       attributionConfidenceFloor: 0.6,
       insightTelegramEscalation: false,
+      // Ingestion sources (spec §4.4) — all off by default; applyDefaults
+      // deep-merges this into existing agents without surprise activation.
+      sources: {
+        ci: false,
+        revert: false,
+        regression: false,
+        regressionIncludesBackslide: false,
+        degradation: [],
+        ciMaxRunsPerTick: 50,
+      },
     },
     // ReleaseReadinessSentinel (docs/specs/RELEASE-READINESS-VISIBILITY-SPEC.md
     // §4.2). Ships OFF — Echo dogfoods first. Repo-gated: inert unless the

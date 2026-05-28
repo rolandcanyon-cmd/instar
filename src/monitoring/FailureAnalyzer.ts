@@ -43,6 +43,11 @@ const RECOMMENDATION_BY_CATEGORY: Record<FailureCategory, string> = {
   logic: 'Recurring logic failures — strengthen the both-sides-of-the-boundary test requirement in the spec review.',
   migration: 'Recurring migration failures — add a migration-parity check (existing-agent path) to the review checklist.',
   'test-gap': 'Recurring test-gap failures — require the 3-tier test set (incl. the production storage path) before merge.',
+  // Ingestion-sources spec §7: required because this is a total Record<FailureCategory,…>
+  // — widening the enum without these entries fails tsc. (A totality test locks this.)
+  'build-failure': 'Recurring build failures — check the build config / dependency or lint rule that keeps breaking, and add a pre-merge build gate for it.',
+  'test-failure': 'Recurring test failures — require the 3-tier test set before merge and stabilize the flaky path before it lands.',
+  regression: 'Recurring regressions — a shipped feature keeps breaking; add a regression guard (a test pinning the behavior) for this path.',
   unknown: 'Recurring uncategorized failures — improve the failure-categorization step so these become actionable.',
 };
 
@@ -66,9 +71,13 @@ export class FailureAnalyzer {
       : undefined;
     // Only attributed records feed a process-change recommendation (§4.3): a
     // guess (`inferred`) is excluded until confirmed.
+    // Ingestion-sources spec §6.1 (implements parent §4.4 M6, specified-but-unbuilt):
+    // `resolved` records (incl. those a revert closes) are excluded from active-rate
+    // clustering — a fixed/reverted failure must not keep driving a recommendation.
+    // `reopened` stays IN (it is active again); only `resolved` is excluded.
     const records = this.ledger
       .list({ sinceMs, limit: 1000 })
-      .filter((r) => r.attribution === 'automatic' || r.attribution === 'one-tap');
+      .filter((r) => (r.attribution === 'automatic' || r.attribution === 'one-tap') && r.status !== 'resolved');
 
     const byCategory = new Map<FailureCategory, FailureRecord[]>();
     for (const r of records) {

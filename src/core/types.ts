@@ -2755,6 +2755,28 @@ export interface MonitoringConfig {
     /** Off by default — when true, thresholded insights post ONCE to the existing
      *  system topic (never a new per-feature topic). Spec §4.5 / round-2 M1. */
     insightTelegramEscalation?: boolean;
+    /**
+     * Automatic ingestion sources (FAILURE-LEARNING-INGESTION-SOURCES-SPEC §4.4).
+     * Each off by default; every source is fail-open + near-silent (writes the
+     * ledger only). Slice 1 ships `ci` + `revert`; `regression`/`degradation`
+     * land in later slices.
+     */
+    sources?: {
+      /** Poll CI runs via `gh` and file failed ones (spec §3.1). Default false. */
+      ci?: boolean;
+      /** Detect `Revert "…"` commits and close/open records (spec §3.2). Default false. */
+      revert?: boolean;
+      /** Edge-triggered regression event from InitiativeTracker (spec §3.3, slice 2). Default false. */
+      regression?: boolean;
+      /** Include rollout-backslide regressions, not just merge-unreachable (spec §3.3). Default false. */
+      regressionIncludesBackslide?: boolean;
+      /** Subsystem allow-list for runtime-degradation ingestion (spec §3.4, slice 3, dashboard-only). Default []. */
+      degradation?: string[];
+      /** CI poll interval override in minutes (spec §3.1/§9 Q1). Default = reconciler cadence. */
+      ciPollMinutes?: number;
+      /** Max failed CI runs filed per poll tick (spec §5). Default 50. */
+      ciMaxRunsPerTick?: number;
+    };
   };
   /**
    * ReleaseReadinessSentinel (docs/specs/RELEASE-READINESS-VISIBILITY-SPEC.md §4.2)
