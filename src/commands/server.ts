@@ -5627,12 +5627,15 @@ export async function startServer(options: StartOptions): Promise<void> {
     // replace"). undefined when the corresponding sentinel is disabled.
     let socketRecoveryActive: ((sessionName: string) => boolean) | undefined;
     let silenceRecoveryActive: ((sessionName: string) => boolean) | undefined;
+    let wedgeRecoveryActive: ((sessionName: string) => boolean) | undefined;
     {
       const { SocketDisconnectSentinel } = await import('../monitoring/SocketDisconnectSentinel.js');
       const { ActiveWorkSilenceSentinel } = await import('../monitoring/ActiveWorkSilenceSentinel.js');
+      const { ContextWedgeSentinel } = await import('../monitoring/ContextWedgeSentinel.js');
       const {
         buildSocketDisconnectDeps,
         buildActiveWorkSilenceDeps,
+        buildContextWedgeDeps,
         OutputActivityTracker,
       } = await import('../monitoring/sentinelWiring.js');
       const { SentinelNotifier } = await import('../monitoring/SentinelNotifier.js');
@@ -5721,6 +5724,53 @@ export async function startServer(options: StartOptions): Promise<void> {
             : '  ActiveWorkSilenceSentinel enabled (silent-freeze watchdog — logs only, Telegram escalation OFF)',
         ));
       }
+
+      // ── ContextWedgeSentinel — thinking-block-400 fast-fail wedge ──
+      // Detection + audit ship default-ON (harmless housekeeping). The
+      // destructive fresh-respawn is gated by autoRecovery (default OFF +
+      // dryRun) and rides the Graduated Feature Rollout track. freshRespawn is
+      // late-bound to _sessionRefresh (assigned later in boot) and only invoked
+      // at recovery time; it uses fresh-mode so the new session never --resume-s
+      // the corrupted transcript. Spec: docs/specs/context-wedge-sentinel.md.
+      const wedgeCfg = config.monitoring?.contextWedgeSentinel ?? { enabled: true };
+      if (wedgeCfg.enabled !== false) {
+        const autoRecovery = wedgeCfg.autoRecovery ?? { enabled: false, dryRun: true };
+        const wedgeSentinel = new ContextWedgeSentinel(
+          buildContextWedgeDeps({
+            sessions: sessionSurface,
+            escalate: (name, text) => notifier.escalate('context-wedge', name, text),
+            autoRecovery,
+            freshRespawn: async (name: string): Promise<boolean> => {
+              if (!_sessionRefresh) return false;
+              const result = await _sessionRefresh.refreshSession({
+                sessionName: name,
+                fresh: true,
+                reason: 'context-wedge-400',
+              });
+              return result.ok;
+            },
+          }),
+          {
+            enabled: wedgeCfg.enabled,
+            tickIntervalMs: wedgeCfg.tickIntervalMs,
+            confirmWindowMs: wedgeCfg.confirmWindowMs,
+          },
+        );
+        wedgeSentinel.on('detected', (e: { sessionName: string }) =>
+          notifier.record('detected', 'context-wedge', e.sessionName));
+        wedgeSentinel.on('recovered', (e: { sessionName: string }) =>
+          notifier.record('recovered', 'context-wedge', e.sessionName, 'fresh respawn'));
+        wedgeSentinel.on('dry-run', (e: { sessionName: string }) =>
+          notifier.record('dry-run', 'context-wedge', e.sessionName, 'would fresh-respawn'));
+        wedgeSentinel.on('false-alarm', (e: { sessionName: string }) =>
+          notifier.record('false-alarm', 'context-wedge', e.sessionName, 'signature scrolled out of tail'));
+        wedgeSentinel.on('recovery-error', (e: { sessionName: string; err: unknown }) =>
+          notifier.record('recovery-error', 'context-wedge', e.sessionName, e.err instanceof Error ? e.err.message : String(e.err)));
+        wedgeSentinel.start();
+        wedgeRecoveryActive = (s: string) => wedgeSentinel.isRecoveryActive(s);
+        const mode = autoRecovery.enabled ? (autoRecovery.dryRun ? 'auto-recover dry-run' : 'auto-recover LIVE') : 'detect-only';
+        console.log(pc.green(`  ContextWedgeSentinel enabled (thinking-block-400 wedge — ${mode})`));
+      }
     }
 
     // Recompose the zombie-kill veto to include ALL four recovery sentinels now
@@ -5733,7 +5783,8 @@ export async function startServer(options: StartOptions): Promise<void> {
       compactionSentinel.isRecoveryActive(session.tmuxSession) ||
       rateLimitSentinel.isRecoveryActive(session.tmuxSession) ||
       (socketRecoveryActive?.(session.tmuxSession) ?? false) ||
-      (silenceRecoveryActive?.(session.tmuxSession) ?? false);
+      (silenceRecoveryActive?.(session.tmuxSession) ?? false) ||
+      (wedgeRecoveryActive?.(session.tmuxSession) ?? false);
     sessionManager.setActiveRecoveryChecker(composedRecoveryActive);
 
     // Trigger 1: PreCompact hook event — report to sentinel.

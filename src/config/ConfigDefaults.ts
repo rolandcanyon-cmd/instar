@@ -40,6 +40,21 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
     activeWorkSilenceSentinel: {
       enabled: true,
     },
+    // ContextWedgeSentinel — detect+recover the "thinking blocks ... cannot be
+    // modified" 400 fast-fail wedge. Detection/audit ships default-ON (it kills
+    // nothing). The destructive fresh-respawn is gated behind autoRecovery,
+    // which ships dark (enabled:false) and rides the Graduated Feature Rollout
+    // track — promotion to default-on is a deliberate one-line flip of
+    // autoRecovery.enabled here, which (because the runtime reads it as a
+    // fallback against this shipped default) propagates to every existing agent
+    // on next update with no migration. See docs/specs/context-wedge-sentinel.md.
+    contextWedgeSentinel: {
+      enabled: true,
+      autoRecovery: {
+        enabled: false,
+        dryRun: true,
+      },
+    },
     // SessionReaper — pressure-aware reaper of idle-but-alive sessions.
     // UNLIKE the sentinels above, default OFF + dry-run: it is the only monitor
     // that *kills* sessions on a heuristic, so it ships dark and must be flipped

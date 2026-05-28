@@ -2718,6 +2718,46 @@ export interface MonitoringConfig {
     verifyWindowMs?: number;
   };
   /**
+   * ContextWedgeSentinel — detects the Claude Code "thinking/redacted_thinking
+   * blocks in the latest assistant message cannot be modified" 400 fast-fail
+   * wedge (a cancelled tool call inside a parallel batch corrupts the latest
+   * assistant turn's thinking block, so every subsequent resume 400s instantly
+   * and the session is permanently dead while still emitting output). A nudge
+   * cannot fix it; recovery is a FRESH respawn (kill + clear the topic's resume
+   * UUID so the bridge does not --resume the corrupted transcript).
+   *
+   * Detection/audit ships default-ON (housekeeping — harmless, kills nothing).
+   * The destructive respawn is gated behind `autoRecovery` (default OFF + dryRun)
+   * and rides the Graduated Feature Rollout track (rollout-flag-path:
+   * monitoring.contextWedgeSentinel.autoRecovery). See
+   * docs/specs/context-wedge-sentinel.md.
+   */
+  contextWedgeSentinel?: {
+    /** Master kill switch for detection + audit (default: true). */
+    enabled: boolean;
+    /** Scan-loop interval (ms) (default: 20_000). */
+    tickIntervalMs?: number;
+    /** How long the signature must persist as the non-progressing session tail
+     *  before the wedge is confirmed (ms) (default: 45_000). Guards against a
+     *  session merely discussing the error or a transient render. */
+    confirmWindowMs?: number;
+    /** Pane lines to capture when scanning for the signature (default: 30). */
+    captureLines?: number;
+    /**
+     * Destructive auto-recovery (fresh respawn). The Graduated-Feature-Rollout
+     * staged flag: dark (enabled:false) → dry-run (enabled:true + dryRun:true,
+     * logs would-respawn) → live (enabled:true + dryRun:false) → default-on
+     * (shipped default enabled:true). Read at runtime as a fallback against the
+     * shipped default so a default flip propagates fleet-wide with no migration.
+     */
+    autoRecovery?: {
+      /** Whether confirmed wedges are auto-respawned (default: false). */
+      enabled: boolean;
+      /** When true, log the would-respawn decision but kill nothing (default: true). */
+      dryRun?: boolean;
+    };
+  };
+  /**
    * SessionReaper — pressure-aware reaper of idle-but-alive sessions. The only
    * monitor that *kills* on a heuristic, so it ships OFF + dry-run by default.
    * See docs/specs/SESSION-REAPER-SPEC.md and DEFAULT_SESSION_REAPER_CONFIG.
