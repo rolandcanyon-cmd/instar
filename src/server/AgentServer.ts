@@ -64,8 +64,11 @@ import { MentorOnboardingRunner, DEFAULT_MENTOR_CONFIG, type MentorConfig } from
 import { STAGE_A_ALLOWED_TOOLS } from '../monitoring/MentorStageA.js';
 import { analyzeForensics } from '../scheduler/MentorStageBForensics.js';
 import { TelegramAdapter as MentorTelegramAdapter } from '../messaging/TelegramAdapter.js';
-import { sendAgentMessage } from '../messaging/AgentTelegramComms.js';
+import { sendAgentMessage, A2A_VERSION, type RecipientConfig } from '../messaging/AgentTelegramComms.js';
 import { AgentTelegramLedger, defaultLedgerPaths as defaultA2aLedgerPaths } from '../messaging/AgentTelegramLedger.js';
+import { ProcessedIdStore } from '../messaging/ProcessedIdStore.js';
+import { buildAgentMessageHook, type RoleHandler } from '../messaging/installAgentMessageHook.js';
+import { OutstandingPromptTracker } from '../scheduler/OutstandingPromptTracker.js';
 import { parseCodexRollout } from '../monitoring/CodexRolloutParser.js';
 import type { ForensicFinding } from '../monitoring/FrameworkIssueLedger.js';
 import { BurnDetector } from '../monitoring/BurnDetector.js';
@@ -106,6 +109,12 @@ export class AgentServer {
   private mentorBotAdapterToken: string | null = null;
   /** Lazily-constructed a2a audit ledger (shared across mentor sends/recvs). */
   private a2aLedger: AgentTelegramLedger | null = null;
+  /** Lazily-constructed processed-id store (idempotency for inbound mentor-reply). */
+  private a2aProcessedIds: ProcessedIdStore | null = null;
+  /** Lazily-constructed outstanding-prompt tracker (anti-ping-pong). */
+  private mentorOutstanding: OutstandingPromptTracker | null = null;
+  /** Reply-jsonl path (Codey's reply persisted here for Stage-B forensics). */
+  private mentorReplyJsonlPath: string | null = null;
   private failureLedger: FailureLedger | null = null;
   private failureAttributionEngine: FailureAttributionEngine | null = null;
   // Burn-detection-and-self-heal system (six-phase umbrella spec at
@@ -773,6 +782,10 @@ export class AgentServer {
         { subDir: 'agent-telegram/mentor-bot', suppressLifelineAutoCreate: true },
       );
       this.mentorBotAdapterToken = botToken;
+      // Install the mentor-reply recipient hook now that the adapter is up. The handler
+      // clears the outstanding-prompt by corr + persists the reply for Stage-B.
+      const mentorBotId = botToken.split(':')[0];
+      this.installMentorReceiverHook(this.mentorBotAdapter, mentorBotId);
       return this.mentorBotAdapter;
     } catch (err) {
       console.warn('[mentor] mentor-bot adapter construction failed (non-fatal):', err instanceof Error ? err.message : String(err));
@@ -788,6 +801,91 @@ export class AgentServer {
       this.a2aLedger = new AgentTelegramLedger(defaultA2aLedgerPaths(this.config.stateDir));
     }
     return this.a2aLedger;
+  }
+
+  /** Lazily construct + cache the processed-id store (idempotency for inbound replies). */
+  private getOrCreateA2aProcessedIds(): ProcessedIdStore {
+    if (!this.a2aProcessedIds) {
+      this.a2aProcessedIds = new ProcessedIdStore({
+        filePath: path.join(this.config.stateDir, 'a2a-processed-ids.json'),
+      });
+    }
+    return this.a2aProcessedIds;
+  }
+
+  /** Lazily construct + cache the outstanding-prompt tracker (anti-ping-pong). */
+  private getOrCreateMentorOutstanding(): OutstandingPromptTracker {
+    if (!this.mentorOutstanding) {
+      this.mentorOutstanding = new OutstandingPromptTracker({
+        filePath: path.join(this.config.stateDir, 'mentor-outstanding-prompts.json'),
+      });
+    }
+    return this.mentorOutstanding;
+  }
+
+  /**
+   * Install the mentor-reply recipient hook on the mentor-bot adapter. Called from
+   * getOrCreateMentorBot once the adapter is up. The hook routes role=`mentor-reply`
+   * from Codey to a handler that (1) clears the outstanding-prompt entry by `corr`
+   * (so the next mentor tick can send again), and (2) persists the reply to a
+   * jsonl file Stage-B forensics reads. This is the capability-handle invariant from
+   * the spec: the reply-ingestion path CANNOT call spawnStageA / deliverToMentee /
+   * scheduler / Threadline — it only writes the reply + clears tracking.
+   */
+  private installMentorReceiverHook(bot: MentorTelegramAdapter, mentorBotId: string): void {
+    const cfg = this.getMentorConfigSnapshot();
+    if (!cfg.menteeBotId) return;
+    const recipientCfg: RecipientConfig = {
+      localAgent: 'echo',
+      knownAgents: { [`instar-${cfg.menteeFramework}`]: { botId: cfg.menteeBotId } },
+      acceptRoles: { [`instar-${cfg.menteeFramework}`]: ['mentor-reply'] },
+      skewWindowMs: 24 * 60 * 60 * 1000,
+      maxVersion: A2A_VERSION,
+    };
+    const outstanding = this.getOrCreateMentorOutstanding();
+    const replyJsonl = path.join(this.config.stateDir, 'mentor-replies.jsonl');
+    this.mentorReplyJsonlPath = replyJsonl;
+
+    const mentorReplyHandler: RoleHandler = async (msg, ctx) => {
+      // (1) Clear the outstanding-prompt by corr (the next tick can send again).
+      const had = outstanding.clearByCorr(msg.corr);
+      if (!had) {
+        // Spurious / late reply (no outstanding match). Still persist it for forensics.
+        console.warn(`[mentor] mentor-reply for unknown corr=${msg.corr} (late after orphan-sweep?); persisting anyway`);
+      }
+      // (2) Persist the reply for Stage-B (append-only JSONL). Capability-handle
+      // invariant: this is the ONLY outbound effect; no spawn/deliver/schedule.
+      try {
+        fs.mkdirSync(path.dirname(replyJsonl), { recursive: true });
+        const row = {
+          ts: Date.now(),
+          fromAgent: msg.from,
+          corr: msg.corr,
+          replyId: msg.id,
+          topicId: ctx.topicId,
+          message: msg.body,
+        };
+        fs.appendFileSync(replyJsonl, JSON.stringify(row) + '\n', 'utf-8');
+      } catch (err) {
+        console.warn('[mentor] mentor-reply persist failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    const hook = buildAgentMessageHook({
+      config: recipientCfg,
+      ledger: this.getOrCreateA2aLedger(),
+      processedIds: this.getOrCreateA2aProcessedIds(),
+      roleHandlers: new Map<string, RoleHandler>([['mentor-reply', mentorReplyHandler]]),
+    });
+    bot.setAgentMessageHook(hook);
+  }
+
+  /** Snapshot of mentor config for use outside the runner's getConfig closure. */
+  private getMentorConfigSnapshot(): MentorConfig {
+    return {
+      ...DEFAULT_MENTOR_CONFIG,
+      ...((this.config as unknown as { mentor?: Partial<MentorConfig> }).mentor ?? {}),
+    };
   }
 
   private buildMentorRunner(
@@ -902,17 +1000,45 @@ export class AgentServer {
             console.warn(`[mentor] deliverToMentee skipped — mentor-bot config incomplete (need mentor.botToken + menteeBotId + menteeChatId + menteeTopicId; framework=${framework})`);
             return;
           }
+          const menteeAgent = `instar-${framework}`;
+          // Anti-ping-pong (spec §Fix 2b item 4 + Justin's original concern). Refuse to
+          // send a new prompt while a prior one is unanswered within replyTimeoutMs.
+          const outstanding = self.getOrCreateMentorOutstanding();
+          const orphans = outstanding.sweepExpired();
+          for (const orphan of orphans) {
+            if (outstanding.recordOrphanNotified(orphan.corr)) {
+              console.warn(`[mentor] orphaned prompt — no reply within ${orphan.ageMs}ms (corr=${orphan.corr}, mentee=${orphan.mentee})`);
+              try {
+                DegradationReporter.getInstance().report({
+                  feature: 'mentor.reply-orphaned',
+                  primary: 'mentor receives Codey reply within replyTimeoutMs',
+                  fallback: 'tick continues; no auto-resend; Stage-B sees the routed-sent row + no matching reply row',
+                  reason: `outstanding prompt corr=${orphan.corr} aged ${orphan.ageMs}ms without a mentor-reply`,
+                  impact: 'mentor cycle silently lost a reply; next tick allowed to retry',
+                });
+              } catch { /* best-effort */ }
+            }
+          }
+          const check = outstanding.canSendTo(menteeAgent);
+          if (!check.ok) {
+            console.warn(`[mentor] deliverToMentee deferred — prior-prompt-in-flight (corr=${check.outstandingCorr}, sentAt=${check.sentAt})`);
+            return;
+          }
+
           const bot = self.getOrCreateMentorBot(cfg.botToken, cfg.menteeChatId);
           if (!bot) return;
           const ledger = self.getOrCreateA2aLedger();
+          const corr = `mp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
           try {
-            await sendAgentMessage(
+            const result = await sendAgentMessage(
               {
                 fromAgent: 'echo',
-                toAgent: `instar-${framework}`,
+                toAgent: menteeAgent,
                 role: 'mentor',
                 toTopicId: cfg.menteeTopicId,
                 message,
+                id: corr,
+                correlationId: corr,
               },
               {
                 send: async (topicId, text) => {
@@ -925,13 +1051,17 @@ export class AgentServer {
                 },
                 appendAudit: (row) => ledger.appendSent(row),
                 now: () => Date.now(),
-                mintId: () => `mp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+                mintId: () => corr,
                 allowedRoles: new Set(['mentor']),
                 botToken: cfg.botToken,
-                fromBotId: cfg.botToken.split(':')[0], // bot id is the prefix before the secret
+                fromBotId: cfg.botToken.split(':')[0],
                 toBotId: cfg.menteeBotId,
               },
             );
+            if (result.ok) {
+              // Mark only on successful send — a failed send doesn't owe a reply.
+              outstanding.markSent(corr, menteeAgent);
+            }
           } catch (err) {
             console.warn('[mentor] deliverToMentee send failed (non-fatal):', err instanceof Error ? err.message : String(err));
           }
