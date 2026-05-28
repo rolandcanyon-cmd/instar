@@ -18,6 +18,7 @@ import type { IntelligenceProvider } from './types.js';
 import { detectClaudePath, detectCodexPath } from './Config.js';
 import { ClaudeCliIntelligenceProvider } from './ClaudeCliIntelligenceProvider.js';
 import { CodexCliIntelligenceProvider } from './CodexCliIntelligenceProvider.js';
+import { wrapIntelligenceWithCircuitBreaker } from './CircuitBreakingIntelligenceProvider.js';
 
 /**
  * Stable framework identifiers the factory recognizes. Adding a new
@@ -60,19 +61,25 @@ export function buildIntelligenceProvider(
 ): IntelligenceProvider | null {
   const framework = options.framework ?? 'claude-code';
 
+  // Every provider the factory hands out is wrapped with the account-global
+  // LLM circuit breaker (CircuitBreakingIntelligenceProvider). A closed breaker
+  // is a transparent passthrough, so this is always safe; it only acts when the
+  // provider reports a usage/rate limit. See LlmCircuitBreaker for the why.
   switch (framework) {
     case 'claude-code': {
       const path = options.binaryPath ?? detectClaudePath();
       if (!path) return null;
-      return new ClaudeCliIntelligenceProvider(path);
+      return wrapIntelligenceWithCircuitBreaker(new ClaudeCliIntelligenceProvider(path));
     }
     case 'codex-cli': {
       const path = options.binaryPath ?? detectCodexPath();
       if (!path) return null;
-      return new CodexCliIntelligenceProvider({
-        codexPath: path,
-        ...(options.workingDirectory ? { workingDirectory: options.workingDirectory } : {}),
-      });
+      return wrapIntelligenceWithCircuitBreaker(
+        new CodexCliIntelligenceProvider({
+          codexPath: path,
+          ...(options.workingDirectory ? { workingDirectory: options.workingDirectory } : {}),
+        }),
+      );
     }
     default: {
       // Exhaustiveness check — extending IntelligenceFramework without
