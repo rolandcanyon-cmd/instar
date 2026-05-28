@@ -42,9 +42,18 @@ Files:
 
 Decision points: CI attribution is exact-OID (headSha→findByMergeCommit) only — pre-merge PR runs that don't map land in `noFeatureLink` (honest; PR-number mapping is a refinement). `gh` runner injected for tests. Flaky guard is batch-local (latest-run-per-SHA), not a per-run `gh run view` (cheaper; sufficient for slice 1).
 
+### Commit 3 — config + AgentServer wiring (CI source goes LIVE)
+
+Files:
+- `src/core/types.ts`: `failureLearning.sources` block (ci/revert/regression/regressionIncludesBackslide/degradation[]/ciPollMinutes/ciMaxRunsPerTick), all off by default.
+- `src/config/ConfigDefaults.ts`: `sources` defaults (all off) under `failureLearning` — `applyDefaults` deep-merges into existing agents existence-checked (migration parity §8, no surprise activation).
+- `src/server/AgentServer.ts`: construct `CiFailurePoller` gated on `failureLearning.enabled && sources.ci` (resolveByMergeCommit via `tracker.findByMergeCommit`, resolveRepo via `git remote get-url origin` → regex; interval/cap from config); start it in the post-listen callback; stop it on shutdown. Loop-origin exclusion is inert in slice 1 (Initiative gains `origin` in slice 2) — noted in-code.
+- Test: `tests/unit/CiFailurePoller-wiring.test.ts` (3) — the poller is constructed iff `enabled && sources.ci` (not dead code, not always-on), the silently-stopped-trio wiring-integrity lesson.
+
 ## Evidence
 
 - `tsc --noEmit`: clean (confirms the `RECOMMENDATION_BY_CATEGORY` totality is satisfied).
-- Slice-1 source + substrate tests: 17 green (12 CiFailurePoller + 5 substrate); existing failure-learning tests unaffected.
+- Slice-1 tests green: 12 CiFailurePoller + 5 substrate + 3 wiring-integrity = 20; existing failure-learning tests unaffected.
+- Remaining for slice 1: revert source + tests, agent-awareness, integration/E2E (feature-alive over HTTP + seeded-failure-surfaces), then PR.
 - Existing failure-learning tests green after the substrate change: `FailureLedger` (11), `FailureAttributionEngine` (10), `FailureLoop` — 28 passing, no regressions.
 - Dedicated slice-1 substrate tests (occurrence retention bounded; ON CONFLICT count=2-not-dropped; analyzer status-filter both sides) land with the test commit.
