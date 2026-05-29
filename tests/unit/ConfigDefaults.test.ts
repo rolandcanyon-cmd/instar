@@ -63,6 +63,79 @@ describe('ConfigDefaults', () => {
       expect(config.monitoring.sessionReaper.dryRun).toBe(false);
     });
 
+    // ── Multi-Machine Session Pool dark defaults (Track A — migration parity) ──
+    it('ships multiMachine.sessionPool DARK by default (enabled:false, stage:dark, dryRun:true)', () => {
+      for (const t of ['managed-project', 'standalone'] as const) {
+        const sp = ((getInitDefaults(t).multiMachine as any) ?? {}).sessionPool;
+        expect(sp).toBeDefined();
+        expect(sp.enabled).toBe(false);
+        expect(sp.stage).toBe('dark');
+        expect(sp.dryRun).toBe(true);
+        // Clock-skew knobs present + honor the §L2 startup invariant.
+        expect(sp.clockSkewToleranceMs).toBe(300000);
+        expect(sp.maxExpectedNtpDriftMs).toBe(250);
+        expect(sp.clockSkewToleranceMs).toBeGreaterThanOrEqual(sp.maxExpectedNtpDriftMs * 2);
+      }
+      const mig = (getMigrationDefaults('managed-project').multiMachine as any).sessionPool;
+      expect(mig.enabled).toBe(false);
+      expect(mig.stage).toBe('dark');
+    });
+
+    it('NEVER sets multiMachine.enabled — the sessionPool block must not switch multi-machine on', () => {
+      for (const t of ['managed-project', 'standalone'] as const) {
+        const mm = getInitDefaults(t).multiMachine as any;
+        // sessionPool exists, but enabled is not asserted by the defaults block.
+        expect(mm.sessionPool).toBeDefined();
+        expect(mm.enabled).toBeUndefined();
+      }
+    });
+
+    it('migrates sessionPool into an EXISTING multiMachine block without clobbering its fields', () => {
+      const config: any = { multiMachine: { enabled: true, leaseTtlMs: 60000 } };
+      const { patched, changes } = applyDefaults(config, getMigrationDefaults('managed-project'));
+      expect(patched).toBe(true);
+      // Existing multiMachine fields are preserved...
+      expect(config.multiMachine.enabled).toBe(true);
+      expect(config.multiMachine.leaseTtlMs).toBe(60000);
+      // ...and the dark sessionPool sub-block is added.
+      expect(config.multiMachine.sessionPool.enabled).toBe(false);
+      expect(config.multiMachine.sessionPool.stage).toBe('dark');
+      expect(changes.some((c: string) => c.includes('sessionPool'))).toBe(true);
+    });
+
+    it('migrates an inert multiMachine:{sessionPool} into a config with NO multiMachine block (does not enable it)', () => {
+      const config: any = { monitoring: {} };
+      applyDefaults(config, getMigrationDefaults('managed-project'));
+      expect(config.multiMachine.sessionPool.stage).toBe('dark');
+      expect(config.multiMachine.enabled).toBeUndefined(); // not switched on
+    });
+
+    it('is idempotent + does NOT overwrite an operator-advanced sessionPool stage', () => {
+      const config: any = { multiMachine: { sessionPool: { enabled: true, stage: 'shadow', dryRun: false } } };
+      const { changes } = applyDefaults(config, getMigrationDefaults('managed-project'));
+      expect(config.multiMachine.sessionPool.enabled).toBe(true);
+      expect(config.multiMachine.sessionPool.stage).toBe('shadow');
+      expect(config.multiMachine.sessionPool.dryRun).toBe(false);
+      expect(changes.some((c: string) => c.includes('sessionPool.stage'))).toBe(false);
+    });
+
+    it('backfills the Track-E deliverMessage/placement tunables into a partial sessionPool block (add-missing)', () => {
+      const config: any = { multiMachine: { sessionPool: { enabled: true, stage: 'shadow' } } };
+      applyDefaults(config, getMigrationDefaults('managed-project'));
+      // Operator fields preserved...
+      expect(config.multiMachine.sessionPool.stage).toBe('shadow');
+      // ...and the new §L4 tunables are added with their safe defaults.
+      expect(config.multiMachine.sessionPool.deliverMessageTimeoutMs).toBe(5000);
+      expect(config.multiMachine.sessionPool.deliverMessageMaxRetries).toBe(3);
+      expect(config.multiMachine.sessionPool.placementHysteresisDelta).toBe(0.15);
+      expect(config.multiMachine.sessionPool.ownershipCasMaxRetries).toBe(5);
+      // §L5 transfer tunables also backfill.
+      expect(config.multiMachine.sessionPool.transferDrainTimeoutMs).toBe(30000);
+      expect(config.multiMachine.sessionPool.transferOutputCutoffMs).toBe(1000);
+      expect(config.multiMachine.sessionPool.placementCooldownMs).toBe(300000);
+      expect(config.multiMachine.sessionPool.topicPlacementUpdateMinIntervalMs).toBe(10000);
+    });
+
     it('includes externalOperations', () => {
       const defaults = getInitDefaults('managed-project');
       expect(defaults.externalOperations).toBeDefined();

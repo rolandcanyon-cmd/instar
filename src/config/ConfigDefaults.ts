@@ -262,6 +262,36 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
       maxDeferMs: 60 * 60_000,
     },
   },
+  // Multi-Machine Session Pool (spec docs/specs/MULTI-MACHINE-SESSION-POOL-SPEC.md).
+  // Ships DARK. Adding ONLY the sessionPool sub-block here (never multiMachine.enabled)
+  // means applyDefaults() merges it under an existing multiMachine block without
+  // clobbering, and adds an inert multiMachine:{sessionPool} to agents that have no
+  // multiMachine block — neither path enables multi-machine. The entire session-pool
+  // layer is a no-op unless enabled:true AND stage advanced past 'dark' (StageAdvancer,
+  // Track H). This is the migration-parity path: every existing agent gets the dark
+  // defaults on update. The `stage` field is StageAdvancer-write-only at runtime.
+  multiMachine: {
+    sessionPool: {
+      enabled: false,
+      stage: 'dark',
+      dryRun: true,
+      clockSkewToleranceMs: 300000,
+      maxExpectedNtpDriftMs: 250,
+      machineRecordEvictionMs: 86400000,
+      meshRpcClockToleranceMs: 30000,
+      // §L4 router/dispatch tunables (spec §Config). The SessionRouter ships with
+      // matching hardcoded DEFAULT_ROUTER_CONFIG; these expose them for operators.
+      deliverMessageTimeoutMs: 5000,
+      deliverMessageMaxRetries: 3,
+      placementHysteresisDelta: 0.15,
+      ownershipCasMaxRetries: 5,
+      // §L5 transfer / handoff tunables (spec §Config).
+      transferDrainTimeoutMs: 30000,
+      transferOutputCutoffMs: 1000,
+      placementCooldownMs: 300000,
+      topicPlacementUpdateMinIntervalMs: 10000,
+    },
+  },
 };
 
 /**

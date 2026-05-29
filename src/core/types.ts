@@ -1495,8 +1495,23 @@ export type MachineRole = 'awake' | 'standby';
 export type CoordinationMode = 'primary-standby' | 'independent';
 
 export interface MachineRegistryEntry {
-  /** Human-friendly machine name */
+  /** Human-friendly machine name (auto-detected hostname at pairing; static). */
   name: string;
+  /**
+   * User-facing, EDITABLE nickname — the handle a user types in "run this on
+   * <nickname>" / "move this to <nickname>" (Multi-Machine Session Pool §L2).
+   * Auto-assigned at registration via NicknameAssigner (idempotent — kept if
+   * already set), editable via PATCH /pool/machines/:id, unique within the pool.
+   * Optional for backward-compat with registries written before §L2.
+   */
+  nickname?: string;
+  /**
+   * Self-attested static hardware properties (Session Pool §L2) — captured by
+   * the machine from `os` and recorded into ITS OWN registry entry, then synced
+   * to peers via the registry. Surfaced on the Machines dashboard tab + GET /pool.
+   * Optional (absent until the machine records it).
+   */
+  hardware?: MachineHardware;
   /** Current trust status */
   status: MachineStatus;
   /** Current operational role */
@@ -1579,6 +1594,76 @@ export interface MachineRegistry {
   lease?: LeaseRecord;
 }
 
+// ── Machine-Pool Registry (Multi-Machine Session Pool §L2) ───────────
+
+/**
+ * Static hardware properties of a machine, captured once at registration (cheap,
+ * stable `os` reads) and surfaced on the Machines dashboard tab + as placement
+ * signal (§L2). Self-reported → advisory for display, never authority.
+ */
+export interface MachineHardware {
+  /** os.platform() — e.g. "darwin", "linux", "win32". */
+  platform: string;
+  /** os.arch() — e.g. "arm64", "x64". */
+  arch: string;
+  /** os.cpus()[0].model — e.g. "Apple M2". */
+  cpuModel: string;
+  /** os.cpus().length. */
+  cpuCores: number;
+  /** os.totalmem() in bytes. */
+  totalMemBytes: number;
+  /** os.hostname(). */
+  hostname: string;
+  /** The instar version this machine reported. */
+  instarVersion?: string;
+}
+
+/**
+ * Clock-skew quarantine state (§L2). An explicit three-value FSM so every
+ * implementation + recovery path is identical. A SINGLE divergent heartbeat
+ * never removes a machine; removal requires 2 consecutive divergent beats;
+ * re-admission requires 2 consecutive in-tolerance beats.
+ */
+export type ClockSkewStatus = 'ok' | 'divergence-detected-once' | 'suspect-clock-removed';
+
+/**
+ * Live per-machine capacity record (§L2) — the input to placement and the
+ * Machines dashboard tab. Assembled by MachinePoolRegistry from the machine
+ * registry (nickname), MachineHeartbeat (liveness), `os` (hardware/load), and
+ * SessionManager diagnostics (sessions/memPressure). Liveness + freshness key
+ * on `routerReceivedAt` (the router's own clock), NEVER the machine's
+ * self-reported timestamp (clock-skew safety).
+ */
+export interface MachineCapacity {
+  machineId: string;
+  /** User-facing nickname (§L2), mirrored from the registry entry. */
+  nickname?: string;
+  /** Liveness, computed as (now(router) − routerReceivedAt) < failoverThreshold. */
+  online: boolean;
+  /** The machine's own last-heartbeat timestamp (ISO) — debugging only. */
+  selfReportedLastSeen?: string;
+  /** When the router last observed this machine, on the ROUTER's clock (ISO). */
+  routerReceivedAt?: string;
+  /** 1-minute OS load average from the machine (os.loadavg()[0]). */
+  loadAvg?: number;
+  /** Memory pressure bucket from SessionManager diagnostics. */
+  memPressure?: 'low' | 'moderate' | 'high' | 'critical';
+  /** Active session count on the machine. */
+  activeSessionCount?: number;
+  /** Configured max sessions. */
+  maxSessions?: number;
+  /** Capabilities (e.g. "gpu", "local-model:llama3", "fast-cpu"). */
+  capabilities?: string[];
+  /** Local models available. */
+  modelsAvailable?: string[];
+  /** Agents resident on the machine (multi-agent-per-machine, §L6). */
+  agentsResident?: string[];
+  /** Static hardware properties (§L2). */
+  hardware?: MachineHardware;
+  /** Clock-skew quarantine state (§L2 FSM). */
+  clockSkewStatus: ClockSkewStatus;
+}
+
 export interface MultiMachineConfig {
   /** Whether multi-machine is enabled */
   enabled: boolean;
@@ -1640,6 +1725,103 @@ export interface MultiMachineConfig {
    * SEAMLESSNESS_PROTOCOL_VERSION applies); present so migrations/tests can pin it.
    */
   protocolVersion?: number;
+  /**
+   * Multi-Machine Session Pool (spec docs/specs/MULTI-MACHINE-SESSION-POOL-SPEC.md).
+   * Active-active per-session placement + transfer on top of the router lease.
+   * Ships DARK: the entire layer is inert unless `enabled` is true AND the
+   * graduated `stage` has been advanced past 'dark' (the stage is written ONLY
+   * by StageAdvancer — Track H — gated on a green E2E result). Independent of
+   * the single-awake seamlessness model above; a 1-machine agent is a no-op.
+   */
+  sessionPool?: SessionPoolConfig;
+}
+
+/**
+ * Multi-Machine Session Pool config block. All optional with safe dark defaults
+ * (see ConfigDefaults `SHARED_DEFAULTS.multiMachine.sessionPool`). Tunables for
+ * later layers (placement, transfer, registry, clock-skew) are added to this
+ * interface by their tracks as they land.
+ */
+export interface SessionPoolConfig {
+  /** Master switch. Default false — the entire session-pool layer is inert when false. */
+  enabled?: boolean;
+  /**
+   * Graduated rollout stage (spec §Rollout). 'dark' (code shipped, placement
+   * dry-run, always local) → 'shadow' (real placement + ownership, no transfer)
+   * → 'live-transfer' (failover + pin transfers) → 'rebalance' (load-driven).
+   * Written ONLY by StageAdvancer via a Config.ts write-guard (Track H);
+   * a direct write is rejected. Default 'dark'.
+   */
+  stage?: 'dark' | 'shadow' | 'live-transfer' | 'rebalance';
+  /**
+   * When true, the placement engine LOGS the decision it would make but always
+   * places locally (Stage-0 behavior). Default true.
+   */
+  dryRun?: boolean;
+  /**
+   * Clock-skew divergence tolerance (ms) — a machine whose self-reported vs
+   * router-observed timestamps diverge beyond this on 2 consecutive heartbeats
+   * is quarantined from placement (§L2). Default 300000 (5 min). Must be
+   * ≥ 2× maxExpectedNtpDriftMs (validated at startup).
+   */
+  clockSkewToleranceMs?: number;
+  /**
+   * Max expected NTP drift (ms) on a healthy host. `clockSkewToleranceMs` must
+   * be ≥ 2× this. Default 250.
+   */
+  maxExpectedNtpDriftMs?: number;
+  /**
+   * How long an offline machine's capacity record is retained before eviction
+   * (ms). Default 86400000 (24h) — a briefly-offline machine keeps its
+   * nickname/hardware/history for fast re-placement.
+   */
+  machineRecordEvictionMs?: number;
+  /**
+   * MeshRpc (§L0) command timestamp tolerance (ms) — a signed command whose
+   * timestamp is outside |now - ts| is rejected `stale-timestamp`. Default 30000.
+   */
+  meshRpcClockToleranceMs?: number;
+  /**
+   * §L4 deliverMessage per-attempt timeout (ms) — the router treats a forward that
+   * does not ACK within this as failed and retries. Default 5000.
+   */
+  deliverMessageTimeoutMs?: number;
+  /**
+   * §L4 max deliverMessage retries before the router falls back to owner-dead
+   * re-placement. Default 3.
+   */
+  deliverMessageMaxRetries?: number;
+  /**
+   * §L4 placement stickiness margin — the current owner is kept unless another
+   * machine is better by more than this score delta (prevents flapping). Default 0.15.
+   */
+  placementHysteresisDelta?: number;
+  /**
+   * §L3 max per-session ownership CAS retries on non-fast-forward contention before
+   * the router queues the message. Default 5.
+   */
+  ownershipCasMaxRetries?: number;
+  /**
+   * §L5 max time (ms) the source drains an in-flight reply before cancelling and
+   * proceeding with the transfer — a long reply/tool-call must not block. Default 30000.
+   */
+  transferDrainTimeoutMs?: number;
+  /**
+   * §L5 output-exclusion window (ms): the source emits no NEW output after entering
+   * `transferring` and the target holds its CONTINUATION until this elapses, so the
+   * two emission windows are disjoint (no double-send). Default 1000.
+   */
+  transferOutputCutoffMs?: number;
+  /**
+   * §L4 cool-down (ms) after a transfer before a session is eligible for re-placement
+   * (a hard user-pin bypasses it). Default 300000.
+   */
+  placementCooldownMs?: number;
+  /**
+   * §L4 minimum interval (ms) between placement updates per topic — defeats rapid-fire
+   * transfers. Default 10000.
+   */
+  topicPlacementUpdateMinIntervalMs?: number;
 }
 
 // ── Agent Autonomy ──────────────────────────────────────────────────

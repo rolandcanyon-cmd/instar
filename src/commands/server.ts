@@ -8760,7 +8760,197 @@ export async function startServer(options: StartOptions): Promise<void> {
       }
     }
 
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, rateLimitSentinel, releaseReadinessSentinel: releaseReadinessSentinel ?? undefined, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, leaseTransport, liveTailReceiver, handoffWireTransport, onHandoffBegin, onHandoffInitiate: handoffInitiate, handoffInProgress: handoffSentinelInProgress, messageLedger, currentInboundByTopic, replyMarkerTransport, onReplyMarker: messageLedger ? (marker: unknown) => { const m = marker as { dedupeKey: string; platform: string; replyIdempotencyKey: string; epoch: number; topic?: string | null }; messageLedger!.applyRemoteReplyMarker(m.dedupeKey, { platform: m.platform, replyIdempotencyKey: m.replyIdempotencyKey, epoch: m.epoch, topic: m.topic ?? null }); } : undefined, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, conversationStore, warrantsReplyGate, collaborationSurfacer, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, proxyCoordinator, topicIntentStore, topicIntentArcCheck, usherSignalStore, intelligence: sharedIntelligence ?? undefined, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, briefDeps, workingMemory, taskFlowRegistry, threadlineFlowBridge, sessionReaper, reapLog, sleepWakeDetector, unjustifiedStopGate, stopGateDb, stopNotifier });
+    // ── Multi-Machine Session Pool registry (§L2) — live MachineCapacity view for GET /pool ──
+    // Always instantiated (cheap); the feature stays dark behind the sessionPool stage gate.
+    // Self-attests hardware + records a self-heartbeat so GET /pool + the Machines tab show
+    // this machine online with its specs; peer liveness is fed from MachineHeartbeat.
+    let machinePoolRegistry: import('../core/MachinePoolRegistry.js').MachinePoolRegistry | undefined;
+    try {
+      const poolMod = await import('../core/MachinePoolRegistry.js');
+      const osMod = await import('node:os');
+      const poolIdMgr = coordinator?.managers?.identityManager;
+      if (poolIdMgr) {
+        const failoverThresholdMs = (config.multiMachine?.failoverTimeoutMinutes ?? 15) * 60_000;
+        const clockSkewToleranceMs =
+          (config.multiMachine?.sessionPool as { clockSkewToleranceMs?: number } | undefined)?.clockSkewToleranceMs ?? 300_000;
+        machinePoolRegistry = new poolMod.MachinePoolRegistry({
+          listMachines: () =>
+            poolIdMgr.getActiveMachines().map(({ machineId, entry }) => ({
+              machineId,
+              nickname: entry.nickname,
+              hardware: entry.hardware,
+            })),
+          clockSkewToleranceMs,
+          failoverThresholdMs,
+          logger: (m: string) => console.log(pc.dim(`  [pool] ${m}`)),
+        });
+        const poolSelfId =
+          machineHeartbeat?.config?.machineId ??
+          (poolIdMgr.hasIdentity() ? poolIdMgr.loadIdentity().machineId : null);
+        if (poolSelfId) {
+          try {
+            poolIdMgr.recordSelfHardware(poolSelfId, poolMod.captureHardware());
+          } catch { /* best-effort hardware self-attest */ }
+          const refreshPool = (): void => {
+            try {
+              machinePoolRegistry!.recordHeartbeat({
+                machineId: poolSelfId,
+                selfReportedLastSeen: new Date().toISOString(),
+                loadAvg: osMod.loadavg()[0],
+              });
+              const hbApi = machineHeartbeat?.api;
+              if (hbApi) {
+                for (const r of hbApi.listAll()) {
+                  if (r.machineId !== poolSelfId) {
+                    machinePoolRegistry!.recordHeartbeat({ machineId: r.machineId, selfReportedLastSeen: r.lastHeartbeatAt });
+                  }
+                }
+              }
+            } catch { /* best-effort pool refresh */ }
+          };
+          refreshPool();
+          const poolTimer = setInterval(refreshPool, 30_000);
+          if (typeof poolTimer.unref === 'function') poolTimer.unref();
+        }
+      }
+    } catch (err) {
+      console.log(pc.dim(`  [pool] registry not wired: ${err instanceof Error ? err.message : String(err)}`));
+    }
+
+    // ── MeshRpc dispatcher (§L0) + SessionOwnership registry (§L3) ──
+    // Built when there's a machine identity. The ownership registry (L3) feeds
+    // the dispatcher's RBAC (ownerOf/placementTargetOf) + the place/claim/
+    // transfer/release handlers; read-class handlers (capacity/session-status)
+    // are live too. Single-machine uses the in-memory store; the cross-machine
+    // git-backed store swaps in for the Track-H proof (the registry is store-agnostic).
+    let meshRpcDispatcher: import('../core/MeshRpc.js').MeshRpcDispatcher | undefined;
+    let sessionOwnershipRegistry: import('../core/SessionOwnershipRegistry.js').SessionOwnershipRegistry | undefined;
+    try {
+      const meshMod = await import('../core/MeshRpc.js');
+      const idMod = await import('../core/MachineIdentity.js');
+      const meshIdMgr = coordinator?.managers?.identityManager;
+      const meshSelfId = machineHeartbeat?.config?.machineId
+        ?? (meshIdMgr?.hasIdentity() ? meshIdMgr.loadIdentity().machineId : null);
+      if (meshIdMgr && meshSelfId) {
+        const meshClockToleranceMs = config.multiMachine?.sessionPool?.meshRpcClockToleranceMs ?? 30000;
+        const seenMeshNonces = new Map<string, number>(); // `${sender}:${nonce}` → ts, age-pruned
+        const meshPruneMs = Math.max(meshClockToleranceMs * 4, 120_000);
+        // SessionOwnership registry (§L3) — in-memory store (single-machine correct;
+        // git-backed cross-machine store is the Track-H swap). Per-session nonce set.
+        const ownMod = await import('../core/SessionOwnershipRegistry.js');
+        const seenOwnNonces = new Set<string>();
+        sessionOwnershipRegistry = new ownMod.SessionOwnershipRegistry({
+          store: new ownMod.InMemorySessionOwnershipStore(),
+          seenNonce: (k) => seenOwnNonces.has(k),
+          recordNonce: (k) => seenOwnNonces.add(k),
+          logger: (m: string) => console.log(pc.dim(`  ${m}`)),
+        });
+        const ownReg = sessionOwnershipRegistry;
+        // The §L3 ownership commands, routed from MeshRpc to the registry CAS.
+        const ownAction = (
+          cmd: import('../core/MeshRpc.js').MeshCommand,
+          sender: string,
+          env: import('../core/MeshRpc.js').MeshEnvelope,
+        ): unknown => {
+          if (cmd.type === 'place') return ownReg.cas({ type: 'place', machineId: cmd.machine }, { sessionKey: cmd.session, sender, nonce: env.nonce });
+          if (cmd.type === 'claim') return ownReg.cas({ type: 'claim', machineId: sender }, { sessionKey: cmd.session, sender, nonce: env.nonce });
+          if (cmd.type === 'transfer') return ownReg.cas({ type: 'transfer', to: cmd.target }, { sessionKey: cmd.session, sender, nonce: env.nonce });
+          if (cmd.type === 'release') return ownReg.cas({ type: 'release', machineId: sender }, { sessionKey: cmd.session, sender, nonce: env.nonce });
+          return { ok: false, reason: 'unsupported' };
+        };
+        // The §L4 owner-side deliverMessage receive handler (shared factory — same
+        // code path the tests exercise). Durable-receipt-before-processing with
+        // idempotent dedupe on messageId + the stale-ownership fence. Returns the
+        // deliverMessageAck the router waits on before advancing the platform offset.
+        // (Local processing hand-off to SessionManager is the Track-H staged
+        // activation; the durable receipt + ACK is the complete dark-phase contract.)
+        const deliverMod = await import('../core/DeliverMessageHandler.js');
+        const deliverSeenFallback = new Set<string>(); // used only if the SQLite ledger is unavailable
+        const deliverMessageHandler = deliverMod.createDeliverMessageHandler({
+          ownerEpochOf: (s) => ownReg.read(s)?.ownershipEpoch ?? null,
+          recordReceipt: (messageId, session) => {
+            if (messageLedger) return messageLedger.record(messageId, { platform: 'mesh', topic: session }).firstSeen;
+            if (deliverSeenFallback.has(messageId)) return false;
+            deliverSeenFallback.add(messageId);
+            return true;
+          },
+        });
+        meshRpcDispatcher = new meshMod.MeshRpcDispatcher({
+          verify: {
+            selfMachineId: meshSelfId,
+            verify: (canonical, signature, sender) => {
+              const pem = meshIdMgr.getSigningPublicKeyPem(sender);
+              if (!pem) return false;
+              try { return idMod.verify(canonical, signature, pem); } catch { return false; }
+            },
+            isRegisteredPeer: (s) => meshIdMgr.isMachineActive(s),
+            seenNonce: (s, n) => seenMeshNonces.has(`${s}:${n}`),
+            now: () => Date.now(),
+            clockToleranceMs: meshClockToleranceMs,
+          },
+          rbac: {
+            routerHolder: () => coordinator?.getSyncStatus().leaseHolder ?? null,
+            ownerOf: (s) => ownReg.ownerOf(s),
+            placementTargetOf: (s) => ownReg.placementTargetOf(s),
+          },
+          recordNonce: (s, n) => {
+            const t = Date.now();
+            seenMeshNonces.set(`${s}:${n}`, t);
+            if (seenMeshNonces.size > 5000) {
+              for (const [k, v] of seenMeshNonces) if (t - v > meshPruneMs) seenMeshNonces.delete(k);
+            }
+          },
+          handlers: {
+            'capacity-report': () => machinePoolRegistry?.getCapacities() ?? [],
+            'session-status': () => machinePoolRegistry?.getCapacity(meshSelfId) ?? { machineId: meshSelfId },
+            place: ownAction,
+            claim: ownAction,
+            transfer: ownAction,
+            release: ownAction,
+            deliverMessage: deliverMessageHandler,
+          },
+          logger: (m: string) => console.log(pc.dim(`  ${m}`)),
+        });
+      }
+    } catch (err) {
+      console.log(pc.dim(`  [mesh-rpc] dispatcher not wired: ${err instanceof Error ? err.message : String(err)}`));
+    }
+
+    // ── Rollout gate (§Rollout): signed E2E result store + StageAdvancer ──────────
+    // The E2E result store backs GET /session-pool/e2e-results (observable gate state);
+    // StageAdvancer is the SOLE writer of multiMachine.sessionPool.stage (it passes the
+    // stageWriteGuard token; any other write throws stage-write-not-permitted). Always
+    // instantiated (cheap); inert until the pool activates past 'dark'.
+    let sessionPoolE2EResultStore: import('../core/SessionPoolE2EResultStore.js').SessionPoolE2EResultStore | undefined;
+    try {
+      const e2eMod = await import('../core/SessionPoolE2EResultStore.js');
+      const stageMod = await import('../core/StageAdvancer.js');
+      const guardMod = await import('../config/stageWriteGuard.js');
+      const crypto = await import('node:crypto');
+      // HMAC over the agent's authToken — tamper-evident without a separate keystore.
+      const hmacKey = String(config.authToken ?? 'instar-session-pool-e2e');
+      const hmac = (c: string) => crypto.createHmac('sha256', hmacKey).update(c).digest('hex');
+      sessionPoolE2EResultStore = new e2eMod.SessionPoolE2EResultStore({
+        filePath: path.join(config.stateDir, 'session-pool-e2e-results.json'),
+        sign: hmac,
+        verifySig: (c, s) => {
+          try { const exp = hmac(c); return s.length === exp.length && crypto.timingSafeEqual(Buffer.from(s), Buffer.from(exp)); } catch { return false; }
+        },
+      });
+      // StageAdvancer: the sole stage writer. Held for the rollout job/route to drive;
+      // constructed here so the write path (liveConfig + token) is wired in one place.
+      void new stageMod.StageAdvancer({
+        resultStore: sessionPoolE2EResultStore,
+        currentCommitSha: () => process.env.INSTAR_COMMIT_SHA ?? process.env.GITHUB_SHA ?? 'unknown',
+        readStage: () => (liveConfig.get('multiMachine.sessionPool.stage', 'dark') as import('../core/StageAdvancer.js').SessionPoolStage),
+        writeStageConfig: (s) => liveConfig.set(guardMod.STAGE_CONFIG_PATH, s, { stageWriteToken: guardMod.STAGE_WRITE_TOKEN }),
+        audit: (event, detail) => console.log(pc.dim(`  [stage-advancer] ${event} ${JSON.stringify(detail)}`)),
+      });
+    } catch (err) {
+      console.log(pc.dim(`  [session-pool] rollout gate not wired: ${err instanceof Error ? err.message : String(err)}`));
+    }
+
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, semanticMemory, activitySentinel, rateLimitSentinel, releaseReadinessSentinel: releaseReadinessSentinel ?? undefined, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, leaseTransport, liveTailReceiver, handoffWireTransport, onHandoffBegin, onHandoffInitiate: handoffInitiate, handoffInProgress: handoffSentinelInProgress, messageLedger, currentInboundByTopic, replyMarkerTransport, onReplyMarker: messageLedger ? (marker: unknown) => { const m = marker as { dedupeKey: string; platform: string; replyIdempotencyKey: string; epoch: number; topic?: string | null }; messageLedger!.applyRemoteReplyMarker(m.dedupeKey, { platform: m.platform, replyIdempotencyKey: m.replyIdempotencyKey, epoch: m.epoch, topic: m.topic ?? null }); } : undefined, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, conversationStore, warrantsReplyGate, collaborationSurfacer, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, machinePoolRegistry, meshRpcDispatcher, sessionOwnershipRegistry, sessionPoolE2EResultStore, proxyCoordinator, topicIntentStore, topicIntentArcCheck, usherSignalStore, intelligence: sharedIntelligence ?? undefined, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, briefDeps, workingMemory, taskFlowRegistry, threadlineFlowBridge, sessionReaper, reapLog, sleepWakeDetector, unjustifiedStopGate, stopGateDb, stopNotifier });
     // Boot-recovery (tunnel-failure-resilience spec Part 6): if the agent
     // died mid-relay-episode, the persisted tunnel.json carries
     // rotationPending=true. Rotate the dashboard PIN + authToken BEFORE

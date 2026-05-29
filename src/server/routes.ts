@@ -720,6 +720,18 @@ export interface RouteContext {
   threadlineFlowBridge: import('../tasks/ThreadlineFlowBridge.js').ThreadlineFlowBridge | null;
   /** Multi-machine coordinator (cross-machine seamlessness) — null on single-machine installs. */
   coordinator: import('../core/MultiMachineCoordinator.js').MultiMachineCoordinator | null;
+  /** Multi-Machine Session Pool registry (§L2) — live MachineCapacity view behind
+   *  GET /pool + the Machines dashboard tab. Null/absent when not wired (ships dark). */
+  machinePoolRegistry?: import('../core/MachinePoolRegistry.js').MachinePoolRegistry | null;
+  /** MeshRpc dispatcher (§L0) — the receive side behind POST /mesh/rpc (signed,
+   *  recipient-bound, RBAC-gated m2m commands). Null/absent when not wired (dark). */
+  meshRpcDispatcher?: import('../core/MeshRpc.js').MeshRpcDispatcher | null;
+  /** Per-session ownership registry (§L3) — exactly-one-owner CAS + ownerOf/
+   *  placementTargetOf. Read by L4 placement + observability. Null/absent (dark). */
+  sessionOwnershipRegistry?: import('../core/SessionOwnershipRegistry.js').SessionOwnershipRegistry | null;
+  /** Signed, append-only rollout-stage E2E results (§Rollout) — backs GET
+   *  /session-pool/e2e-results so the gate state is observable. Null/absent (dark). */
+  sessionPoolE2EResultStore?: import('../core/SessionPoolE2EResultStore.js').SessionPoolE2EResultStore | null;
   /**
    * Exactly-once ingress ledger (spec §8 G3a) — non-null ONLY when
    * multiMachine.exactlyOnceIngress is enabled. When present, the inbound
@@ -6988,6 +7000,98 @@ export function createRoutes(ctx: RouteContext): Router {
         return;
       }
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  // ── Multi-Machine Session Pool (§L2): the live machine-pool view ──────
+  //
+  // GET /pool — router holder + every machine's capacity (nickname, hardware,
+  // liveness, load, clock-skew status). Backs the Machines dashboard tab. Always
+  // 200 (Bearer-auth via the global middleware); `enabled:false` + an empty/
+  // single-machine view on installs where the pool registry isn't wired (dark).
+  router.get('/pool', (_req, res) => {
+    const sync = ctx.coordinator ? ctx.coordinator.getSyncStatus() : null;
+    const machines = ctx.machinePoolRegistry ? ctx.machinePoolRegistry.getCapacities() : [];
+    res.json({
+      enabled: !!ctx.machinePoolRegistry,
+      router: sync
+        ? {
+            holder: sync.leaseHolder,
+            epoch: sync.leaseEpoch,
+            holdsLease: sync.holdsLease,
+            awakeMachineCount: sync.awakeMachineCount,
+            splitBrainState: sync.splitBrainState,
+          }
+        : null,
+      machines,
+    });
+  });
+
+  // GET /session-pool/e2e-results — the rollout gate's observable state (§Rollout).
+  // Read-only; returns the latest E2E result per stage + whether each verifies. The
+  // StageAdvancer gates activation on these; this surfaces them (no mutation here).
+  router.get('/session-pool/e2e-results', (_req, res) => {
+    const store = ctx.sessionPoolE2EResultStore;
+    if (!store) {
+      res.status(503).json({ error: 'session-pool rollout gate not available (dark / single-machine install)' });
+      return;
+    }
+    const stages = [0, 1, 2, 3];
+    const latestPerStage = stages.map((stage) => {
+      const row = store.getLatestForStage(stage);
+      return { stage, result: row?.result ?? null, commitSha: row?.commitSha ?? null, ranAt: row?.ranAt ?? null, verified: row ? store.verify(row) : null };
+    });
+    res.json({ latestPerStage, total: store.all().length });
+  });
+
+  // PATCH /pool/machines/:id — rename a machine (§L2 user-editable nickname).
+  // Body: { nickname: string }. Validates format + pool-uniqueness; a collision
+  // is rejected (400), an unknown machine is 404, a malformed nickname is 400.
+  // Metadata-only — renaming NEVER moves a session or touches lease/ownership.
+  router.patch('/pool/machines/:id', (req, res) => {
+    const idMgr = ctx.coordinator?.managers?.identityManager ?? null;
+    if (!idMgr) {
+      res.status(503).json({ error: 'machine registry not available (single-machine install)' });
+      return;
+    }
+    const nickname = (req.body ?? {}).nickname;
+    if (typeof nickname !== 'string') {
+      res.status(400).json({ error: 'nickname (string) is required' });
+      return;
+    }
+    try {
+      idMgr.updateNickname(req.params.id, nickname);
+      res.json({ ok: true, machineId: req.params.id, nickname: nickname.trim() });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(/not found/i.test(msg) ? 404 : 400).json({ error: msg });
+    }
+  });
+
+  // POST /mesh/rpc — the MeshRpc receive endpoint (§L0). Body = a signed,
+  // recipient-bound MeshEnvelope. The dispatcher runs verify→RBAC→nonce-burn→
+  // handler and returns a typed reason + HTTP status (401/403 auth, 409 freshness,
+  // 501 unimplemented). NOTE: m2m authenticity is the ENVELOPE's own Ed25519
+  // signature (verified by the dispatcher), independent of the Bearer middleware.
+  router.post('/mesh/rpc', async (req, res) => {
+    if (!ctx.meshRpcDispatcher) {
+      res.status(503).json({ error: 'mesh-rpc not configured (single-machine install)' });
+      return;
+    }
+    const env = req.body;
+    if (!env || typeof env !== 'object' || typeof (env as { sender?: unknown }).sender !== 'string') {
+      res.status(400).json({ error: 'a signed MeshEnvelope is required' });
+      return;
+    }
+    try {
+      const r = await ctx.meshRpcDispatcher.dispatch(env as import('../core/MeshRpc.js').MeshEnvelope);
+      if (r.ok) {
+        res.json({ ok: true, result: r.result });
+      } else {
+        res.status(r.status).json({ ok: false, reason: r.reason });
+      }
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
