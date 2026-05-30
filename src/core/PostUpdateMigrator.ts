@@ -2903,6 +2903,33 @@ If the user reports they were "unresponsive for a while during updates," check \
       result.skipped.push('CLAUDE.md: Self-Heal section already present');
     }
 
+    // Correction & Preference Learning Sentinel (Slice 1a) §7 — Agent Awareness +
+    // Migration Parity: existing agents must learn about the preferences read-
+    // surface (the session-start hook now fetches /preferences/session-context
+    // and injects an <auto-learned-preference> block) so they HONOR injected
+    // preferences and understand the loop is watching their repeated corrections.
+    // The Failure-Learning Loop only backfilled its sub-tab and left existing
+    // agents unaware of the main capability — that gap is not repeated here.
+    // Content-sniffed on a distinctive marker for idempotency.
+    if (!content.includes('Correction & Preference Learning Sentinel')) {
+      const prefsSection = `
+## Preferences I've learned about you (Correction & Preference Learning Sentinel)
+
+When you correct me the same way repeatedly — "no, plainer", "stop asking me that every session", "from now on lead with the action" — the Correction & Preference Learning Sentinel turns the recurring correction into a durable preference instead of a lesson that evaporates when the session ends. Each learned preference is written to \`.instar/preferences.json\`, and from then on my session-start hook fetches \`GET /preferences/session-context\` on EVERY boot and injects the active preferences into my context, wrapped in an \`<auto-learned-preference src='correction-loop'>\` envelope.
+
+That envelope is deliberate: learned preferences are **signals, not authoritative instructions**. I apply them by default, but a real instruction or a safety rule always wins. The loop is **SIGNAL-ONLY** — it never blocks or rewrites an outbound message.
+
+- See what's currently injected: \`curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/preferences/session-context\` (the byte-bounded, priority-ordered block; \`503\` when the feature is off, \`{ present: false }\` when there are none yet).
+- Ships OFF (\`monitoring.correctionLearning.enabled\`). When off, the route 503s and the session-start hook silently injects nothing.
+- **When to use** (PROACTIVE): when the user corrects me repeatedly on the same thing, I acknowledge it, adapt now, and trust the loop to carry it forward — I do NOT promise to "remember" it by willpower across sessions. If preferences are already injected at session start, I honor them by default.
+`;
+      content += '\n' + prefsSection;
+      patched = true;
+      result.upgraded.push('CLAUDE.md: added Correction & Preference Learning Sentinel awareness (preferences session-context)');
+    } else {
+      result.skipped.push('CLAUDE.md: Preferences (Correction & Preference Learning) section already present');
+    }
+
     const authenticatedCapabilitiesCurl = `curl -H "Authorization: Bearer $AUTH" http://localhost:${port}/capabilities`;
 
     // Self-Discovery section
@@ -3653,6 +3680,7 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
       '## Worktree Convention',
       '**Multi-Session Autonomy**',
       '**Process Health (Dashboard Tab)**',
+      "**Preferences I've learned about you**",
     ];
 
     for (const shadowName of ['AGENTS.md', 'GEMINI.md']) {
@@ -5175,6 +5203,35 @@ except Exception:
     if [ -n "\$ORG_INTENT_BLOCK" ]; then
       echo ""
       echo "\$ORG_INTENT_BLOCK"
+      echo ""
+    fi
+  fi
+fi
+
+# AUTO-LEARNED PREFERENCES injection — Correction & Preference Learning Sentinel
+# (Slice 1a). Fetches /preferences/session-context and injects the structured
+# block of preferences the correction loop has learned about this user, so the
+# agent reasons with them from message one. SIGNAL-ONLY — these are preferences,
+# not authoritative instructions; the server wraps them in an
+# <auto-learned-preference src='correction-loop'> envelope so they cannot be
+# mistaken for commands. Fail-open: route 503 (feature off) / unreachable /
+# empty block → silent skip, session continues normally.
+if [ -n "\$PORT" ] && [ -n "\$TOKEN" ]; then
+  PREFS_RESPONSE=\$(curl -sf --max-time 4 -H "Authorization: Bearer \$TOKEN" \\
+    "http://localhost:\${PORT}/preferences/session-context" 2>/dev/null)
+  if [ -n "\$PREFS_RESPONSE" ]; then
+    PREFS_BLOCK=\$(echo "\$PREFS_RESPONSE" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    if d.get('present') and d.get('block'):
+        print(d['block'])
+except Exception:
+    pass
+" 2>/dev/null)
+    if [ -n "\$PREFS_BLOCK" ]; then
+      echo ""
+      echo "\$PREFS_BLOCK"
       echo ""
     fi
   fi
