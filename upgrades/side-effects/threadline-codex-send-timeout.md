@@ -105,3 +105,7 @@ Darwin's second-pass concern was that `docs/specs/THREADLINE-NETWORK-INTEROP-SPE
 - `npm run test:smoke` via pre-push — passed the affected smoke set before the Threadline-scoped e2e gate exposed implicit synchronous-wait test assumptions.
 - `npm run lint` — passed.
 - `npm run build` — passed; `sign-lockfile` warned that no local signing key is configured, which is the documented transitional local-dev state.
+
+## Post-main-merge verification
+
+After `origin/main` advanced to `1.3.116`, this branch merged main cleanly and regenerated `src/data/builtin-manifest.json` so the manifest version matches the release base. Re-verification after that merge: `npm test -- tests/unit/threadline/ThreadlineMCPServer.test.ts tests/e2e/threadline/ThreadlineMCPE2E.test.ts` passed 60/60, and `npm run build` passed with the same local signing-key warning described above.
