@@ -1521,20 +1521,20 @@ export class PostUpdateMigrator {
       }
     };
     // Marker = the latest capability signature (bumped each time the bundled hook/
-    // setup gains a feature, so prior installs upgrade): now `p13_stop_allowed` —
-    // the autonomous stop-hook now consults the P13 "The Stop Reason Is the Work"
-    // guard (POST /autonomous/evaluate-stop) before approving a completion, so a stop
-    // resting on a judgment-call / needs-engineering deferral keeps working instead of
-    // exiting. This marker is ABSENT from prior installs (which carry the older
-    // `codex-stdout-json-safe` signature but not the P13 guard), so bumping to it
-    // re-deploys the updated hook to every existing agent; the bundled hook retains all
-    // prior features (codex stdout-safe, native /goal); customized hooks (no stock
-    // fingerprint) are still left untouched.
+    // setup gains a feature, so prior installs upgrade): now `CLOCK_SEG` — the
+    // autonomous stop-hook now injects a rich SESSION CLOCK line ("Nh elapsed · Mh
+    // remaining (NN%)") into every continuation, rendered by emit-session-clock.sh
+    // from the hook's OWN computed elapsed/remaining (Step 2 of robust session
+    // time-awareness; fixes the wind-down-early-with-hours-left class). This marker
+    // is ABSENT from prior installs (which carry `p13_stop_allowed` but not the clock
+    // injection), so bumping to it re-deploys the updated hook to every existing agent;
+    // the bundled hook retains all prior features (P13 guard, codex stdout-safe, native
+    // /goal); customized hooks (no stock fingerprint) are still left untouched.
     upgrade(
       '.claude/skills/autonomous/hooks/autonomous-stop-hook.sh',
-      'p13_stop_allowed',
+      'CLOCK_SEG',
       'Autonomous Mode Stop Hook',
-      'skills/autonomous/hooks/autonomous-stop-hook.sh (P13 stop-reason guard — evaluate-stop before approving a completion)',
+      'skills/autonomous/hooks/autonomous-stop-hook.sh (SESSION CLOCK injection — rich elapsed/remaining each continuation)',
     );
     // setup-autonomous.sh marker bumped `native-goal/set` → `IS_CODEX_AGENT`: the bundled
     // setup now ALSO auto-delegates to native /goal for CODEX agents (the prior native /goal
@@ -4145,6 +4145,22 @@ Create worktrees for collaborator repos with \`instar worktree create <branch>\`
     } catch (err) {
       result.errors.push(`secret-drop-retrieve.mjs: ${err instanceof Error ? err.message : String(err)}`);
     }
+
+    // Session-clock injector — always overwrite. New, non-customizable shared
+    // routine (docs/specs/ROBUST-SESSION-TIME-AWARENESS-SPEC.md Component 2):
+    // renders the SESSION CLOCK line (render mode for the autonomous-stop-hook,
+    // query mode via GET /session/clock for UserPromptSubmit) so an agent always
+    // sees elapsed/remaining and never winds down a timed run early. Existing
+    // agents must get it on update without a manual install.
+    try {
+      const clockContent = this.loadRelayTemplate('emit-session-clock.sh');
+      if (clockContent) {
+        fs.writeFileSync(path.join(instarScriptsDir, 'emit-session-clock.sh'), clockContent, { mode: 0o755 });
+        result.upgraded.push('scripts/emit-session-clock.sh (session time-awareness injector)');
+      }
+    } catch (err) {
+      result.errors.push(`emit-session-clock.sh: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -6189,6 +6205,15 @@ fi
 AUTH_TOKEN="\${INSTAR_AUTH_TOKEN:-}"
 if [ -z "\$AUTH_TOKEN" ] && [ -f "\$CONFIG_FILE" ]; then
   AUTH_TOKEN=\$(python3 -c "import json; v=json.load(open('\$CONFIG_FILE')).get('authToken',''); print(v if isinstance(v, str) else '')" 2>/dev/null)
+fi
+
+# Session-clock injection (query mode) — surface elapsed/remaining for an active
+# time-boxed session on this user turn too (not just autonomous continuations),
+# so the agent quotes the real clock instead of guessing. Signal-only: emits
+# nothing when no time-boxed session is active or the server is unreachable.
+# Spec: docs/specs/ROBUST-SESSION-TIME-AWARENESS-SPEC.md (Component 2, query mode).
+if [ -f "\$INSTAR_DIR/scripts/emit-session-clock.sh" ]; then
+  bash "\$INSTAR_DIR/scripts/emit-session-clock.sh" query "\$TOPIC_ID" "\$PORT" "\$AUTH_TOKEN" 2>/dev/null
 fi
 
 # Fetch recent messages for this topic
