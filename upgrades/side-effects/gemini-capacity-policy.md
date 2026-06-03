@@ -19,12 +19,15 @@ Review update: the optional `capacityPolicy.fallbackModel` is now wired into
 the retry loop instead of only being resolved in the policy decision. Both
 Gemini execution paths rebuild `gemini -m <model>` on each retry attempt from
 the current policy-selected model, so a configured fallback actually changes
-the spawned CLI argv.
+the spawned CLI argv. Explicit caller-supplied raw model ids still pass through
+the primary resolver; only automatic capacity fallback is constrained to known
+Gemini models.
 
-The change also constrains Gemini model resolution to verified known models:
-`gemini-2.5-flash` and `gemini-2.5-pro`. Unknown Gemini model ids, including the
-bad `gemini-2.0-flash` fallback observed during the mentor loop, resolve to the
-verified default instead of being passed through to the CLI.
+The change also constrains automatic Gemini fallback selection to verified known
+models: `gemini-2.5-flash` and `gemini-2.5-pro`. Explicit raw Gemini model ids
+continue to pass through to the CLI because they represent caller intent. The
+bad `gemini-2.0-flash` fallback observed during the mentor loop is avoided by
+the known-only fallback helper rather than by rewriting every raw model id.
 
 ## Decision-point inventory
 
@@ -34,8 +37,8 @@ verified default instead of being passed through to the CLI.
 - `decideGeminiCapacityPolicy` — add — chooses `none`, `retry`, or `defer`.
 - `recordGeminiCapacityDeferral` / `getGeminiCapacityGate` — add — process-local
   defer state for Gemini calls.
-- Gemini model resolution — modify — raw Gemini ids must be in the known set or
-  they fall back to `gemini-2.5-flash`.
+- Gemini fallback resolution — modify — automatic capacity fallback ids must be
+  in the known set or the current caller-selected model is kept.
 - `GeminiCliIntelligenceProvider` and adapter one-shot transport — modify — both
   apply the policy before and after spawning Gemini.
 - Retry argv rebuild — modify — short-window retries rebuild the Gemini argv
@@ -52,11 +55,11 @@ deliberately narrow: explicit `429`, `QUOTA_EXHAUSTED`, `resource exhausted`,
 `rate limit`, quota, usage-limit, or capacity language. Generic parse errors,
 syntax errors, binary-not-found errors, and ordinary non-zero exits do not defer.
 
-The known-model constraint may reject a newly valid Gemini model id until the
-known list is updated. That is intentional for this slice because the observed
-bug was a guessed fallback causing a 404. The fallback is safe: unknown ids route
-to `gemini-2.5-flash`, the verified working default, rather than blocking all
-Gemini usage.
+The known-model constraint applies only to automatic capacity fallback. Explicit
+caller-selected Gemini model ids still pass through to the CLI, so newly valid
+Gemini ids are not blocked by this policy. If `capacityPolicy.fallbackModel` is
+unknown, the retry keeps the caller's current model instead of swapping to a
+guessed fallback.
 
 ## 2. Under-block
 
@@ -78,9 +81,9 @@ places that see Gemini stderr and own whether to spawn Gemini again. Keeping the
 decision there means reviewers, route, setup narrative calls, and future Gemini
 one-shots share the same capacity behavior.
 
-Known-model fallback belongs in Gemini model resolution and the shared framework
-launch helper because those are the chokepoints where generic tiers and raw
-model ids turn into CLI `-m` values.
+Known-model fallback belongs in the capacity-policy fallback helper because that
+is the only automatic model swap path in this change. Primary model resolution
+still maps canonical tiers and otherwise respects explicit raw model ids.
 
 ## 4. Signal vs authority compliance
 
@@ -103,20 +106,21 @@ reset window from that provider report is still active.
   become clearer and do not repeatedly spawn Gemini.
 - **Route override detector:** The known-model list now includes
   `gemini-2.5-flash`, so the verified default is recognized.
-- **Session launch:** Gemini interactive/headless launch model resolution no
-  longer passes unknown Gemini ids through to the CLI.
+- **Session launch:** Unchanged by the capacity fallback review fix; the
+  known-model gate is isolated to automatic provider retry fallback.
 
 ## 6. External surfaces
 
 Users may see clearer Gemini quota/defer errors instead of a generic Gemini CLI
 failure or a stalled task. Operators can rely on `gemini-2.5-flash` as the safe
-fallback for unknown Gemini ids. No config migration, schema change, or external
-API change is introduced.
+automatic capacity fallback when configured. Explicit caller-supplied model ids
+continue to pass through. No config migration, schema change, or external API
+change is introduced.
 
 ## 7. Rollback cost
 
 Rollback is a code revert of the Gemini policy module, the two provider wiring
-changes, the model-resolution known-list change, tests, and these artifacts. No
+changes, the fallback known-list change, tests, and these artifacts. No
 data migration is required. A running process that had recorded a defer window
 would forget it on restart.
 

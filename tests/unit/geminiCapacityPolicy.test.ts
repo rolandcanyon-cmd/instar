@@ -6,9 +6,9 @@ import {
   parseGeminiRetryAfterMs,
   recordGeminiCapacityDeferral,
   resetGeminiCapacityPolicyForTests,
+  resolveKnownGeminiFallback,
 } from '../../src/providers/adapters/gemini-cli/observability/geminiCapacityPolicy.js';
 import {
-  GEMINI_DEFAULT_MODEL,
   isKnownGeminiModel,
   resolveCliModelFlag,
 } from '../../src/providers/adapters/gemini-cli/models.js';
@@ -64,10 +64,12 @@ describe('geminiCapacityPolicy', () => {
 });
 
 describe('Gemini known model resolution', () => {
-  it('keeps Gemini model selection inside the verified known set', () => {
+  it('passes through explicit model ids but constrains automatic fallback models', () => {
     expect(isKnownGeminiModel('gemini-2.5-flash')).toBe(true);
     expect(isKnownGeminiModel('gemini-2.0-flash')).toBe(false);
-    expect(resolveCliModelFlag('gemini-2.0-flash')).toBe(GEMINI_DEFAULT_MODEL);
+    expect(resolveCliModelFlag('gemini-2.0-flash')).toBe('gemini-2.0-flash');
     expect(resolveCliModelFlag('capable')).toBe('gemini-2.5-pro');
+    expect(resolveKnownGeminiFallback('gemini-2.0-flash', { fallbackModel: 'gemini-2.5-flash' })).toBe('gemini-2.5-flash');
+    expect(resolveKnownGeminiFallback('gemini-2.0-flash', { fallbackModel: 'gemini-2.0-flash' })).toBe('gemini-2.0-flash');
   });
 });

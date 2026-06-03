@@ -12,7 +12,7 @@
  * - fallback models must be in the verified Gemini model set.
  */
 
-import { GEMINI_DEFAULT_MODEL, isKnownGeminiModel, type KnownGeminiModel } from '../models.js';
+import { GEMINI_DEFAULT_MODEL, isKnownGeminiModel } from '../models.js';
 
 export interface GeminiCapacityPolicyConfig {
   enabled?: boolean;
@@ -31,7 +31,7 @@ export type GeminiCapacityAction = 'none' | 'retry' | 'defer';
 export interface GeminiCapacityDecision {
   action: GeminiCapacityAction;
   retryAfterMs?: number;
-  model: KnownGeminiModel;
+  model: string;
   reason: string | null;
 }
 
@@ -94,9 +94,9 @@ function toMs(seconds: number): number | undefined {
 }
 
 export function resolveKnownGeminiFallback(
-  requestedModel: KnownGeminiModel,
+  requestedModel: string,
   config: GeminiCapacityPolicyConfig | undefined,
-): KnownGeminiModel {
+): string {
   const fallback = config?.fallbackModel;
   if (!fallback || !isKnownGeminiModel(fallback)) return requestedModel;
   return fallback;
@@ -105,7 +105,7 @@ export function resolveKnownGeminiFallback(
 export function decideGeminiCapacityPolicy(params: {
   errorMessage: string;
   attempt: number;
-  model: KnownGeminiModel;
+  model: string;
   config?: GeminiCapacityPolicyConfig;
 }): GeminiCapacityDecision {
   const { errorMessage, attempt, model, config } = params;

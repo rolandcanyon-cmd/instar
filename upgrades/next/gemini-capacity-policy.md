@@ -8,12 +8,9 @@ limit, Instar parses any reset window Gemini provides, retries only short
 capacity windows once, and otherwise records a local defer window so subsequent
 calls fail fast instead of spawning another doomed Gemini process.
 
-Gemini model selection is also constrained to the verified Gemini model set
-(`gemini-2.5-flash`, `gemini-2.5-pro`). Unknown raw Gemini ids now resolve back
-to the verified default instead of being passed through to the CLI, which avoids
-the bad `gemini-2.0-flash` fallback path that produced 404s.
-
-The optional `capacityPolicy.fallbackModel` now changes the retry spawn itself:
+Explicit caller-supplied raw Gemini model ids continue to pass through to the
+Gemini CLI. Only the automatic `capacityPolicy.fallbackModel` path is
+constrained to the known local Gemini model set. When that fallback is valid,
 both Gemini execution paths rebuild `gemini -m <model>` on retry from the
 policy-selected model, so fallback configuration is not just resolved, it is
 actually applied to the next CLI invocation.
@@ -31,10 +28,11 @@ actually applied to the next CLI invocation.
 |-----------|------------|
 | Gemini capacity defer window | Automatic for Gemini CLI one-shot calls |
 | Short Gemini capacity retry | Automatic, one bounded retry for short windows |
-| Known-only Gemini model fallback | Automatic; unknown Gemini ids fall back to `gemini-2.5-flash` |
+| Known-only Gemini capacity fallback | Automatic; `fallbackModel` swaps only when the fallback is a known Gemini model |
 
 ## Evidence
 
-- `npx vitest run tests/unit/geminiCapacityPolicy.test.ts tests/unit/frameworkSessionLaunch.test.ts tests/integration/gemini-capacity-policy-integration.test.ts tests/e2e/gemini-capacity-policy-lifecycle.test.ts`
-  — 4 files / 63 tests passed, including spawned retry argv assertions.
+- `npx vitest run tests/unit/gemini-cli-adapter.test.ts tests/unit/geminiCapacityPolicy.test.ts tests/unit/frameworkSessionLaunch.test.ts tests/integration/gemini-capacity-policy-integration.test.ts tests/e2e/gemini-capacity-policy-lifecycle.test.ts`
+  — 5 files / 80 tests passed, including raw-model pass-through and spawned
+  retry argv assertions.
 - `npx tsc --noEmit`

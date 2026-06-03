@@ -44,15 +44,14 @@ const TIER_TO_MODEL: Record<ModelTier, KnownGeminiModel> = {
 export const GEMINI_DEFAULT_MODEL: KnownGeminiModel = 'gemini-2.5-flash';
 
 /**
- * Resolve a tier or known raw model string to a concrete model name to pass to
- * the gemini CLI's `-m` flag. Unknown raw Gemini ids fall back to the verified
- * default instead of being passed through to produce a live 404.
+ * Resolve a tier or raw model string to a concrete model name to pass to the
+ * gemini CLI's `-m` flag. Explicit caller model ids pass through; automatic
+ * fallback selection is constrained separately by resolveKnownGeminiFallback.
  */
-export function resolveCliModelFlag(tierOrModel: string | ModelTier | undefined): KnownGeminiModel {
+export function resolveCliModelFlag(tierOrModel: string | ModelTier | undefined): string {
   if (!tierOrModel) return GEMINI_DEFAULT_MODEL;
   if (tierOrModel in TIER_TO_MODEL) {
     return TIER_TO_MODEL[tierOrModel as ModelTier];
   }
-  if (isKnownGeminiModel(tierOrModel)) return tierOrModel;
-  return GEMINI_DEFAULT_MODEL;
+  return tierOrModel;
 }
