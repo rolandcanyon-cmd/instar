@@ -421,6 +421,14 @@ describe('frameworkSessionLaunch.resolveModelForFramework', () => {
     });
   });
 
+  describe('gemini-cli', () => {
+    it('keeps raw Gemini model ids inside the verified known-model set', () => {
+      expect(resolveModelForFramework('gemini-cli', 'gemini-2.5-flash')).toBe('gemini-2.5-flash');
+      expect(resolveModelForFramework('gemini-cli', 'gemini-2.5-pro')).toBe('gemini-2.5-pro');
+      expect(resolveModelForFramework('gemini-cli', 'gemini-2.0-flash')).toBe('gemini-2.5-flash');
+    });
+  });
+
   it('claude headless builder rewrites generic tier to haiku/sonnet/opus', () => {
     const fast = buildHeadlessLaunch('claude-code', { binaryPath: '/x/claude', prompt: 'p', model: 'fast' });
     expect(fast.argv).toContain('haiku');

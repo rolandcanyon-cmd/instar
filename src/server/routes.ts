@@ -16850,7 +16850,7 @@ export function createRoutes(ctx: RouteContext): Router {
       const KNOWN_FRAMEWORKS = ['claude-code', 'codex-cli', 'gemini-cli'];
       const KNOWN_MODELS = [
         'opus-4.7', 'sonnet-4.6', 'haiku-4.5',
-        'gpt-5.3-codex', 'gemini-2.5-pro', 'deepseek-v4',
+        'gpt-5.3-codex', 'gemini-2.5-flash', 'gemini-2.5-pro', 'deepseek-v4',
       ];
 
       const classifier = new TaskClassifier({ intelligence: stubIntelligence });
