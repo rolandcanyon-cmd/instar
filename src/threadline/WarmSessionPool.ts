@@ -33,6 +33,29 @@ export interface WarmSessionPoolConfig {
   ttlMs: number;
 }
 
+/**
+ * Thrown by `admit` when an existing thread record is owned by a DIFFERENT peer
+ * than the caller presents (defense-in-depth, spec §3.5). The upstream
+ * ThreadlineRouter ownership guard (identity-match) already blocks a peer
+ * injecting into another's thread, but the pool MUST additionally refuse to
+ * cross-bind a thread to a new peer — it must never silently overwrite the
+ * owner. The caller treats this as a reject and falls back to a fresh
+ * cold-spawn (no warm session).
+ */
+export class WarmSessionPeerConflictError extends Error {
+  constructor(
+    public readonly threadId: string,
+    public readonly existingPeerId: string,
+    public readonly attemptedPeerId: string,
+  ) {
+    super(
+      `WarmSessionPool: thread ${threadId} is owned by peer ${existingPeerId}; ` +
+      `refusing to re-bind to peer ${attemptedPeerId}`,
+    );
+    this.name = 'WarmSessionPeerConflictError';
+  }
+}
+
 export class WarmSessionPool {
   private readonly byThread = new Map<string, WarmSessionRecord>();
 
@@ -67,6 +90,13 @@ export class WarmSessionPool {
     const now = this.now();
     const existing = this.byThread.get(input.threadId);
     if (existing) {
+      // SECURITY (spec §3.5): never cross-bind a thread to a new peer. Refresh
+      // in place only when the same peer owns it; otherwise throw so the caller
+      // falls back to a fresh cold-spawn rather than silently overwriting the
+      // owner's warm session.
+      if (existing.peerId !== input.peerId) {
+        throw new WarmSessionPeerConflictError(input.threadId, existing.peerId, input.peerId);
+      }
       existing.lastUsedAt = now;
       existing.sessionName = input.sessionName;
       return [];
@@ -104,6 +134,16 @@ export class WarmSessionPool {
   touch(threadId: string): void {
     const r = this.byThread.get(threadId);
     if (r) r.lastUsedAt = this.now();
+  }
+
+  /**
+   * The raw record for a thread, IGNORING the idle TTL (unlike `get`). Used for
+   * a pre-spawn peer-conflict check so the router can refuse a cross-peer warm
+   * spawn BEFORE spending a spawn (admit would throw, but only after the worker
+   * is already launched). Returns undefined when no record exists.
+   */
+  peek(threadId: string): WarmSessionRecord | undefined {
+    return this.byThread.get(threadId);
   }
 
   /** The warm session for a thread, if present and not past its idle TTL; else undefined. */
