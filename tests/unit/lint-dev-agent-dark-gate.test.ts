@@ -305,28 +305,32 @@ describe('lint-dev-agent-dark-gate', () => {
       '39': 'monitoring.bootHealthBeacon.enabled',
       '58': 'monitoring.parallelWorkSentinel.enabled',
       '129': 'monitoring.sessionReaper.enabled',
-      '177': 'monitoring.agentWorktreeReaper.enabled',
-      '191': 'monitoring.mcpProcessReaper.enabled',
-      '205': 'monitoring.agentSleep.enabled',
-      '228': 'monitoring.failureLearning.enabled',
-      '260': 'monitoring.correctionLearning.enabled',
-      '332': 'monitoring.apprenticeshipCycleSla.enabled',
-      '340': 'monitoring.geminiCapacityEscalation.enabled',
-      '348': 'monitoring.releaseReadiness.enabled',
-      '389': 'threadline.a2aCheckIn.enabled',
-      '433': 'mentor.enabled',
-      '444': 'mentor.autonomousFix.enabled',
-      '459': 'mentee.enabled',
-      // WS3 one-voice (multi-machine-seamlessness): the multiMachine block gained
-      // the 8-line seamlessness sub-block (ws3OneVoice dark flag + dwell), shifting
-      // the four later entries by +8. Verified by hand against ConfigDefaults.ts.
-      '552': 'multiMachine.sessionPool.enabled',
-      '710': 'cartographer.freshnessSweep.enabled',
+      // reap-notify spec: the reapNotify block gained perTopic +
+      // maxImmediatePerFlush (and the CODE-defaulted-keys NOTE), shifting
+      // every entry below it by +10 (resumeQueue.* keys are deliberately
+      // ABSENT from ConfigDefaults — CODE defaults so the later fleet flip
+      // works). Composed with the WS3 one-voice +8 shift (the multiMachine
+      // seamlessness sub-block) for sessionPool and later. Each verified by
+      // hand against the MERGED ConfigDefaults.ts.
+      '187': 'monitoring.agentWorktreeReaper.enabled',
+      '201': 'monitoring.mcpProcessReaper.enabled',
+      '215': 'monitoring.agentSleep.enabled',
+      '238': 'monitoring.failureLearning.enabled',
+      '270': 'monitoring.correctionLearning.enabled',
+      '342': 'monitoring.apprenticeshipCycleSla.enabled',
+      '350': 'monitoring.geminiCapacityEscalation.enabled',
+      '358': 'monitoring.releaseReadiness.enabled',
+      '399': 'threadline.a2aCheckIn.enabled',
+      '443': 'mentor.enabled',
+      '454': 'mentor.autonomousFix.enabled',
+      '469': 'mentee.enabled',
+      '562': 'multiMachine.sessionPool.enabled',
+      '720': 'cartographer.freshnessSweep.enabled',
       // fix instar#1069: the freshnessSweep block gained the event-loop-safety
       // fields (detectInWorker…scaffoldChunkNodes), shifting the two later
       // cartographer entries by +11. Verified by hand against ConfigDefaults.ts.
-      '755': 'cartographer.conformanceAudit.llmEnrichment.enabled',
-      '780': 'cartographer.subtreeNav.llmRerank.enabled',
+      '765': 'cartographer.conformanceAudit.llmEnrichment.enabled',
+      '790': 'cartographer.subtreeNav.llmRerank.enabled',
     };
     const actual = attributeRealConfigDefaults();
     expect(actual).toEqual(EXPECTED);
