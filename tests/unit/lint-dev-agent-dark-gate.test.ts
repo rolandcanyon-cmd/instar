@@ -301,6 +301,10 @@ describe('lint-dev-agent-dark-gate', () => {
     // changed (update the map by hand after verifying the new paths) OR the
     // attributor regressed (fix the attributor).
     // ────────────────────────────────────────────────────────────────────────
+    // WS1.3 reconcile: the seamlessness block gained the 7-line
+    // ws13Reconcile/ws13DryRun/ws13TickMs sub-block, shifting every entry at or
+    // after multiMachine.sessionPool by +7. Verified by hand against
+    // ConfigDefaults.ts after the post-#1079 merge.
     const EXPECTED: Record<string, string> = {
       '39': 'monitoring.bootHealthBeacon.enabled',
       '58': 'monitoring.parallelWorkSentinel.enabled',
@@ -324,19 +328,19 @@ describe('lint-dev-agent-dark-gate', () => {
       '443': 'mentor.enabled',
       '454': 'mentor.autonomousFix.enabled',
       '469': 'mentee.enabled',
-      '562': 'multiMachine.sessionPool.enabled',
+      '569': 'multiMachine.sessionPool.enabled',
       // durable-inbound-message-queue (CMT-1118): the sessionPool block gained
       // the inboundQueue (587) + holdForStability (616) sub-blocks (+41),
       // composed with main's reap-notify +10 and ws3OneVoice +8 shifts.
       // Verified by hand against the MERGED ConfigDefaults.ts.
-      '587': 'multiMachine.sessionPool.inboundQueue.enabled',
-      '616': 'multiMachine.sessionPool.holdForStability.enabled',
-      '761': 'cartographer.freshnessSweep.enabled',
+      '594': 'multiMachine.sessionPool.inboundQueue.enabled',
+      '623': 'multiMachine.sessionPool.holdForStability.enabled',
+      '768': 'cartographer.freshnessSweep.enabled',
       // fix instar#1069: the freshnessSweep block gained the event-loop-safety
       // fields (detectInWorker…scaffoldChunkNodes), shifting the two later
       // cartographer entries by +11. Verified by hand against ConfigDefaults.ts.
-      '806': 'cartographer.conformanceAudit.llmEnrichment.enabled',
-      '831': 'cartographer.subtreeNav.llmRerank.enabled',
+      '813': 'cartographer.conformanceAudit.llmEnrichment.enabled',
+      '838': 'cartographer.subtreeNav.llmRerank.enabled',
     };
     const actual = attributeRealConfigDefaults();
     expect(actual).toEqual(EXPECTED);
