@@ -215,6 +215,11 @@ export const DARK_GATE_EXCLUSIONS: DarkGateExclusion[] = [
   },
   // ── deliberate-fleet-default — off for everyone by design (incl. dev) ──
   {
+    configPath: 'monitoring.greenPrAutoMerge.enabled',
+    category: 'deliberate-fleet-default',
+    reason: 'green-PR auto-merge watcher — action-bearing (merges PRs), so NOT dev-gated (the dev-gate registry bars action-bearing features, devGatedFeatures.ts contract). Off fleet-wide; flipped on per dev agent with expectedGhLogin. safe-merge re-verifies + lease-gated + runtime rollback + breaker; GitHub App is a binding precondition before any fleet promotion.',
+  },
+  {
     configPath: 'threadline.singleNegotiator.enabled',
     category: 'deliberate-fleet-default',
     reason: 'lease send-gate withholds a non-owner content send; off+dry-run-first for everyone until dry-run telemetry shows an acceptable false-positive rate (THREADLINE-SINGLE-NEGOTIATOR-SPEC FD-7)',
