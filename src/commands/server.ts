@@ -13022,6 +13022,45 @@ export async function startServer(options: StartOptions): Promise<void> {
       console.log(pc.green('  Completion evaluator: active (independent /goal-style judge)'));
     }
 
+    // ── LiveTestGate (live-user-channel-proof spec §4) ──────────────────────
+    // The completion-gate teeth: refuse a "done" verdict for a USER-FACING feature
+    // without a verified live-test artifact. DEV-GATED + dry-run default — the gate
+    // COMPUTES the veto and logs it but never overrides a verdict until promoted to
+    // warn/veto. Same machine signs + verifies (dev dogfood); cross-machine verify
+    // (resolve a peer's harness pubkey) is a tracked follow-on.
+    let liveTestGate: import('../core/LiveTestGate.js').LiveTestGate | undefined;
+    let liveTestGateMode: import('../core/LiveTestGate.js').LiveTestGateMode = 'dry-run';
+    try {
+      const ltgEnabled = resolveDevAgentGate(
+        (config as Record<string, any>).monitoring?.liveTestGate?.enabled, config,
+      );
+      const idMgrForLtg = coordinator?.managers?.identityManager;
+      if (ltgEnabled && idMgrForLtg && coordinator?.identity?.machineId) {
+        const { LiveTestArtifactStore } = await import('../core/LiveTestArtifactStore.js');
+        const { LiveTestGate } = await import('../core/LiveTestGate.js');
+        const nodeCrypto = await import('node:crypto');
+        const signingKeyPem = idMgrForLtg.loadSigningKey();
+        const publicKeyPem = nodeCrypto.createPublicKey({ key: signingKeyPem }).export({ type: 'spki', format: 'pem' }).toString();
+        const machineId = coordinator.identity.machineId;
+        const ltStore = new LiveTestArtifactStore({
+          stateDir: config.stateDir,
+          machineId,
+          signerFingerprint: machineId,
+          sign: (d: string) => signEd25519(d, signingKeyPem),
+          verify: (d: string, s: string) => verifyEd25519(d, s, publicKeyPem),
+          logger: (m: string) => console.log(pc.dim(`  ${m}`)),
+        });
+        liveTestGate = new LiveTestGate(ltStore);
+        const m = (config as Record<string, any>).monitoring?.liveTestGate?.mode;
+        liveTestGateMode = m === 'warn' || m === 'veto' ? m : 'dry-run';
+        console.log(pc.dim(`  [live-test-gate] active (dev-gate, mode=${liveTestGateMode}) — completion veto §4`));
+      }
+    } catch (err) {
+      // @silent-fallback-ok — gate not wired → no veto (today's exact completion
+      // behavior). Logged; never blocks server boot.
+      console.log(pc.dim(`  [live-test-gate] not wired: ${err instanceof Error ? err.message : String(err)}`));
+    }
+
     // ── CollaborationRedriveEngine ────────────────────────────────────
     // Proactively re-engage a COUNTERPART that has gone silent on an open
     // threadline-reply commitment. Bounded peer nudges with a durable,
@@ -14812,8 +14851,34 @@ export async function startServer(options: StartOptions): Promise<void> {
         // is constructed further down (working-set wiring); until then the floor
         // reads 0, which preserves pre-fix behavior for the boot window.
         let ownershipEpochFloor: ((sessionKey: string) => number) | null = null;
+        // ── Transfer fix (spec docs/specs/live-user-channel-proof-standard.md §7.2) ──
+        // The in-memory store was the bug: a transfer wrote the target's ownership
+        // into the SOURCE's process Map → vanished on restart, never crossed machines.
+        // Behind the DEV-AGENT DARK GATE (live on a dev agent / dark on the fleet),
+        // swap in the DURABLE per-session store; the OwnershipApplier (wired below)
+        // materializes ownership on the target from the REPLICATED placement journal,
+        // so a seat genuinely moves. Off → InMemory (today's exact behavior).
+        const durableOwnershipOn = resolveDevAgentGate(
+          (config as Record<string, any>).multiMachine?.durableOwnership?.enabled,
+          config,
+        );
+        let durableOwnershipStore:
+          | import('../core/LocalSessionOwnershipStore.js').LocalSessionOwnershipStore
+          | null = null;
+        let ownershipStore: import('../core/SessionOwnershipRegistry.js').SessionOwnershipStore;
+        if (durableOwnershipOn) {
+          const { LocalSessionOwnershipStore } = await import('../core/LocalSessionOwnershipStore.js');
+          durableOwnershipStore = new LocalSessionOwnershipStore({
+            dir: path.join(config.stateDir, 'ownership', 'local'),
+            logger: (m: string) => console.log(pc.dim(`  ${m}`)),
+          });
+          ownershipStore = durableOwnershipStore;
+          console.log(pc.dim('  [ownership] durable LocalSessionOwnershipStore active (dev-gate live) — transfer-fix §7.2'));
+        } else {
+          ownershipStore = new ownMod.InMemorySessionOwnershipStore();
+        }
         sessionOwnershipRegistry = new ownMod.SessionOwnershipRegistry({
-          store: new ownMod.InMemorySessionOwnershipStore(),
+          store: ownershipStore,
           seenNonce: (k) => seenOwnNonces.has(k),
           recordNonce: (k) => seenOwnNonces.add(k),
           epochFloorOf: (sk) => ownershipEpochFloor?.(sk) ?? 0,
@@ -14910,6 +14975,33 @@ export async function startServer(options: StartOptions): Promise<void> {
             }
           }, tickMs);
           ws13Timer.unref?.();
+        }
+        // ── Transfer fix §7.2: OwnershipApplier ─────────────────────────────────
+        // Materialize durable local ownership from the REPLICATED placement journal
+        // (peers/<machineId>.topic-placement.jsonl) so the machine a topic moved TO
+        // resolves the right owner on the next message — the step the in-memory store
+        // never had. Off the hot path: ticked on an interval + once at boot (to adopt
+        // a transfer that landed while we were down). Only when the durable store is
+        // active (dev-gate); InMemory has no cross-machine replication to apply.
+        if (durableOwnershipStore && _meshSelfId) {
+          const { OwnershipApplier } = await import('../core/OwnershipApplier.js');
+          const { CoherenceJournalReader } = await import('../core/CoherenceJournalReader.js');
+          const applier = new OwnershipApplier({
+            reader: new CoherenceJournalReader({ stateDir: config.stateDir }),
+            store: durableOwnershipStore,
+            selfMachineId: _meshSelfId,
+            logger: (m: string) => console.log(pc.dim(`  ${m}`)),
+          });
+          try { applier.tick(); } catch { /* @silent-fallback-ok — boot tick best-effort; the interval converges */ }
+          const applierTimer = setInterval(() => {
+            try {
+              const r = applier.tick();
+              if (r.materialized) console.log(pc.dim(`  [OwnershipApplier] materialized ${r.materialized}/${r.examined} topic(s) from replicated placements`));
+            } catch (err) {
+              console.error('[OwnershipApplier] tick failed:', err instanceof Error ? err.message : String(err));
+            }
+          }, 15000);
+          applierTimer.unref?.();
         }
         // Coherence journal §3.3: the emit is a thin wrapper at every CAS call
         // site — `reason` is caller knowledge (cas() is a storage primitive and
@@ -16929,7 +17021,7 @@ export async function startServer(options: StartOptions): Promise<void> {
             carrier: _topicProfileCarrier,
           }
         : null;
-    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, cartographer: cartographer ?? undefined, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, subscriptionPool, quotaPoller, quotaAwareScheduler: _quotaAwareScheduler ?? undefined, proactiveSwapMonitor: _proactiveSwapMonitor ?? undefined, inUseAccountResolver, enrollmentWizard, credentialRepointing, semanticMemory, activitySentinel, rateLimitSentinel, releaseReadinessSentinel: releaseReadinessSentinel ?? undefined, greenPrAutoMerger: greenPrAutoMerger ?? undefined, guardLatchStore: guardLatchStore ?? undefined, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, topicProfile: _topicProfileCtx ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, leaseTransport, onLeasePullRequest: () => leaseCoordinatorRef?.currentLease() ?? null, liveTailReceiver, handoffWireTransport, onHandoffBegin, onHandoffInitiate: handoffInitiate, handoffInProgress: handoffSentinelInProgress, messageLedger, currentInboundByTopic, replyMarkerTransport, onReplyMarker: messageLedger ? (marker: unknown) => { const m = marker as { dedupeKey: string; platform: string; replyIdempotencyKey: string; epoch: number; topic?: string | null }; messageLedger!.applyRemoteReplyMarker(m.dedupeKey, { platform: m.platform, replyIdempotencyKey: m.replyIdempotencyKey, epoch: m.epoch, topic: m.topic ?? null }); } : undefined, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, conversationStore, threadLog, threadMessageRecorder, warrantsReplyGate, collaborationSurfacer, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, a2aDeliveryTracker: a2aDeliveryTracker ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, machinePoolRegistry, getInboundQueue: () => _inboundQueue, meshRpcDispatcher, workingSetPullCoordinator, commitmentReplicaStore, preferenceReplicaStore, replicatedRecordEmitter, conflictStore, rollbackUnmerge, droppedOriginRegistry, preferencesUnionReader, forwardCommitmentMutate, sessionOwnershipRegistry, topicPinStore: _topicPinStore ?? undefined, streamTicketStore: _streamTicketStore ?? undefined, poolStreamAllowRemoteInput: (config as { dashboard?: { poolStream?: { allowRemoteInput?: boolean } } }).dashboard?.poolStream?.allowRemoteInput ?? false, poolStreamConnector: _poolStreamConnector ?? undefined, secretSync: _secretSyncHandle ?? undefined, meshSelfId: _meshSelfId ?? undefined, resolveRouterUrl: _resolveRouterUrl ?? undefined, resolvePeerUrls: _resolvePeerUrls ?? undefined, guardRegistry, listPoolMachines: _listPoolMachines ?? undefined, poolLink: _poolLink ?? undefined, poolPollCache: _poolPollCache ?? undefined, sessionPoolE2EResultStore, proxyCoordinator, topicIntentStore, topicIntentArcCheck, usherSignalStore, intelligence: sharedIntelligence ?? undefined, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, briefDeps, workingMemory, taskFlowRegistry, threadlineFlowBridge, sessionReaper, agentWorktreeReaper, orphanedWorkSentinel, mcpProcessReaper, geminiLoopRunner, sleepController, agentActivityState, reapLog, resumeQueue, resumeDrainer, operatorStopRecorder: recordOperatorStop, sleepWakeDetector, unjustifiedStopGate, stopGateDb, stopNotifier });    // Resolve the late-bound topic-operator getter (increment 2e): routing was
+    const server = new AgentServer({ config, sessionManager, state, scheduler, telegram, relationships, feedback, feedbackAnomalyDetector, dispatches, updateChecker, autoUpdater, autoDispatcher, quotaTracker, quotaManager, publisher, viewer, tunnel, evolution, watchdog, topicMemory, triageNurse, projectMapper, cartographer: cartographer ?? undefined, coherenceGate: scopeVerifier, contextHierarchy, canonicalState, operationGate, sentinel, adaptiveTrust, memoryMonitor, orphanReaper, coherenceMonitor, commitmentTracker, subscriptionPool, quotaPoller, quotaAwareScheduler: _quotaAwareScheduler ?? undefined, proactiveSwapMonitor: _proactiveSwapMonitor ?? undefined, inUseAccountResolver, enrollmentWizard, credentialRepointing, semanticMemory, activitySentinel, rateLimitSentinel, releaseReadinessSentinel: releaseReadinessSentinel ?? undefined, greenPrAutoMerger: greenPrAutoMerger ?? undefined, guardLatchStore: guardLatchStore ?? undefined, messageRouter, summarySentinel, spawnManager, systemReviewer, capabilityMapper, selfKnowledgeTree, coverageAuditor, topicResumeMap: _topicResumeMap ?? undefined, topicProfile: _topicProfileCtx ?? undefined, sessionRefresh: _sessionRefresh ?? undefined, autonomyManager, trustElevationTracker, autonomousEvolution, coordinator: coordinator.enabled ? coordinator : undefined, localSigningKeyPem, leaseTransport, onLeasePullRequest: () => leaseCoordinatorRef?.currentLease() ?? null, liveTailReceiver, handoffWireTransport, onHandoffBegin, onHandoffInitiate: handoffInitiate, handoffInProgress: handoffSentinelInProgress, messageLedger, currentInboundByTopic, replyMarkerTransport, onReplyMarker: messageLedger ? (marker: unknown) => { const m = marker as { dedupeKey: string; platform: string; replyIdempotencyKey: string; epoch: number; topic?: string | null }; messageLedger!.applyRemoteReplyMarker(m.dedupeKey, { platform: m.platform, replyIdempotencyKey: m.replyIdempotencyKey, epoch: m.epoch, topic: m.topic ?? null }); } : undefined, whatsapp: whatsappAdapter, slack: slackAdapter, imessage: imessageAdapter, whatsappBusinessBackend, messageBridge, hookEventReceiver, worktreeMonitor, subagentTracker, instructionsVerifier, handshakeManager: threadlineHandshake, threadlineRouter, conversationStore, threadLog, threadMessageRecorder, warrantsReplyGate, collaborationSurfacer, threadResumeMap, topicLinkageHandler: topicLinkageHandler ?? undefined, threadlineRelayClient, threadlineReplyWaiters, listenerManager: listenerManager ?? undefined, a2aDeliveryTracker: a2aDeliveryTracker ?? undefined, responseReviewGate, messagingToneGate, outboundDedupGate, telemetryHeartbeat, pasteManager, featureRegistry, discoveryEvaluator, completionEvaluator, unifiedTrust, liveConfig, sharedStateLedger, ledgerSessionRegistry, worktreeManager, oidcEnrolledRepos: parallelDevConfig?.oidcEnrolledRepos, initiativeTracker, projectRoundRunner, projectDriftChecker, machineHeartbeat, machinePoolRegistry, getInboundQueue: () => _inboundQueue, meshRpcDispatcher, workingSetPullCoordinator, commitmentReplicaStore, preferenceReplicaStore, replicatedRecordEmitter, conflictStore, rollbackUnmerge, droppedOriginRegistry, preferencesUnionReader, forwardCommitmentMutate, sessionOwnershipRegistry, topicPinStore: _topicPinStore ?? undefined, streamTicketStore: _streamTicketStore ?? undefined, poolStreamAllowRemoteInput: (config as { dashboard?: { poolStream?: { allowRemoteInput?: boolean } } }).dashboard?.poolStream?.allowRemoteInput ?? false, poolStreamConnector: _poolStreamConnector ?? undefined, secretSync: _secretSyncHandle ?? undefined, meshSelfId: _meshSelfId ?? undefined, resolveRouterUrl: _resolveRouterUrl ?? undefined, resolvePeerUrls: _resolvePeerUrls ?? undefined, guardRegistry, listPoolMachines: _listPoolMachines ?? undefined, poolLink: _poolLink ?? undefined, poolPollCache: _poolPollCache ?? undefined, sessionPoolE2EResultStore, proxyCoordinator, topicIntentStore, topicIntentArcCheck, usherSignalStore, intelligence: sharedIntelligence ?? undefined, telegramBridgeConfig, telegramBridge: telegramBridge ?? undefined, threadlineObservability, briefDeps, workingMemory, taskFlowRegistry, threadlineFlowBridge, sessionReaper, agentWorktreeReaper, orphanedWorkSentinel, mcpProcessReaper, geminiLoopRunner, sleepController, agentActivityState, reapLog, resumeQueue, resumeDrainer, operatorStopRecorder: recordOperatorStop, sleepWakeDetector, unjustifiedStopGate, stopGateDb, stopNotifier, liveTestGate, liveTestGateMode });    // Resolve the late-bound topic-operator getter (increment 2e): routing was
     // wired before the server existed; from here on inbound binds use the
     // server's own store instance.
     _agentServerRef = server;

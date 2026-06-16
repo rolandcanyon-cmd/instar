@@ -821,6 +821,10 @@ export interface RouteContext {
   discoveryEvaluator: import('../core/DiscoveryEvaluator.js').DiscoveryEvaluator | null;
   /** Independent autonomous-completion judge (mirrors /goal). Null if no IntelligenceProvider. */
   completionEvaluator: import('../core/CompletionEvaluator.js').CompletionEvaluator | null;
+  /** Live-user-channel-proof completion gate (§4) — vetoes "done" for a user-facing
+   *  feature without a verified live-test artifact. Null when dark/unwired. */
+  liveTestGate: import('../core/LiveTestGate.js').LiveTestGate | null;
+  liveTestGateMode: import('../core/LiveTestGate.js').LiveTestGateMode;
   unifiedTrust: UnifiedTrustSystem | null;
   /** Shared proxy coordinator — mutex + /build heartbeat record for the
    *  PresenceProxy ↔ PromiseBeacon ↔ /build-heartbeat three-way deconfliction
@@ -4166,6 +4170,34 @@ export function createRoutes(ctx: RouteContext): Router {
         typeof transcriptTail === 'string' ? transcriptTail : '',
         parseStopSignals(req.body),
       );
+      // ── Live-user-channel-proof veto (spec §4) ──────────────────────────────
+      // A deterministic post-check on a met:true verdict: a USER-FACING feature
+      // cannot resolve "done" without a verified live-test artifact. Same shape as
+      // the anti-laundering veto — filing/claiming "done" never buys the exit.
+      // dry-run/warn COMPUTE the veto (telemetry) but never override; only veto-mode
+      // overrides met:true → met:false (the safe direction — keep working).
+      if (verdict.met && ctx.liveTestGate) {
+        try {
+          const body = (req.body ?? {}) as { featureId?: unknown; userFacing?: unknown };
+          const featureId = typeof body.featureId === 'string' && body.featureId
+            ? body.featureId
+            : condition.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'autonomous-goal';
+          const userFacing = typeof body.userFacing === 'boolean' ? body.userFacing : undefined;
+          const gate = ctx.liveTestGate.evaluate({ featureId, userFacing, goalText: condition, mode: ctx.liveTestGateMode });
+          if (gate.outcome !== 'allow') {
+            if (gate.blocks) {
+              res.json({ met: false, reason: `live-test gate: ${gate.reason}`, liveTestGate: { outcome: gate.outcome, mode: gate.mode, overrode: true } });
+              return;
+            }
+            // dry-run / warn: surface the would-block but honor the original verdict.
+            res.json({ ...verdict, liveTestGate: { outcome: gate.outcome, mode: gate.mode, wouldBlock: gate.wouldBlock, reason: gate.reason, overrode: false } });
+            return;
+          }
+        } catch {
+          // @silent-fallback-ok — a gate error must never trap a genuine completion
+          // (the completion judge is the primary authority); fall through to the verdict.
+        }
+      }
       res.json(verdict);
     } catch (err) {
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -12286,8 +12318,35 @@ export function createRoutes(ctx: RouteContext): Router {
       // next real message, so a CAS failure must never fail the transfer itself.
       // `placedOwnership:false` is reported to the caller.
     }
+    // §7.4 (live-user-channel-proof spec): surface whether the seat ACTUALLY moved,
+    // not just ok:true. The 2026-06-15 bug was `ok:true` with the topic never moving —
+    // a lie-by-omission. The honest signal is the post-transfer owner: did the target
+    // end up the active owner? A real transfer that did NOT land that is reported
+    // `seatMoved:false` + a reason, so a caller (or the live-test harness) can never
+    // read `ok` as `moved`.
+    let seatMoved: boolean;
+    let seatMoveReason: string | undefined;
+    {
+      const ownerNow = ctx.sessionOwnershipRegistry.ownerOf(topicId);
+      const post = ctx.sessionOwnershipRegistry.read(topicId);
+      if (plan.action === 'noop') {
+        seatMoved = true; // already-there / no move required — the seat is at the target
+      } else if (post?.status === 'active' && ownerNow === target) {
+        seatMoved = true; // the target is the confirmed active owner — a real move
+      } else {
+        seatMoved = false;
+        seatMoveReason =
+          drainLeg.attempted && drainLeg.ok === false
+            ? 'drain failed — the seat did not move (topic stays whole on its current machine)'
+            : 'ownership did not transfer to the target (the pin is set, but the target is not the active owner)';
+      }
+    }
     res.json({
       ok: true,
+      // seatMoved is the load-bearing honesty field — ok:true means "request processed",
+      // seatMoved means "the conversation actually runs on the target now".
+      seatMoved,
+      ...(seatMoveReason ? { seatMoveReason } : {}),
       topicId,
       targetMachine: target,
       targetNickname: ctx.machinePoolRegistry?.getCapacity(target)?.nickname ?? null,
