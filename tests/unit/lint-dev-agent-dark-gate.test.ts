@@ -386,9 +386,16 @@ describe('lint-dev-agent-dark-gate', () => {
       // not cleanly dev-gatable), so they remain attributed here. RE-VERIFIED by hand via
       // the attributor on the edited ConfigDefaults (each maps to a real `enabled: false,` line).
       // (+19 shift from the Increment-6 verifiedPairing block — see the mentor note above.)
-      '856': 'multiMachine.sessionPool.enabled',
-      '881': 'multiMachine.sessionPool.inboundQueue.enabled',
-      '910': 'multiMachine.sessionPool.holdForStability.enabled',
+      // ws52-account-follow-me PR1 (2026-06-17): a NEW multiMachine.accountFollowMe block
+      // (~16 lines: an OMITTED-`enabled` dev-gate comment + credentialTransport:{} +
+      // maxFollowMachines:5) was inserted into the `multiMachine` block ABOVE sessionPool. It
+      // adds NO `enabled:` literal (the flag rides the developmentAgent gate; registered in
+      // DEV_GATED_FEATURES) so it introduces no new attributed path. After merging JKHeadley/main
+      // (which added its own config above), the sessionPool keys resolve to 872/897/926.
+      // RE-VERIFIED by hand via the attributor on the MERGED ConfigDefaults.
+      '872': 'multiMachine.sessionPool.enabled',
+      '897': 'multiMachine.sessionPool.inboundQueue.enabled',
+      '926': 'multiMachine.sessionPool.holdForStability.enabled',
       // mm-stores-devgate (operator directive 2026-06-13, topic 13481): the 7
       // multiMachine.stateSync.* memory stores MOVED from DARK_GATE_EXCLUSIONS to
       // DEV_GATED_FEATURES and their `enabled: false` literals were REMOVED from
@@ -420,10 +427,12 @@ describe('lint-dev-agent-dark-gate', () => {
       // attributed path; it only shifts the threadlinePairing + cartographer keys DOWN
       // by +19 (1047→1066, 1169→1188, 1214→1233, 1239→1258). RE-VERIFIED by hand via the
       // attributor on the edited ConfigDefaults.
-      '1079': 'multiMachine.stateSync.threadlinePairing.enabled',
-      '1201': 'cartographer.freshnessSweep.enabled',
-      '1246': 'cartographer.conformanceAudit.llmEnrichment.enabled',
-      '1271': 'cartographer.subtreeNav.llmRerank.enabled',
+      // After merging JKHeadley/main + my accountFollowMe block, these resolve as below.
+      // RE-VERIFIED by hand via the attributor on the MERGED ConfigDefaults.
+      '1095': 'multiMachine.stateSync.threadlinePairing.enabled',
+      '1217': 'cartographer.freshnessSweep.enabled',
+      '1262': 'cartographer.conformanceAudit.llmEnrichment.enabled',
+      '1287': 'cartographer.subtreeNav.llmRerank.enabled',
     };
     const actual = attributeRealConfigDefaults();
     expect(actual).toEqual(EXPECTED);
