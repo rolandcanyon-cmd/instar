@@ -402,9 +402,9 @@ describe('lint-dev-agent-dark-gate', () => {
       // RE-VERIFIED by hand via the attributor on the MERGED ConfigDefaults.
       // R6b: the accountFollowMe block gained `remoteScrapeTimeoutMs` (+ comment, ~7 lines)
       // ABOVE these keys, shifting each DOWN by +7. RE-VERIFIED via the attributor.
-      '901': 'multiMachine.sessionPool.enabled',
-      '926': 'multiMachine.sessionPool.inboundQueue.enabled',
-      '955': 'multiMachine.sessionPool.holdForStability.enabled',
+      '905': 'multiMachine.sessionPool.enabled',
+      '930': 'multiMachine.sessionPool.inboundQueue.enabled',
+      '959': 'multiMachine.sessionPool.holdForStability.enabled',
       // mm-stores-devgate (operator directive 2026-06-13, topic 13481): the 7
       // multiMachine.stateSync.* memory stores MOVED from DARK_GATE_EXCLUSIONS to
       // DEV_GATED_FEATURES and their `enabled: false` literals were REMOVED from
@@ -438,10 +438,10 @@ describe('lint-dev-agent-dark-gate', () => {
       // attributor on the edited ConfigDefaults.
       // After merging JKHeadley/main + my accountFollowMe block, these resolve as below.
       // RE-VERIFIED by hand via the attributor on the MERGED ConfigDefaults.
-      '1124': 'multiMachine.stateSync.threadlinePairing.enabled',
-      '1246': 'cartographer.freshnessSweep.enabled',
-      '1291': 'cartographer.conformanceAudit.llmEnrichment.enabled',
-      '1316': 'cartographer.subtreeNav.llmRerank.enabled',
+      '1128': 'multiMachine.stateSync.threadlinePairing.enabled',
+      '1250': 'cartographer.freshnessSweep.enabled',
+      '1295': 'cartographer.conformanceAudit.llmEnrichment.enabled',
+      '1320': 'cartographer.subtreeNav.llmRerank.enabled',
     };
     const actual = attributeRealConfigDefaults();
     expect(actual).toEqual(EXPECTED);
