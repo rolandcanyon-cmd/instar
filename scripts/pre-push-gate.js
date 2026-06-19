@@ -428,6 +428,12 @@ try {
   warnings.push(`lint-no-direct-llm-http failed to run: ${err.message}`);
 }
 
+// (The scrape-fixture-realness lint is enforced via the `npm run lint` chain in
+// package.json, which CI runs — not duplicated here. A direct gate invocation
+// would run against this gate's resolved ROOT, which is a scratch dir under the
+// gate's own unit tests, where the registered fixtures don't exist; the chain in
+// `npm run lint` runs in the real repo and is the authoritative enforcement.)
+
 // ── 6. URL.pathname filesystem guard ──────────────────────────────────
 // new URL(..., import.meta.url).pathname preserves %20-encoded spaces,
 // breaking filesystem operations. Use __dirname (via fileURLToPath) instead.
