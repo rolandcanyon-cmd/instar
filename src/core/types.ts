@@ -1965,6 +1965,10 @@ export interface MachineCapacity {
    *  unless every machine is blocked or the user hard-pinned here. Absent =
    *  unknown = treated as not blocked (heartbeats from older versions). */
   quotaState?: { blocked: boolean; blockedUntil?: string; reason?: string };
+  /** B5 (multimachine-lease-poll-robustness, Decision 11) — whether this machine's
+   *  lifeline is ACTUALLY polling Telegram (the truth, from lifeline-poll-active).
+   *  Absent = unknown (older peer) → exactly-one-listener guard reports indeterminate. */
+  pollingActive?: boolean;
   /** Platform/workspace reachability — which channels this machine's adapters are CONNECTED to
    *  (spec: placement-platform-workspace-aware). ADAPTER-DERIVED at heartbeat time (NOT config):
    *  a slack workspaceId appears only because the Socket-Mode adapter is genuinely connected to that
@@ -2090,6 +2094,25 @@ export interface LeaseSelfHealConfig {
   /** F3 — a silent standby relinquishes a held lease (level-triggered). DARK. */
   silentStandbyRelinquish?: { enabled?: boolean };
   /**
+   * B3 (multimachine-lease-poll-robustness) — a dedicated renew timer sized
+   * SHORTER than the lease TTL so the holder renews (same epoch) before the lease
+   * lapses, instead of re-acquiring at epoch+1 every heartbeat tick (the
+   * epoch-climb root: default TTL 60s < tick 120s). OMIT `enabled` so it resolves
+   * via the developmentAgent gate (live-on-dev / dark-on-fleet). Pure timing —
+   * never relaxes the monotonic self-fence; only prevents a needless epoch bump.
+   */
+  resilientRenew?: { enabled?: boolean };
+  /**
+   * B4 (multimachine-lease-poll-robustness, Decision 10) — derive lease peer
+   * liveness (presumedDeadHolders / allPeersPresumedGone) from the SKEW-IMMUNE
+   * router-observed clock (MachinePoolRegistry routerReceivedAt) instead of the
+   * peer's skew-contaminated `lastSeen`. Closes the flap's root trigger: under
+   * clock skew, lastSeen makes a slow peer look dead (false failover) / a fast
+   * peer look alive (delayed failover). OMIT `enabled` ⇒ developmentAgent gate.
+   * Conservative + falls back to lastSeen when the peer isn't yet observed.
+   */
+  skewImmuneLiveness?: { enabled?: boolean };
+  /**
    * multi-transport-mesh-comms Layer 3 — the preferred stationary captain holds
    * its lease (same epoch, no re-acquire) instead of self-suspending ONLY when
    * its peer is presumed-gone by liveness-silence (`presumedDeadHolders()`),
@@ -2110,12 +2133,24 @@ export interface LeaseSelfHealConfig {
    * concrete resolved value so the overload derivation is retired for migrated agents.
    */
   leaseRole?: 'active' | 'observe-only' | 'deferential' | null;
-  /** Shared epoch-churn (F2) + preferred-flapping (F4) detector. */
+  /**
+   * Shared epoch-churn (F2) + preferred-flapping (F4) detector. B2
+   * (multimachine-lease-poll-robustness, Decision 8) wires the consumer (the
+   * ChurnBreaker): on >maxFlipsPerWindow role flips it latches deterministically
+   * to the preferred-awake role. OMIT `enabled` ⇒ developmentAgent gate;
+   * `dryRun` (default true) observes/logs the would-latch without applying it.
+   */
   churnDetector?: {
+    /** OMIT ⇒ developmentAgent gate (live-on-dev / dark-on-fleet). */
+    enabled?: boolean;
+    /** When true (default), record + log the latch verdict WITHOUT applying the role. */
+    dryRun?: boolean;
     /** Default 4. Min 2. */
     maxFlipsPerWindow?: number;
     /** Default 600000 (10 min). Min 60000. */
     windowMs?: number;
+    /** Latches per trailing hour that EXHAUST the breaker (then no auto-reset). Default 3. */
+    maxLatchesPerHour?: number;
   };
 }
 
@@ -2253,6 +2288,20 @@ export interface MultiMachineConfig {
    * standby can honor it. Consumed by TelegramLifeline.start().
    */
   telegramPolling?: boolean;
+  /**
+   * B1 (multimachine-lease-poll-robustness, Decisions 4-7) — tie Telegram
+   * poll-ownership to the fenced lease at runtime (the server writes a poll-intent
+   * file; the lifeline reconciles). OMIT `enabled` ⇒ developmentAgent gate;
+   * `dryRun` (default true) logs the would-action without changing ingress (the
+   * live flip is gated on the Phase-4 two-host proof + B2/B5 live).
+   */
+  pollFollowsLease?: { enabled?: boolean; dryRun?: boolean };
+  /**
+   * B1 — explicit operator poll override (LOCAL config floor above the lease
+   * intent). 'force-mute' = never poll (Phase-0 telegramPolling:false also maps
+   * here); 'force-poll' = always poll. Absent = follow the lease.
+   */
+  pollOverride?: 'force-poll' | 'force-mute';
   /**
    * multi-machine-lease-self-heal — F1 lease-tick self-heal (ENABLED: bounded
    * await + monotonic watchdog), F2 stale-holder takeover (DARK), F3 silent-

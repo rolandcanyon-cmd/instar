@@ -791,8 +791,25 @@ const SHARED_DEFAULTS: Record<string, unknown> = {
         enabled: false,
       },
       preferredAwakeMachineId: null,
-      churnDetector: { maxFlipsPerWindow: 4, windowMs: 600000 },
+      // B2 (multimachine-lease-poll-robustness, Decision 8) — the flap breaker.
+      // `enabled` OMITTED ⇒ developmentAgent gate; dryRun:true observes/logs the
+      // would-latch without applying the deterministic role (the dark stage).
+      churnDetector: { dryRun: true, maxFlipsPerWindow: 4, windowMs: 600000, maxLatchesPerHour: 3 },
+      // B3 (multimachine-lease-poll-robustness) — dedicated renew timer (TTL/2) so
+      // a held lease never lapses between heartbeat ticks (stops the epoch climb).
+      // `enabled` OMITTED ⇒ developmentAgent gate (live-on-dev / dark-on-fleet).
+      // Pure timing; never relaxes the monotonic self-fence.
+      resilientRenew: {},
+      // B4 (multimachine-lease-poll-robustness, Decision 10) — skew-immune lease
+      // peer liveness (routerReceivedAt vs skew-contaminated lastSeen). `enabled`
+      // OMITTED ⇒ developmentAgent gate. Conservative + lastSeen fallback.
+      skewImmuneLiveness: {},
     },
+    // B1 (multimachine-lease-poll-robustness) — tie Telegram poll-ownership to the
+    // fenced lease. `enabled` OMITTED ⇒ developmentAgent gate; dryRun:true logs the
+    // would-action WITHOUT changing ingress (the live flip is gated on the Phase-4
+    // two-host proof + B2/B5 live, so it can't disturb the Phase-0 stabilization).
+    pollFollowsLease: { dryRun: true },
     // multi-transport-mesh-comms (Layers 0-2) — multi-rope mesh transport
     // (Tailscale/LAN/Cloudflare hedged failover). Ships ENABLED (strictly additive;
     // a single-machine agent is a no-op and keeps its 127.0.0.1 bind — the 0.0.0.0

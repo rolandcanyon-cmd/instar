@@ -117,6 +117,9 @@ import { FencedLease, type LeaseCrypto } from '../core/FencedLease.js';
 import { GitLeaseStore } from '../core/GitLeaseStore.js';
 import { LocalLeaseStore } from '../core/LocalLeaseStore.js';
 import { LeaseCoordinator, type LeaseStore } from '../core/LeaseCoordinator.js';
+import { isPeerPresumedDead } from '../core/leaseLiveness.js';
+import { readPollActive, pidAlive as pollPidAlive } from '../core/pollIntent.js';
+import { checkMultiMachineConfigCoherence } from '../core/configCoherence.js';
 import { HttpLeaseTransport } from '../core/HttpLeaseTransport.js';
 import { HttpLiveTailTransport } from '../core/HttpLiveTailTransport.js';
 import { LiveTailBuffer } from '../core/LiveTailBuffer.js';
@@ -3462,12 +3465,20 @@ export async function startServer(options: StartOptions): Promise<void> {
     const coordinator = new MultiMachineCoordinator(state, {
       stateDir: config.stateDir,
       multiMachine: config.multiMachine,
+      developmentAgent: (config as { developmentAgent?: boolean }).developmentAgent,
     });
     const machineRole = coordinator.start();
     if (coordinator.enabled) {
       console.log(pc.green(`  Multi-machine: ${pc.bold(machineRole)} (${coordinator.identity!.machineId.slice(0, 12)}...)`));
       if (machineRole === 'standby') {
         console.log(pc.yellow('  Standby mode — processing gated, writes disabled'));
+      }
+      // Phase 2 #7 — surface incoherent multi-machine config (WARN only, never a
+      // boot reject): e.g. meshTransport off while session transfer is live (the
+      // worst-of-both state from the 2026-06-20 audit), or duplicate mesh rope
+      // priorities. Signal — the operator decides; boot is never blocked.
+      for (const w of checkMultiMachineConfigCoherence(config.multiMachine, true)) {
+        console.log(pc.yellow(`  ⚠ config-coherence [${w.code}]: ${w.message}`));
       }
     }
 
@@ -4141,6 +4152,15 @@ export async function startServer(options: StartOptions): Promise<void> {
       | undefined;
     const isGitRepo = fs.existsSync(path.join(config.projectDir, '.git'));
     const gitBackupEnabled = config.gitBackup?.enabled !== false;
+    // B4 (multimachine-lease-poll-robustness, Decision 10) — forward-ref to the
+    // (later-constructed) MachinePoolRegistry so the lease-liveness closures can
+    // read the SKEW-IMMUNE routerReceivedAt source instead of the skew-contaminated
+    // registry lastSeen. undefined until the registry is built below — during that
+    // window the closures fall back to lastSeen (safe). Function-body scope so it
+    // is visible to BOTH the lease closures (deeper) and the registry assignment.
+    let leaseLivenessRegistry:
+      | { getCapacity(id: string): { online: boolean; routerReceivedAt?: string } | null }
+      | undefined;
     // Construct gitSync for BOTH roles when this is a git-backed mesh machine:
     // a standby needs it to pull, and a standby that later self-elects to awake
     // (the Phase-0 scenario) must ALREADY have it so its role-change push fires.
@@ -4311,11 +4331,22 @@ export async function startServer(options: StartOptions): Promise<void> {
           presumedDeadHolders: () => {
             const reg = idMgr.loadRegistry();
             const nowMs = Date.now();
+            // B4 Decision 10 — skew-immune liveness when the flag resolves on AND
+            // the in-process registry has actually observed the peer; else legacy
+            // lastSeen. enabled OMITTED ⇒ developmentAgent gate.
+            const skewImmune = resolveDevAgentGate(config.multiMachine?.leaseSelfHeal?.skewImmuneLiveness?.enabled, config);
             const dead = new Set<string>();
             for (const [id, e] of Object.entries(reg.machines ?? {})) {
               if (id === selfMachineId) continue;
-              const last = Date.parse(e.lastSeen);
-              if (!Number.isNaN(last) && nowMs - last > seamlessness.failoverThresholdMs) dead.add(id);
+              const cap = leaseLivenessRegistry?.getCapacity(id);
+              if (isPeerPresumedDead({
+                lastSeenMs: Date.parse(e.lastSeen),
+                routerObserved: !!cap?.routerReceivedAt,
+                routerOnline: !!cap?.online,
+                nowMs,
+                failoverThresholdMs: seamlessness.failoverThresholdMs,
+                skewImmune,
+              })) dead.add(id);
             }
             return dead;
           },
@@ -4346,9 +4377,18 @@ export async function startServer(options: StartOptions): Promise<void> {
             const nowMs = Date.now();
             const peerIds = Object.keys(reg.machines ?? {}).filter((id) => id !== selfMachineId && !reg.machines![id].revokedAt);
             if (peerIds.length === 0) return false; // a solo machine never "holds against" a peer
+            // B4 Decision 10 — same skew-immune liveness as presumedDeadHolders.
+            const skewImmune = resolveDevAgentGate(config.multiMachine?.leaseSelfHeal?.skewImmuneLiveness?.enabled, config);
             return peerIds.every((id) => {
-              const last = Date.parse(reg.machines![id].lastSeen);
-              return !Number.isNaN(last) && nowMs - last > seamlessness.failoverThresholdMs;
+              const cap = leaseLivenessRegistry?.getCapacity(id);
+              return isPeerPresumedDead({
+                lastSeenMs: Date.parse(reg.machines![id].lastSeen),
+                routerObserved: !!cap?.routerReceivedAt,
+                routerOnline: !!cap?.online,
+                nowMs,
+                failoverThresholdMs: seamlessness.failoverThresholdMs,
+                skewImmune,
+              });
             });
           },
           onSelfSuspend: (reason) => console.log(pc.yellow(`  [lease] self-suspend: ${reason}`)),
@@ -15374,6 +15414,9 @@ export async function startServer(options: StartOptions): Promise<void> {
           failoverThresholdMs,
           logger: (m: string) => console.log(pc.dim(`  [pool] ${m}`)),
         });
+        // B4 Decision 10 — hand the skew-immune registry to the lease-liveness
+        // closures (forward-ref declared at function-body scope above the lease).
+        leaseLivenessRegistry = machinePoolRegistry;
         const poolSelfId =
           machineHeartbeat?.config?.machineId ??
           (poolIdMgr.hasIdentity() ? poolIdMgr.loadIdentity().machineId : null);
@@ -15517,6 +15560,17 @@ export async function startServer(options: StartOptions): Promise<void> {
                 selfReportedLastSeen: new Date().toISOString(),
                 loadAvg: osMod.loadavg()[0],
                 quotaState: selfQuotaState(),
+                // B5 — advertise this machine's REAL poll state (the lifeline's
+                // truth file), so the pool's exactly-one-listener guard counts
+                // actual pollers. undefined when the file is absent/stale or the
+                // lifeline pid is dead (→ peers read it as unknown = fail-open).
+                pollingActive: ((): boolean | undefined => {
+                  const pa = readPollActive(config.stateDir);
+                  if (!pa) return undefined;
+                  if (pa.pid && !pollPidAlive(pa.pid)) return undefined; // dead lifeline → unknown
+                  if (Date.now() - pa.ts > 90_000) return undefined; // stale → unknown
+                  return pa.pollingActive;
+                })(),
                 servesChannels: selfServesChannels(),
                 guardPosture: selfGuardPosture(),
                 // WS1.1 capability advertisement (spec invariant 5): a bounded
