@@ -135,8 +135,12 @@ export function bindDeployStampAgeDays(stateDir: string, now: () => number = Dat
 }
 
 /** The ctx surface the routes-layer bind gate consumes (wired at bootstrap;
- *  AgentServer default-constructs it so the gate is alive on every init path). */
+ *  AgentServer default-constructs it so the gate is alive on every init path).
+ *  `mint` is the SessionManager spawn-env side (INSTAR_BIND_TOKEN); `verify` +
+ *  `deployStampAgeDays` are the POST /commitments gate side — one shared
+ *  secret backs both. */
 export interface ConversationBindAuth {
+  mint: (sessionName: string, bootstrapConversationIds: number[]) => string;
   verify: (token: string) => BindTokenPayload | null;
   deployStampAgeDays: () => number | null;
 }
@@ -144,6 +148,8 @@ export interface ConversationBindAuth {
 export function createConversationBindAuth(stateDir: string): ConversationBindAuth {
   const secret = ensureBindTokenSecret(stateDir);
   return {
+    mint: (sessionName, bootstrapConversationIds) =>
+      mintBindToken(secret, { sessionName, bootstrapConversationIds, mintedAt: new Date().toISOString() }),
     verify: (token) => verifyBindToken(secret, token),
     deployStampAgeDays: () => bindDeployStampAgeDays(stateDir),
   };
