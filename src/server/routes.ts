@@ -44,6 +44,8 @@ import { describeTopicPlacement } from '../core/TopicPlacementDescription.js';
 import { buildRelocationNicknameSet } from '../core/RelocationNicknameSet.js';
 import { resolveSelfNickname } from '../core/SelfNicknameResolver.js';
 import { resolveDevAgentGate } from '../core/devAgentGate.js';
+import { candidateIdForRoutingKey } from '../core/conversationIdentity.js';
+import { TOKENLESS_BIND_GRACE_DAYS } from '../core/conversationBindToken.js';
 import { buildBiasToActionWouldFire } from '../core/bias-to-action-telemetry.js';
 import { PROPOSABLE_FLOOR_ACTIONS, renderAuthorizationCard } from '../core/AuthorizationRequestStore.js';
 import type { AuthorizationRequestStore, AuthorizationRequest } from '../core/AuthorizationRequestStore.js';
@@ -1192,6 +1194,15 @@ export interface RouteContext {
    *  init path (recording is always-on foundation; only DELIVERY is dev-gated), so
    *  a 503 here means the wiring is broken, not a dark feature. */
   conversationRegistry?: import('../core/ConversationRegistry.js').ConversationRegistry | null;
+  /** durable-conversation-identity §7 bind-time authority (increment 2): the
+   *  stateless bind-token verifier + the R7-minor-2 straggler-grace stamp
+   *  reader. Absent → the bind gate is inert (legacy behavior — wiring-
+   *  integrity pins that the production init constructs it). */
+  conversationBindAuth?: import('../core/conversationBindToken.js').ConversationBindAuth | null;
+  /** §6.1 dark-window honesty: the live followThrough gate state, so a
+   *  minted-id commitment accepted while delivery is dark/dry raises ONE
+   *  deduped undeliverable-notice attention item (adversarial-A6/NEW#4). */
+  conversationFollowThrough?: () => { enabled: boolean; dryRun: boolean };
   /** U4.1 §2C — the sticky durable skew-quarantine set (GET /pool/pin-quarantine +
    *  the explicit per-record re-admit). Null/absent when the pool is not wired. */
   topicPinSkewQuarantine?: import('../core/TopicPinSkewQuarantine.js').TopicPinSkewQuarantine | null;
@@ -11244,6 +11255,17 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
       res.status(400).json({ error: 'topicId must be a number' });
       return;
     }
+    // durable-conversation-identity §5 funnel hardening (increment 2 — a
+    // behavior change, deliberately NOT in the foundation): a NEGATIVE id is a
+    // minted conversation and never a Telegram topic. The 400 is classified
+    // terminal/non-retryable by the recovery policy (4xx → escalate), so no
+    // negative-id relay row retries forever.
+    if (topicId < 0) {
+      res.status(400).json({
+        error: 'negative topicId = minted conversation — use the conversation funnel (deliverToConversation, durable-conversation-identity §5)',
+      });
+      return;
+    }
     const { text, metadata } = req.body;
     if (!text || typeof text !== 'string') {
       res.status(400).json({ error: '"text" field required' });
@@ -11637,14 +11659,14 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
             return;
           }
           await ctx.slack.sendToChannel(channelId, text);
-          // Slack uses synthetic negative topic IDs internally; compute the same
-          // hash used by server.ts:slackChannelToSyntheticId so PresenceProxy's
-          // Slack path sees the same suppression signal.
-          let hash = 0;
-          for (let i = 0; i < channelId.length; i++) {
-            hash = ((hash << 5) - hash + channelId.charCodeAt(i)) | 0;
-          }
-          const synthetic = -(Math.abs(hash) + 1);
+          // Slack uses synthetic negative topic IDs internally. §4
+          // consolidation (durable-conversation-identity increment 2): the
+          // inline hash copy is RETIRED — this callsite MINTS (get-or-create)
+          // through the registry so PresenceProxy's Slack path sees the same
+          // suppression signal, falling back to the ONE shared candidate when
+          // the registry is degraded/absent (§3.6 fail-toward-delivery).
+          const synthetic =
+            ctx.conversationRegistry?.idForSessionKey(channelId) ?? candidateIdForRoutingKey(channelId);
           ctx.proxyCoordinator?.recordBuildHeartbeat(synthetic);
         }
         res.json({ ok: true, runId, phase, tool, status, elapsedMs });
@@ -21949,6 +21971,85 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
       }
     }
 
+    // ── durable-conversation-identity §7 bind-time authority (B7/R3-M5/R4-M3) ──
+    // A durable-state open on a conversation id is scoped to the session's OWN
+    // authenticated bootstrap context, enforced through the per-session bind
+    // token (delivered ONLY via the spawn env — never over a route). The
+    // server verifies the MAC and reads the bootstrap set FROM the token; it
+    // NEVER trusts a caller-supplied session name. In-process server callers
+    // do not traverse this route (the discriminator is the code path).
+    let boundBy: string | undefined;
+    const bindAuth = ctx.conversationBindAuth;
+    const numericTopicId = typeof topicId === 'number' && Number.isSafeInteger(topicId) ? topicId : undefined;
+    if (bindAuth && numericTopicId !== undefined) {
+      const rawTokenHeader = req.headers['x-instar-bind-token'];
+      const rawToken =
+        (Array.isArray(rawTokenHeader) ? rawTokenHeader[0] : rawTokenHeader) ??
+        (typeof req.body?.bindToken === 'string' ? (req.body.bindToken as string) : undefined);
+      const refuse = (detail: string): void => {
+        try {
+          void ctx.telegram?.createAttentionItem({
+            id: `conversation-bind-refused:${numericTopicId}`,
+            title: 'A durable bind on a conversation id was refused',
+            summary: `POST /commitments targeting topicId ${numericTopicId} was refused: ${detail} (durable-conversation-identity §7 — never silently delivered into a foreign conversation).`,
+            category: 'conversation-identity',
+            priority: 'NORMAL',
+            sourceContext: 'conversation-identity',
+          });
+        } catch { /* attention is observability */ }
+        res.status(403).json({ error: 'conversation-bind-not-authorized', detail });
+      };
+      if (numericTopicId < 0) {
+        // Minted-id bind: hard-gated, fail-closed from this increment on.
+        if (!rawToken) {
+          refuse('minted-id bind requires the session bind token (missing X-Instar-Bind-Token)');
+          return;
+        }
+        const payload = bindAuth.verify(rawToken);
+        if (!payload) {
+          refuse('bind token missing/invalid (MAC verification failed)');
+          return;
+        }
+        if (!payload.bootstrapConversationIds.includes(numericTopicId)) {
+          refuse(`conversation ${numericTopicId} is not in the session's authenticated bootstrap context`);
+          return;
+        }
+        boundBy = `session:${payload.sessionName}`;
+      } else if (rawToken) {
+        // R6-minor-4: a TOKEN-BEARING session's positive-id bind validates
+        // against the token's bootstrap set from this increment on.
+        const payload = bindAuth.verify(rawToken);
+        if (!payload) {
+          refuse('bind token invalid (MAC verification failed)');
+          return;
+        }
+        if (!payload.bootstrapConversationIds.includes(numericTopicId)) {
+          refuse(`topic ${numericTopicId} is not in the session's authenticated bootstrap context`);
+          return;
+        }
+        boundBy = `session:${payload.sessionName}`;
+      } else {
+        // Token-less LEGACY positive-id bind: keeps today's ungated behavior
+        // (deliberately fail-OPEN — minted-id binds are hard-gated regardless).
+        // Past the deploy-stamp grace window, the straggler backstop raises ONE
+        // deduped attention item so a long-lived ungated session is a visible
+        // operator decision, never a silent standing exception (R7-minor-2).
+        const ageDays = bindAuth.deployStampAgeDays();
+        if (ageDays !== null && ageDays >= TOKENLESS_BIND_GRACE_DAYS) {
+          try {
+            void ctx.telegram?.createAttentionItem({
+              id: 'conversation-bind-tokenless-straggler',
+              title: 'A token-less session is still opening commitments',
+              summary: `A POST /commitments (topicId ${numericTopicId}) arrived without a bind token ${ageDays} days after the bind-token increment deployed (grace ${TOKENLESS_BIND_GRACE_DAYS}d). The bind SUCCEEDED (legacy behavior); respawn long-lived sessions to close the window (durable-conversation-identity §7 R7-minor-2).`,
+              category: 'conversation-identity',
+              priority: 'LOW',
+              sourceContext: 'conversation-identity',
+            });
+          } catch { /* attention is observability */ }
+        }
+      }
+    }
+
     try {
       const commitment = ctx.commitmentTracker.record({
         type, userRequest, agentResponse, topicId, source,
@@ -21958,13 +22059,37 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
         softDeadlineAt, hardDeadlineAt, sessionEpoch,
         ownerMachineId, externalKey, beaconCreatedBySource,
         owner, blockedOn, actionClass, supersededBy,
+        ...(boundBy ? { boundBy } : {}),
       });
+      // §6.1 dark-window honesty (adversarial-A6/NEW#4): while followThrough
+      // is dark/dry a session CAN open a commitment on a minted id — accept it
+      // (it preserves the record for the live proof) and raise ONE deduped
+      // attention item marking it undeliverable. Routed through the EXISTING
+      // attention surface (Telegram lifeline / slack-attention-channel mirror)
+      // — never the dark minted-id funnel, which would swallow its own notice.
+      if (numericTopicId !== undefined && numericTopicId < 0 && ctx.conversationFollowThrough) {
+        try {
+          const ft = ctx.conversationFollowThrough();
+          if (!ft.enabled || ft.dryRun) {
+            void ctx.telegram?.createAttentionItem({
+              id: `minted-commitment-undeliverable:${numericTopicId}`,
+              title: 'A commitment was opened on a minted conversation while delivery is dark',
+              summary: `Commitment ${commitment.id} binds conversation ${numericTopicId}, but conversationIdentity.followThrough is ${!ft.enabled ? 'dark' : 'in dryRun'} on this agent — its beacon heartbeats will NOT deliver until the gate graduates. The commitment record is preserved (dark-window honesty, durable-conversation-identity §6.1).`,
+              category: 'conversation-identity',
+              priority: 'NORMAL',
+              sourceContext: 'conversation-identity',
+            });
+          }
+        } catch { /* attention is observability */ }
+      }
       res.status(201).json(commitment);
     } catch (err) {
-      // C1+C2 well-formedness gate failures are client errors (400), not 500.
+      // C1+C2 well-formedness gate failures are client errors (400), not 500;
+      // typed conversation-binder refusals are conflicts (409), not 500.
       const msg = err instanceof Error ? err.message : 'Failed to record';
       const isWellFormedness = /invalid owner|invalid blockedOn|requires a non-empty actionClass/.test(msg);
-      res.status(isWellFormedness ? 400 : 500).json({ error: msg });
+      const isBinderRefusal = /conversation-recording-disabled|conversation-registration-capacity|conversation-bind-unresolvable|multi-workspace-unsupported/.test(msg);
+      res.status(isWellFormedness ? 400 : isBinderRefusal ? 409 : 500).json({ error: msg });
     }
   });
 
