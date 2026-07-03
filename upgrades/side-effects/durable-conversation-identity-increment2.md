@@ -82,3 +82,7 @@ The GET /conversations* Capabilities entry shipped in increment 1 covers the rea
 3. **The §4 read-shaped callsites in server.ts** — the `slackChannelToSyntheticId` closure still exists; several comparison callsites (`=== topicId`) use it. Retire it to `conversationRegistry.readIdForRoutingKey` (READ path — added this increment, no write side-effect) / `idForSessionKey` (mint path), keeping the `slackProxyChannelMap` reverse lookups working (a staged migration keeps both until the reverse map is fully removed). Follow-up commit — the mint-idiom ratchet allowlist still lists `commands/server.ts` so the closure is allowed until retired.
 
 The clean seam: commit 1 is additive/inert; commit 2 activates it dev-gated. The Telegram lane is byte-identical when `followThrough` is off; a beacon whose `deliverMessage` dep is present but whose id resolves `id>0` still takes today's Telegram path.
+
+## Post-push landing note (ratchet baseline)
+
+CI's `no-silent-fallbacks` ratchet flagged two catch blocks in `conversationBindToken.ts` (the verify-MAC decode → null, and the deploy-stamp age reader → null). Both are intentional fail-CLOSED / observability paths, not degraded-service fallbacks — tagged `@silent-fallback-ok` with their safe-direction justification so the ratchet holds at its 491 baseline with zero untagged swallows from this increment.

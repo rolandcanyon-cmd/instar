@@ -79,6 +79,9 @@ export function verifyBindToken(secret: Buffer, token: string): BindTokenPayload
   try {
     given = Buffer.from(givenMac, 'base64url');
   } catch {
+    // @silent-fallback-ok — a non-decodable MAC is an INVALID token; returning
+    // null is the fail-CLOSED security contract (the caller refuses the bind),
+    // not a degraded-service fallback.
     return null;
   }
   if (given.length !== expected.length || !crypto.timingSafeEqual(given, expected)) return null;
@@ -130,6 +133,9 @@ export function bindDeployStampAgeDays(stateDir: string, now: () => number = Dat
     if (!Number.isFinite(at)) return null;
     return Math.floor((now() - at) / 86400000);
   } catch {
+    // @silent-fallback-ok — an unreadable/absent deploy stamp reads as "no age"
+    // (null), so the R7-minor-2 straggler backstop simply stays UNARMED (today's
+    // fail-open behavior) — never a refused bind, never a degraded service path.
     return null;
   }
 }
