@@ -158,6 +158,15 @@ export type ModelTier = 'opus' | 'sonnet' | 'haiku';
 export interface SessionManagerConfig {
   /** Project name used as the stable local agent id for auth-bound calls. */
   projectName: string;
+  /**
+   * durable-conversation-identity §7 (R4-M3): mint the per-session
+   * SELF-AUTHENTICATING bind token delivered through the spawn env
+   * (`INSTAR_BIND_TOKEN` in the tmux -e block — never over a route). The
+   * payload carries the session's authenticated bootstrap conversation ids;
+   * a durable-state open on a minted id is validated against that set.
+   * Absent → no token env is injected (legacy spawns).
+   */
+  mintBindToken?: (sessionName: string, bootstrapConversationIds: number[]) => string | null;
   /** Path to tmux binary */
   tmuxPath: string;
   /**
