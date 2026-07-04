@@ -427,6 +427,48 @@ export function createWhoamiHandler(opts: {
 }
 
 /**
+ * Adapter-send timeout budget (spec slack-outbound-robustness §2.4 / R8-M1
+ * Arm B). The outbound adapter call is bounded STRICTLY BELOW the §2.4
+ * single-flight reservation TTL (30s send budget < 60s reservation TTL) so a
+ * still-in-flight handler can never outlive its reservation and race a retry.
+ */
+export const SLACK_ADAPTER_SEND_TIMEOUT_MS = 30_000;
+
+/**
+ * Thrown when an outbound adapter send exceeds {@link SLACK_ADAPTER_SEND_TIMEOUT_MS}.
+ * The route maps this to an AMBIGUOUS 408 (never a 500 → retry → double-post):
+ * the send MAY have landed server-side, so it must never be blindly re-posted.
+ */
+export class AdapterSendTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`adapter send exceeded ${timeoutMs}ms — outcome ambiguous`);
+    this.name = 'AdapterSendTimeoutError';
+  }
+}
+
+/**
+ * Race an adapter send against a bounded timeout. On timeout the promise
+ * rejects with {@link AdapterSendTimeoutError} and the (still-running) send is
+ * abandoned — the caller MUST treat its own outcome as ambiguous and record no
+ * delivery-id. Pure, injectable clock-free; the timer is unref-free by design
+ * (the race resolves either way well within a request lifetime).
+ */
+export async function sendWithAdapterTimeout<T>(
+  send: () => Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new AdapterSendTimeoutError(timeoutMs)), timeoutMs);
+  });
+  try {
+    return await Promise.race([send(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
  * Build the `POST /events/delivery-failed` request handler.
  *
  * Spec: docs/specs/telegram-delivery-robustness.md § Layer 2c.
@@ -1697,6 +1739,11 @@ export function createRoutes(ctx: RouteContext): Router {
   // (Not using a Set — we need TTL.) Helper functions above provide that.
   const deliveryIdLruHelpers = { has: deliveryLruHas, record: deliveryLruRecord };
   void deliveryIdLruHelpers; // referenced via the helpers; alias kept for grep
+
+  // One-time-per-boot breadcrumb latch for the /internal/slack-forward typed
+  // refusal (spec §2.7). Deduped so a caller loop can't flood the attention
+  // queue — the first hit per boot raises one item; subsequent hits just 409.
+  let slackForwardBreadcrumbRaised = false;
 
   // ── /telegram/reply content-dedup (2026-06-06 duplicate-message fix) ──
   // The delivery-id LRU above only catches a re-POST of the SAME id. It does
@@ -12458,6 +12505,26 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
       return;
     }
 
+    // ── X-Instar-DeliveryId idempotency (spec §2.4) ──
+    // Mirrors /telegram/reply: a duplicate POST with the same delivery-id
+    // returns 200 idempotent WITHOUT re-sending. This closes the
+    // "200-but-client-blind" double-send class where a redrive re-posts a
+    // message that actually landed the first time but the script-side response
+    // was lost. The id is recorded only AFTER a successful send (below), so a
+    // failed send never poisons the id. (The durable id-ledger of §2.4 is a
+    // tracked follow-up; this in-memory LRU is the deployed-Telegram-parity
+    // baseline.)
+    const slackDeliveryIdHeader = req.headers['x-instar-deliveryid'];
+    const slackDeliveryId = Array.isArray(slackDeliveryIdHeader)
+      ? slackDeliveryIdHeader[0]
+      : slackDeliveryIdHeader;
+    const hasSlackDeliveryId =
+      typeof slackDeliveryId === 'string' && /^[0-9a-f-]{16,64}$/i.test(slackDeliveryId);
+    if (hasSlackDeliveryId && deliveryLruHas(slackDeliveryId as string)) {
+      res.json({ ok: true, topicId: channelId, idempotent: true });
+      return;
+    }
+
     if (
       await checkOutboundMessage(text, 'slack', res, {
         allowDebugText: metadata?.allowDebugText === true,
@@ -12479,7 +12546,25 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
         requestedFormatMode === 'legacy-passthrough' || requestedFormatMode === 'mrkdwn'
           ? requestedFormatMode
           : undefined;
-      const ts = await ctx.slack.sendToChannel(channelId, text, { thread_ts, formatMode });
+      // R8-M1 Arm B (spec §2.4): the adapter call is bounded by an explicit
+      // timeout STRICTLY BELOW the §2.4 single-flight reservation TTL (30s <
+      // 60s). A send that outlives this budget has an AMBIGUOUS outcome — the
+      // Slack API MAY have accepted the post — so the handler treats its own
+      // outcome as ambiguous and responds 408 (→ recovery-policy
+      // `finalize-ambiguous`, NEVER re-posted), NOT the 500 catch-all below
+      // (500 → recovery-policy retry → double-post). The still-alive adapter
+      // call is abandoned; it must NOT record a delivery-id on this path.
+      const ts = await sendWithAdapterTimeout(
+        () => ctx.slack!.sendToChannel(channelId, text, { thread_ts, formatMode }),
+        SLACK_ADAPTER_SEND_TIMEOUT_MS,
+      );
+
+      // Record the delivery-id ONLY after a successful send (spec §2.4) — a
+      // failed send (which throws before here, incl. the ambiguous 408
+      // timeout) must not poison the id so its legitimate retry isn't lost.
+      if (hasSlackDeliveryId) {
+        deliveryLruRecord(slackDeliveryId as string);
+      }
 
       // Notify onMessageLogged that the agent responded (so PresenceProxy cancels standby)
       if (ctx.slack.onMessageLogged) {
@@ -12511,28 +12596,51 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
 
       res.json({ ok: true, topicId: channelId, ts });
     } catch (err) {
+      // R8-M1 Arm B: an adapter-send TIMEOUT is ambiguous, not a server error.
+      // Respond 408 (the ambiguous class the script + recovery-policy already
+      // handle) so a redrive NEVER re-posts a message the API may have taken.
+      if (err instanceof AdapterSendTimeoutError) {
+        res.status(408).json({ error: 'adapter-send-timeout', ambiguous: true });
+        return;
+      }
       res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
     }
   });
 
   router.post('/internal/slack-forward', async (req, res) => {
-    if (!ctx.slack) {
-      res.status(503).json({ error: 'Slack not configured' });
-      return;
+    // ── Typed refusal (spec slack-outbound-robustness §2.7, round-1 M6) ──
+    // As deployed this route took {channelId, text} and POSTED that text OUT to
+    // the channel — but its only caller (SlackLifeline.forwardToServer) forwards
+    // INBOUND user messages, so the route's sole live semantic is an ECHO BUG
+    // (posting the user's own message back at them). SlackLifeline is written
+    // but never instantiated, so it has never run live. Gating an echo defect
+    // still ships an echo defect the day SlackLifeline is wired. Instead the
+    // route refuses with a typed 409: the real inbound path (session injection,
+    // mirroring /internal/telegram-forward) is owned by Phase 2.2. Bearer auth
+    // is preserved (the route is inside the authed router); zero outbound
+    // exposure — strictly less than the deployed behavior. Fail-toward-delivery
+    // does NOT apply: there is no legitimate delivery through an echo bug.
+    if (!slackForwardBreadcrumbRaised) {
+      slackForwardBreadcrumbRaised = true;
+      void ctx.telegram?.createAttentionItem?.({
+        id: 'slack-forward-misdirected-route',
+        title: 'Slack: /internal/slack-forward hit — misdirected route',
+        summary:
+          'POST /internal/slack-forward received traffic. This route is an inbound-shaped ' +
+          'payload on an outbound path (an echo defect); it now refuses with 409. The ' +
+          'session-injection re-point is owned by Phase 2.2 (SlackLifeline parity with ' +
+          '/internal/telegram-forward).',
+        category: 'general',
+        priority: 'NORMAL',
+        sourceContext: 'slack-outbound-robustness',
+      });
     }
-
-    const { channelId, text } = req.body;
-    if (!channelId || !text) {
-      res.status(400).json({ error: '"channelId" and "text" fields required' });
-      return;
-    }
-
-    try {
-      await ctx.slack.sendToChannel(channelId, text);
-      res.json({ ok: true });
-    } catch (err) {
-      res.status(500).json({ error: (err as Error).message });
-    }
+    res.status(409).json({
+      error: 'misdirected-route',
+      detail:
+        'inbound-shaped payload on an outbound route — re-point owned by Phase 2.2 ' +
+        '(SlackLifeline / session injection parity with /internal/telegram-forward)',
+    });
   });
 
   router.get('/slack/channels', async (req, res) => {

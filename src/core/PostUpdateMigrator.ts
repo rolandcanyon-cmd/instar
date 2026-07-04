@@ -7984,9 +7984,12 @@ Two layers keep my machine-to-machine \"ropes\" (Tailscale / LAN / Cloudflare) h
       shippedMarker: 'slack-reply.sh — Send a message to a Slack channel via the instar server',
       label: 'scripts/slack-reply.sh',
       result,
-      // Threads-as-sessions (§5.3): refresh a deployed script that lacks the
-      // optional thread_ts 2nd-arg support, so thread replies route correctly.
-      featureMarker: 'slack-reply-feature: thread-ts-arg',
+      // slack-outbound-robustness §2.6/R8-M1 Arm C: refresh a deployed script
+      // that lacks the pre-POST X-Instar-DeliveryId mint + 409-non-losing
+      // classification. This marker supersedes the thread-ts-arg one (the new
+      // template contains BOTH), so a deployed thread-ts-arg-but-no-delivery-id
+      // script is correctly refreshed.
+      featureMarker: 'slack-reply-feature: delivery-id',
     });
 
     // WhatsApp reply script — lives in .instar/scripts/ per init.ts, not
@@ -12267,6 +12270,13 @@ process.stdin.on('end', async () => {
     // template (preflight for every non-script sender) reaches existing
     // agents.
     '4dfcc184c012d52f0e28c9fe8aca301c23b76d792155c821b8b0f0666da4984b',
+    // TIME_CLAIM version (pre-delivery-id-pre-POST-mint). The current shipped
+    // template before slack-outbound-robustness §2.6 moved the delivery-id
+    // mint BEFORE the initial send (X-Instar-DeliveryId on the first POST) +
+    // added the 409 delivery-in-flight recoverable branch (R8-M1 Arm C).
+    // Recorded so deployed agents cleanly upgrade to the pre-POST-mint
+    // template instead of getting a `.new` candidate.
+    '63ca933e2d7c59d92c92d2799afa71b9c75e45caf3ab7c1cb06aa8eb95ba2900',
   ]);
 
   /**
