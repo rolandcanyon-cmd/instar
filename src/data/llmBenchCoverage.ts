@@ -32,6 +32,12 @@ export type BenchCoverage =
 export const LLM_BENCH_COVERAGE: Readonly<Record<string, BenchCoverage>> = {
   // ── Covered by the critical set (Wave 1 — authored 2026-07-02) ──
   MessageSentinel: { task: 'sentinel-classify' },
+  // The zombie-classify benchmark IS this classifier's bench task (operator-approved; it is the
+  // reason the spec kept an AI decider over a rules-only reaper). The task battery lives in the
+  // research tree (research/llm-pathway-bench/instar-bench-v2/tasks/zombie-classify.json) and
+  // measures the model's false-leave / false-alert rate (EFFECTIVENESS) — kill-SAFETY is carried
+  // entirely by the deterministic floor, so this benchmark never gates a kill.
+  ExternalHogClassifier: { task: 'zombie-classify' },
   MessagingToneGate: { task: 'tone-gate' },
   // CompletionEvaluator has TWO judged surfaces; both benched.
   CompletionEvaluator: { task: 'completion-judge+p13-stop-judge' },
@@ -159,6 +165,9 @@ export const LLM_BENCH_COVERAGE: Readonly<Record<string, BenchCoverage>> = {
 export type UntrustedInputFlag = true | { false: string };
 
 export const LLM_UNTRUSTED_INPUT: Readonly<Record<string, UntrustedInputFlag>> = {
+  // The external-hog classifier judges a process's attacker-controllable name + full argv
+  // (wrapped as untrusted data in ExternalHogClassifierPrompt) → judges untrusted content.
+  ExternalHogClassifier: true,
   // ── Sentinels judging messages / session output / transcripts → true ──
   InputGuard: true,
   SessionActivitySentinel: true,
@@ -310,6 +319,9 @@ export const CLAIM_KINDS: ReadonlyArray<ClaimKind> = [
 export type JudgesClaimsFlag = { claimKind: ClaimKind } | false | { false: string };
 
 export const LLM_JUDGES_CLAIMS: Readonly<Record<string, JudgesClaimsFlag>> = {
+  // The external-hog classifier judges a process's DISPOSITION (dead-weight zombie vs busy),
+  // not a completion/health/scored-credit claim asserted by another party → does not judge claims.
+  ExternalHogClassifier: false,
   // ── Judges (judgesClaims: true) ────────────────────────────────────────────
   // Completion evaluators — credit/refuse a claim of asserted work.
   CompletionEvaluator: { claimKind: 'completionClaim' }, // THE motivating callsite: credited a bare "tests pass"
@@ -433,6 +445,9 @@ export type ParserContractFlag =
   | { false: string };
 
 export const LLM_PARSER_CONTRACT: Readonly<Record<string, ParserContractFlag>> = {
+  // The external-hog classifier's output is machine-parsed into a closed verdict vocabulary
+  // (kill|leave|alert via parseClassifierVerdict, strict allowlist, fail-safe to alert).
+  ExternalHogClassifier: { pending: 'contract-wave-2' },
   // ── WAVE-1: the four spec-named highest-stakes parsed callsites (rollout §0) ──
   MessagingToneGate: { pending: 'contract-wave-1' }, // THE motivating defect: prompt taught "B15", parser accepts only "B15_CONTEXT_DEATH_STOP"
   ExternalOperationGate: { pending: 'contract-wave-1' }, // parses a closed mutability/reversibility classification
@@ -629,6 +644,9 @@ export interface RoutingNature {
 }
 
 export const LLM_ROUTING_NATURE: Readonly<Record<string, RoutingNature>> = {
+  // The external-hog classifier is a background scan-tick bounded verdict (kill/leave/alert),
+  // not latency-critical → nature A, SORT chain. Bench-covered by zombie-classify.
+  ExternalHogClassifier: { nature: 'A', chain: 'SORT' },
   // ── Nature A — bounded verdicts (background → SORT; latency-critical → FAST) ──
   // MessageSentinel = the emergency-stop classifier: latency-critical AND rule
   // R2 (never rides Opus-via-Claude-CLI — missed canonical STOPs at 73%).
