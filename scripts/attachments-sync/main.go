@@ -20,6 +20,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -28,11 +29,24 @@ import (
 )
 
 var (
-	homeDir  = os.Getenv("HOME")
-	srcDir   = filepath.Join(homeDir, "Library/Messages/Attachments")
-	destDir  string
-	logFile  string
+	homeDir     = os.Getenv("HOME")
+	srcDir      = filepath.Join(homeDir, "Library/Messages/Attachments")
+	messagesDir = filepath.Join(homeDir, "Library/Messages")
+	destDir     string
+	chatDbDir   string
+	logFile     string
 )
+
+// chatDbFiles are the SQLite files the node daemon reads through hardlinks.
+// The daemon runs WITHOUT Full Disk Access; this binary (which HAS FDA) keeps
+// these hardlinks fresh so the daemon can read the live database — including
+// the write-ahead log where brand-new messages live before a checkpoint.
+var chatDbFiles = []string{"chat.db", "chat.db-wal", "chat.db-shm"}
+
+// How often to re-verify the chat.db hardlinks. Cheap (a few stat() calls);
+// it only re-links when an inode has actually drifted. Override with
+// CHATDB_SYNC_INTERVAL_MS for testing.
+const defaultChatDbSyncInterval = 2 * time.Second
 
 // Supported extensions to mirror
 var exts = map[string]bool{
@@ -51,11 +65,15 @@ func main() {
 	}
 	dotInstar := filepath.Dir(filepath.Dir(exe)) // <agentRoot>/.instar
 	destDir = filepath.Join(dotInstar, "imessage/attachments")
+	chatDbDir = filepath.Join(dotInstar, "imessage")
 	logFile = filepath.Join(dotInstar, "logs/attachments-watcher.log")
 
 	// Override via env for testing
 	if v := os.Getenv("ATTACHMENTS_DEST"); v != "" {
 		destDir = v
+	}
+	if v := os.Getenv("CHATDB_DEST"); v != "" {
+		chatDbDir = v
 	}
 	if v := os.Getenv("ATTACHMENTS_LOG"); v != "" {
 		logFile = v
@@ -63,6 +81,9 @@ func main() {
 
 	if err := os.MkdirAll(destDir, 0755); err != nil {
 		log.Fatalf("cannot create dest dir: %v", err)
+	}
+	if err := os.MkdirAll(chatDbDir, 0755); err != nil {
+		log.Fatalf("cannot create chatdb dir: %v", err)
 	}
 	if err := os.MkdirAll(filepath.Dir(logFile), 0755); err != nil {
 		log.Fatalf("cannot create log dir: %v", err)
@@ -86,11 +107,96 @@ func main() {
 		logMsg("initial sync: linked %d new files", n)
 	}
 
+	// Initial chat.db hardlink sync — critical after a reboot, when macOS
+	// Messages recreates the -wal file with a fresh inode and the daemon's
+	// old hardlink goes stale. Re-linking here restores it immediately.
+	if r, err := syncChatDb(); err != nil {
+		logMsg("initial chatdb sync error: %v", err)
+	} else {
+		logMsg("initial chatdb sync: relinked %d file(s)", r)
+	}
+
+	// Continuous chat.db hardlink maintenance. This is what makes iMessage
+	// robust to WAL-inode churn: the daemon never needs Full Disk Access and
+	// its view of the database self-heals within one interval of any drift.
+	go chatDbLoop()
+
 	// Watch for new files
 	if err := watch(); err != nil {
 		logMsg("watcher error: %v", err)
 		os.Exit(1)
 	}
+}
+
+// chatDbSyncInterval returns the re-link cadence (env-overridable for tests).
+func chatDbSyncInterval() time.Duration {
+	if v := os.Getenv("CHATDB_SYNC_INTERVAL_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultChatDbSyncInterval
+}
+
+// chatDbLoop re-verifies the chat.db hardlinks on a ticker forever.
+func chatDbLoop() {
+	ticker := time.NewTicker(chatDbSyncInterval())
+	defer ticker.Stop()
+	for range ticker.C {
+		if r, err := syncChatDb(); err != nil {
+			logMsg("chatdb sync error: %v", err)
+		} else if r > 0 {
+			logMsg("chatdb relinked %d file(s)", r)
+		}
+	}
+}
+
+// syncChatDb hardlinks chat.db + chat.db-wal + chat.db-shm from
+// ~/Library/Messages into the agent's private imessage dir, recreating any
+// link whose inode has drifted from the live file (or is missing). Returns
+// the count of links (re)created.
+//
+// Safety: it only ever removes/creates links UNDER chatDbDir. Removing a
+// hardlink never affects the live file's data — hardlinks are peers, not
+// parent/child. It never opens or writes the live database.
+func syncChatDb() (int, error) {
+	relinked := 0
+	var firstErr error
+	for _, name := range chatDbFiles {
+		src := filepath.Join(messagesDir, name)
+		dst := filepath.Join(chatDbDir, name)
+
+		if _, err := os.Stat(src); err != nil {
+			// -wal / -shm are legitimately absent when the DB isn't in WAL
+			// mode at that instant; skip quietly rather than error.
+			if os.IsNotExist(err) {
+				continue
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+
+		// Already pointing at the live inode? Nothing to do — live writes are
+		// already visible through the shared inode.
+		if isSameInode(src, dst) {
+			continue
+		}
+
+		// Stale (drifted inode) or missing — recreate.
+		if _, err := os.Lstat(dst); err == nil {
+			os.Remove(dst)
+		}
+		if err := os.Link(src, dst); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("link %s: %w", name, err)
+			}
+			continue
+		}
+		relinked++
+	}
+	return relinked, firstErr
 }
 
 // syncOnce walks srcDir and hardlinks any new supported files to destDir.
