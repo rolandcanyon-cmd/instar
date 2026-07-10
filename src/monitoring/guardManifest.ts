@@ -400,6 +400,38 @@ export const GUARD_MANIFEST: readonly GuardManifestEntry[] = [
     description: 'Always-on floor that auto-answers a framework approval prompt (the cd-redirection wedge); never silently disableable.',
   },
   {
+    key: 'intelligence.selfActionGovernor.enabled',
+    kind: 'config',
+    // SYNTHETIC enabled-polarity key (unified-self-action-backpressure
+    // §Fail-direction deliverable 1 — the PermissionPromptAutoResolver
+    // precedent): the governor's only switch is the INVERTED
+    // `intelligence.selfActionGovernor.emergencyDisable` (true = OFF), so
+    // extractGuardPosture COMPUTES `enabled = emergencyDisable !== true`
+    // (absent => on) under this configPath. A deliberate disable then reads as
+    // enabled->disabled — a tripwire incident, never a silent batch-flip.
+    configPath: 'intelligence.selfActionGovernor.enabled',
+    defaultEnabled: true,
+    // emergencyDisable is read live by the governor (a disk/PATCH change takes
+    // effect with no restart) — diverged-pending-restart would lie.
+    liveConfig: true,
+    expectedTickMs: 60_000,
+    process: 'server',
+    expectRuntime: true,
+    component: 'SelfActionGovernor',
+    description:
+      'Unified self-action backpressure chokepoint (observe-only rollout): every registered self-triggered action (kill, swap, notify, respawn) rides admit() for would-deny measurement; per-class enforce is the operator FD8 ladder.',
+    loadBearing: true,
+    criticalPath: 'self-action capacity safety (the runaway self-trigger flood brake: reaper kill storms, swap thrash, notify floods)',
+    // G3 manifest lint: every loadBearing entry declares its soak budget. The
+    // governor ships observe-only BY DESIGN (FD1) and its runtime getter does
+    // not report observe as dryRun (the FD8/FD12 ladder owns per-class
+    // graduation), so the soak window exists to satisfy the uniform G3
+    // contract — the guard's own enabled-state (emergencyDisable inversion)
+    // is what the gap classification watches.
+    soakWindowDays: 30,
+    declaredLoadBearingAt: '2026-07-10',
+  },
+  {
     key: 'monitoring.externalHogSentinel.enabled',
     kind: 'config',
     configPath: 'monitoring.externalHogSentinel.enabled',
