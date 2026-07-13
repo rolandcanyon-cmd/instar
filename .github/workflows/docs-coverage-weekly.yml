@@ -55,10 +55,21 @@ jobs:
           fi
           # Find an open issue tagged with our marker label, or create one.
           ISSUE_NUMBER="$(gh issue list --label docs-coverage --state open --json number --jq '.[0].number // empty')"
+          # GitHub's issue/comment body has a hard 65536-char ceiling. As the
+          # doc tree grows, the raw report alone can exceed that (it did on
+          # 2026-07-13), which fails the whole step. Truncate defensively —
+          # the full report always lives in the uploaded artifact regardless.
+          MAX_REPORT_CHARS=55000
+          REPORT_CONTENT="$(cat "$REPORT_PATH")"
+          if [ "${#REPORT_CONTENT}" -gt "$MAX_REPORT_CHARS" ]; then
+            REPORT_CONTENT="${REPORT_CONTENT:0:$MAX_REPORT_CHARS}
+
+          _...truncated ($(echo -n "$REPORT_CONTENT" | wc -c) of full report shown; download the \`docs-coverage-weekly\` artifact from this run for the complete output)._"
+          fi
           BODY=$(cat <<EOF
           ## Weekly docs coverage snapshot — $(date -u +"%Y-%m-%d")
 
-          $(cat "$REPORT_PATH")
+          $REPORT_CONTENT
 
           ---
 
