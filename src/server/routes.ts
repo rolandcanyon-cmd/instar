@@ -788,6 +788,8 @@ export interface RouteContext {
   inUseAccountResolver?: import('../core/InUseAccountResolver.js').InUseAccountResolver;
   /** EnrollmentWizard (P2.1) — mobile-first login + auto-reissue. Null until wired. */
   enrollmentWizard: import('../core/EnrollmentWizard.js').EnrollmentWizard | null;
+  /** Deterministic test seam after plain enrollment completion owns its id. */
+  enrollmentCompleteInFlightHook?: (id: string) => void | Promise<void>;
   /** WS5.2 R12 — Account Follow-Me revocation data-plane executor. Constructed in the server with
    *  REAL deps (cooperative local wipe + durable pending store + attention emit). Null when the
    *  server wiring did not construct it (e.g. lightweight test harnesses). The `/mandate/:id/revoke`
@@ -814,6 +816,13 @@ export interface RouteContext {
     /** B3b — the autonomous balancer (Increment B). Its `status()` is surfaced on
      *  GET /credentials/rebalancer (last pass + breaker). Optional so tests can omit it. */
     rebalancer?: import('../core/CredentialRebalancer.js').CredentialRebalancer;
+    /** Pure, credential-free dry-run plan restoring each confirmed tenant to its labelled home. */
+    repairPlan?: () => Promise<import('../core/CredentialIdentityRepairPlan.js').CredentialIdentityRepairPlan>;
+    executeRepairPlan?: () => Promise<{
+      plan: import('../core/CredentialIdentityRepairPlan.js').CredentialIdentityRepairPlan;
+      results: Array<{ move: import('../core/CredentialIdentityRepairPlan.js').CredentialRepairMove; outcome: string; reason: string }>;
+      vacateResults: Array<{ impostorSlot: string; retainedSlot: string; accountId: string; outcome: string; reason: string }>;
+    }>;
     /** Raw-blob reader for a slot (restore-enrollment coherence probe). Injectable for tests. */
     readBlob?: (slot: string) => Promise<{ raw: string; oauth: import('../core/OAuthRefresher.js').ClaudeOauth | null } | null>;
   } | null;
@@ -25690,6 +25699,7 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
     }
     plainCompleteInFlight.add(id);
     try {
+      await ctx.enrollmentCompleteInFlightHook?.(id);
       // Keep a short observable critical section so a concurrent cancel stands aside.
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
       const login = ctx.enrollmentWizard.complete(id);
@@ -25790,6 +25800,30 @@ document.getElementById('mcpForm').addEventListener('submit', async function (e)
       journalTail: led.getJournal().slice(-20),
       forcedBudgetRemaining: cr.levers.forcedBudgetRemaining(),
     });
+  });
+
+  // GET /credentials/repair-plan — mandatory dry-run/read surface before any
+  // identity-drift repair mutation. It contains account ids + slot labels only.
+  router.get('/credentials/repair-plan', async (_req, res) => {
+    const cr = ctx.credentialRepointing;
+    if (!cr || !credRepointEnabled() || !cr.repairPlan) {
+      res.status(503).json({ enabled: false, reason: 'credential identity repair is disabled or not wired' });
+      return;
+    }
+    const plan = await cr.repairPlan();
+    cr.audit.audit({ event: 'identity-repair-plan-read', moves: plan.moves.length, residuals: plan.ownerReloginAccountIds.length });
+    credSend(res, 200, { enabled: true, dryRun: true, plan });
+  });
+
+  // POST /credentials/repair-plan/execute — reuse the staged swap executor;
+  // never implements a second credential-write path. Executor config still
+  // controls dark/dry-run, and every move has its own live identity pre-flight.
+  router.post('/credentials/repair-plan/execute', async (_req, res) => {
+    const cr = credLeverGuard(res);
+    if (!cr || !cr.executeRepairPlan) return;
+    const { plan, results, vacateResults } = await cr.executeRepairPlan();
+    cr.audit.audit({ event: 'identity-repair-plan-executed', moves: results.length, outcomes: results.map((r) => r.outcome) });
+    credSend(res, 200, { enabled: true, dryRun: ctx.config.subscriptionPool?.credentialRepointing?.dryRun !== false, plan, results, vacateResults });
   });
 
   // GET /credentials/rebalancer — the autonomous balancer's last-pass surface. The CredentialRebalancer

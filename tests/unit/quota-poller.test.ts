@@ -157,6 +157,68 @@ describe('QuotaPoller', () => {
     expect(snap?.sevenDay?.utilizationPct).toBe(71);
   });
 
+  it('attributes quota to live token identity, marks drift, and caches the oracle probe', async () => {
+    pool.add({ ...ACCT, email: 'expected@example.test' });
+    pool.add({
+      id: 'claude-2', nickname: 'actual', provider: 'anthropic', framework: 'claude-code',
+      configHome: '/home/x/.claude-actual', email: 'actual@example.test',
+    });
+    let probes = 0;
+    const p = new QuotaPoller({
+      pool,
+      fetchImpl: okFetch(LIVE_USAGE_BODY),
+      tokenResolver: () => 'sk-ant-oat01-x',
+      resolveSlotIdentity: async () => { probes++; return { accountId: 'claude-2', email: 'actual@example.test' }; },
+    });
+
+    await p.pollAll();
+    expect(pool.get('claude-1')?.identityDrifted).toBe(true);
+    expect(pool.get('claude-1')?.identityDrift?.actualAccountId).toBe('claude-2');
+    expect(pool.get('claude-2')?.lastQuota?.sevenDay?.utilizationPct).toBe(71);
+    await p.pollAccount(pool.get('claude-1')!);
+    expect(probes).toBe(2); // one probe per distinct slot; second claude-1 read is cached
+  });
+
+  it('self-closes drift and its residual callback on the first matching identity poll', async () => {
+    pool.add({ ...ACCT, email: 'expected@example.test' });
+    pool.update(ACCT.id, {
+      identityDrifted: true,
+      identityDrift: {
+        expectedAccountId: ACCT.id, actualAccountId: 'other', slot: ACCT.configHome,
+        detectedAt: '2026-01-01T00:00:00.000Z', lastConfirmedAt: '2026-01-01T00:00:00.000Z',
+        repairState: 'owner-relogin-required',
+      },
+    });
+    const restored: Array<[string, string]> = [];
+    const p = new QuotaPoller({
+      pool, fetchImpl: okFetch(LIVE_USAGE_BODY), tokenResolver: () => 'sk-ant-oat01-x',
+      resolveSlotIdentity: async () => ({ accountId: ACCT.id, email: 'expected@example.test' }),
+      onIdentityRestored: (id, attentionId) => { restored.push([id, attentionId]); },
+    });
+    await p.pollAccount(pool.get(ACCT.id)!);
+    expect(pool.get(ACCT.id)?.identityDrifted).toBe(false);
+    expect(pool.get(ACCT.id)?.identityDrift).toBeUndefined();
+    expect(restored).toEqual([[ACCT.id, `credential-identity-drift-${ACCT.id}-2026-01-01T00:00:00.000Z`]]);
+  });
+
+  it('invalidates cached pre-repair identity so the immediate poll observes the repaired tenant', async () => {
+    pool.add({ ...ACCT });
+    pool.add({ ...ACCT, id: 'claude-2', configHome: '/home/x/.claude-2' });
+    let live = 'claude-2';
+    let probes = 0;
+    const p = new QuotaPoller({
+      pool, fetchImpl: okFetch(LIVE_USAGE_BODY), tokenResolver: () => 'sk-ant-oat01-x',
+      resolveSlotIdentity: async () => { probes++; return { accountId: live }; },
+    });
+    await p.pollAccount(pool.get(ACCT.id)!);
+    expect(pool.get(ACCT.id)?.identityDrifted).toBe(true);
+    live = ACCT.id;
+    p.invalidateIdentityCache([ACCT.configHome]);
+    await p.pollAccount(pool.get(ACCT.id)!);
+    expect(probes).toBe(2);
+    expect(pool.get(ACCT.id)?.identityDrifted).toBe(false);
+  });
+
   it('pollAccount returns null when the token is unresolvable', async () => {
     const p = new QuotaPoller({ pool, fetchImpl: okFetch(LIVE_USAGE_BODY), tokenResolver: () => null });
     pool.add({ ...ACCT });
