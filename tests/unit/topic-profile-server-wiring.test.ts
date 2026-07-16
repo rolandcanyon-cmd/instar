@@ -65,7 +65,8 @@ describe('server-boot wiring: Topic Profile orchestrator + carrier (TOPIC-PROFIL
     });
 
     it('spawn port drives the real spawnSessionForTopic (not a stub)', () => {
-      expect(depsBlock()).toContain('await spawnSessionForTopic(sessionManager, telegram');
+      expect(depsBlock()).toMatch(/await spawnSessionForTopic\([\s\S]*?sessionManager,[\s\S]*?telegram,/);
+      expect(depsBlock()).toContain('{ awaitInitialInjection: true }');
     });
 
     it('claudeResume + killFresh delegate to the real resume map', () => {
