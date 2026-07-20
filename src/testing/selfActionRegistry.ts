@@ -772,6 +772,37 @@ const stopGateAuthorityProbe: SelfActionController = {
   },
 };
 
+/** Correction pressure can mint operator-facing outcomes only until the shared
+ * open-artifact cap is full; further reviews hold/coalesce and emit nothing. */
+const correctionClassReviewOutcomes: SelfActionController = {
+  id: 'correction-class-review-outcomes',
+  actionVerb: 'class-review-escalate',
+  models: 'src/monitoring/CorrectionClassReview.ts (maxOpenArtifacts + semantic collapse)',
+  modelsPath: 'src/monitoring/CorrectionClassReview.ts',
+  boundK: 50,
+  perTargetBoundK: 1,
+  ticks: 200,
+  tickMs: 1_000,
+  restartPosture: {
+    pressureSurvives: true,
+    restartUnderPressure(f, sink) {
+      return correctionClassReviewOutcomes.makeUnderPressure(f, sink);
+    },
+  },
+  makeUnderPressure(f, sink) {
+    const durableKey = 'correction-class-review-open-artifacts';
+    const seen = new Set<string>((f.durableState.get(durableKey) as string[] | undefined) ?? []);
+    return { tick() {
+      sink.considered += 1;
+      const target = `semantic-class-${sink.considered}`;
+      if (seen.size >= 50 || seen.has(target)) return;
+      seen.add(target);
+      f.durableState.set(durableKey, [...seen]);
+      sink.emit({ verb: 'class-review-escalate', target });
+    } };
+  },
+};
+
 export const SELF_ACTION_CONTROLLERS: SelfActionController[] = [
   evolutionActionExpirySweep,
   spendReconSweep,
@@ -789,4 +820,5 @@ export const SELF_ACTION_CONTROLLERS: SelfActionController[] = [
   duplicateConvergeWrite,
   burnAlertTerminalDelivery,
   stopGateAuthorityProbe,
+  correctionClassReviewOutcomes,
 ];
