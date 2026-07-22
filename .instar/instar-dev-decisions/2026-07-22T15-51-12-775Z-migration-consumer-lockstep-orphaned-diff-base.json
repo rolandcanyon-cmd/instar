@@ -1,0 +1,16 @@
+{
+  "ts": "2026-07-22T15:51:12.775Z",
+  "slug": "migration-consumer-lockstep-orphaned-diff-base",
+  "suggestedTier": 2,
+  "declaredTier": 1,
+  "riskFloor": 2,
+  "riskFloorReasons": [
+    "irreversibility: scripts/lint-migration-consumer-completeness.js touches migration"
+  ],
+  "belowFloor": true,
+  "files": 1,
+  "loc": 13,
+  "causalAutopsy": null,
+  "classClosure": null,
+  "verdict": "pass"
+}
