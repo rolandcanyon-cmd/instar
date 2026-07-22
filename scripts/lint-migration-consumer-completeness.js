@@ -243,7 +243,18 @@ function diffContext(root, args) {
     gitArgs = ['diff', '--name-only', '--diff-filter=ACMR', base, 'HEAD'];
   }
   if (!gitArgs) return { changedFiles: new Set(), baseContracts: undefined };
-  const output = execFileSync('git', gitArgs, { cwd: root, encoding: 'utf8' });
+  let output;
+  try {
+    output = execFileSync('git', gitArgs, { cwd: root, encoding: 'utf8' });
+  } catch (error) {
+    // A force-push (e.g. a daily upstream rebase) can rewrite the branch tip,
+    // orphaning the commit `base` pointed to at push time. `git diff` then
+    // fails with "bad object" even though the checkout itself succeeded.
+    // Treat an unreachable base the same as "no base": skip the diff-driven
+    // check for this run rather than crashing the whole lint.
+    console.error(`lint-migration-consumer-completeness: diff base ${base} unreachable, skipping diff-driven check (${error instanceof Error ? error.message.trim() : String(error)})`);
+    return { changedFiles: new Set(), baseContracts: undefined };
+  }
   let baseContracts = [];
   try {
     const raw = execFileSync('git', ['show', `${base}:${MANIFEST_PATH}`], {
