@@ -111,7 +111,16 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }}
         run: |
-          git cat-file -e "$BASE_SHA^{commit}"
+          # A daily upstream rebase force-pushes main, which can orphan the
+          # commit github.event.before pointed to at push time (same class of
+          # bug as migration-consumer-lockstep-orphaned-diff-base). Treat an
+          # unreachable base the same as "no base": skip the area-ledger diff
+          # for this run rather than crashing the whole job.
+          if ! git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            echo "::warning::area-audit base $BASE_SHA unreachable (likely a force-push rewrote history); skipping area-ledger diff for this run"
+            echo "required=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if git cat-file -e "$BASE_SHA:docs/standards-registry-area-audits.json"; then
             git show "$BASE_SHA:docs/standards-registry-area-audits.json" > "$RUNNER_TEMP/standards-area-audits-base.json"
             echo "required=1" >> "$GITHUB_OUTPUT"
