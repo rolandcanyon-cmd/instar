@@ -55,7 +55,17 @@ function changeContext(env: NodeJS.ProcessEnv = process.env, root = ROOT): { bas
   const head = env.AUDIT_CHANGE_HEAD_SHA;
   if (!kind && !baseInput && !head) return null;
   if (!kind || !baseInput || !head) throw new Error('audit change context is partial; kind/base/head are all required');
-  execFileSync('git', ['cat-file', '-e', `${baseInput}^{commit}`], { cwd: root, stdio: 'ignore' });
+  try {
+    execFileSync('git', ['cat-file', '-e', `${baseInput}^{commit}`], { cwd: root, stdio: 'ignore' });
+  } catch {
+    // A force-push (e.g. a daily upstream rebase) can rewrite the branch tip,
+    // orphaning the commit `github.event.before` pointed to at push time —
+    // same failure class already handled in diffContext() (see
+    // lint-migration-consumer-completeness.js). Treat an unreachable base the
+    // same as "no change context": skip the diff-driven check for this run.
+    console.error(`audit-convergence-reports: change base ${baseInput} unreachable, skipping diff-driven check`);
+    return null;
+  }
   execFileSync('git', ['cat-file', '-e', `${head}^{commit}`], { cwd: root, stdio: 'ignore' });
   const base = kind === 'pull_request'
     ? execFileSync('git', ['merge-base', baseInput, head], { cwd: root, encoding: 'utf8' }).trim()
