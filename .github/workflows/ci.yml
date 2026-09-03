@@ -80,14 +80,6 @@ jobs:
   standards-coverage:
     name: Standards Enforcement Coverage
     runs-on: ubuntu-latest
-    # Canonical-repo only. This guard measures against a PROTECTED MERGE BASE on
-    # canonical main; a fork's CI checkout cannot resolve that base, so the check
-    # fails closed ("protected merge base unavailable" / "zero-of-zero is never
-    # clean") on every push regardless of the change under test. That is a false
-    # red, not a finding — it made the fork's CI unusable as a signal from
-    # 2026-08-15 onward. The ratchet keeps its full authority upstream, where the
-    # base resolves; downstream it is skipped rather than silently weakened.
-    if: github.repository == 'JKHeadley/instar'
     # Least privilege, made EXPLICIT rather than inherited (second-pass finding 2):
     # path B calls GET /commits/{sha}/pulls, which needs pull-requests:read. With no
     # permissions block the job runs on the repository's DEFAULT workflow permission
