@@ -28,7 +28,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           # RELEASE_TOKEN is a PAT that can bypass branch protection for version bump commits.
-          token: ${{ secrets.RELEASE_TOKEN }}
+          # Falls back to GITHUB_TOKEN but that will fail if branch protection is enabled.
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
 
       - uses: actions/setup-node@v4
         with:
